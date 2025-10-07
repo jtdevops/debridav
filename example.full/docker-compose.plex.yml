@@ -1,0 +1,41 @@
+---
+services:
+  plex:
+    image: ghcr.io/linuxserver/plex
+    container_name: plex
+    restart: unless-stopped
+    # network_mode: host # Uncomment and define ports below
+    ports:
+      - 32400:32400/tcp #  (access to the Plex Media Server) [required]
+      # - 8324:8324/tcp   # controlling Plex for Roku via Plex Companion
+      # - 32469:32469/tcp # access to the Plex DLNA Server
+      # - 1900:1900/udp   # access to the Plex DLNA Server
+      # - 32410:32410/udp # current GDM network discovery
+      # - 32412:32412/udp # current GDM network discovery
+      # - 32413:32413/udp # current GDM network discovery
+      # - 32414:32414/udp # current GDM network discovery
+    environment:
+      - TZ=${TZ}
+      - PUID=${PUID}
+      - PGID=${PGID}
+      # - PLEX_CLAIM= # Uncomment this to setup Plex server, get your claim code from here - https://www.plex.tv/claim/
+      # Uncomment the lines below to use Nvidia GPUs for Hardware Transcoding
+      # - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_DRIVER_CAPABILITIES=all
+    # depends_on:
+    #   - rclone
+    volumes:
+      - ./config:/config
+      - /etc/localtime:/etc/localtime:ro # Sync the container's time to the host's time
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    # devices:
+    #   - /dev/dvb:/dev/dvb # Uncomment this device for typical USB TV Tuner cards
+    #   - /dev/dri:/dev/dri # Uncomment this to use intel GPUs for Hardware Transcoding
+    # Uncomment the lines below to use Nvidia GPUs for Hardware Transcoding
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
