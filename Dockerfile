@@ -20,7 +20,7 @@ FROM openjdk:21-jdk-slim
 
 WORKDIR /app
 
-RUN apt-get update
+RUN apt update && apt install curl -y
 
 RUN mkdir app
 # Copy the built JAR from the build stage
