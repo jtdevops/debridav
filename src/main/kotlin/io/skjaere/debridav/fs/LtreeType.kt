@@ -18,6 +18,7 @@ class LtreeType : UserType<String?> {
         return Types.OTHER
     }
 
+    @Suppress("UNCHECKED_CAST")
     override fun returnedClass(): Class<String?>? {
         return String::class.java as Class<String?>?
     }
@@ -53,7 +54,6 @@ class LtreeType : UserType<String?> {
     @Throws(HibernateException::class)
     override fun deepCopy(s: String?): String? {
         if (s == null) return null
-        check(s is String) { "Expected String, but got: " + s.javaClass }
         return s
     }
 
