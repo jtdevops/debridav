@@ -36,13 +36,17 @@ data class DebridavConfigurationProperties(
     val streamingWaitAfterNetworkError: Duration = Duration.ofMillis(100),
     val streamingWaitAfterProviderError: Duration = Duration.ofMinutes(1),
     val streamingWaitAfterClientError: Duration = Duration.ofMillis(100),
+    val enableChunkCaching: Boolean = true,
+    val enableInMemoryBuffering: Boolean = true,
 ) {
     init {
         require(debridClients.isNotEmpty()) {
             "No debrid providers defined"
         }
-        require((cacheMaxSizeGb * ONE_K * ONE_K) > localEntityMaxSizeMb) {
-            "debridav.cache-max-size-gb must be greater than debridav.chunk-caching-size-threshold in Gb"
+        if (enableChunkCaching) {
+            require((cacheMaxSizeGb * ONE_K * ONE_K) > localEntityMaxSizeMb) {
+                "debridav.cache-max-size-gb must be greater than debridav.chunk-caching-size-threshold in Gb"
+            }
         }
     }
 
