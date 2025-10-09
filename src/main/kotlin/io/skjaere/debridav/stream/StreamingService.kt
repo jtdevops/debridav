@@ -324,8 +324,11 @@ class StreamingService(
         outputStream: OutputStream,
         remotelyCachedEntity: RemotelyCachedEntity
     ) {
-        var shouldCache = true
-        var bytesToCache = mutableListOf<BytesToCache>()
+        val shouldBufferInMemory = debridavConfigProperties.enableInMemoryBuffering
+        val shouldCacheToDatabase = debridavConfigProperties.enableChunkCaching
+        
+        // Only initialize cache variables if both buffering and caching are enabled
+        var bytesToCache = if (shouldBufferInMemory && shouldCacheToDatabase) mutableListOf<BytesToCache>() else null
         var bytesToCacheSize = 0L
         var bytesSent = 0L
         val gaugeContext = OutputStreamingContext(
@@ -334,13 +337,13 @@ class StreamingService(
         activeOutputStream.add(gaugeContext)
         try {
             byteArrayChannel.consumeEach { context ->
-                if (context.source == ByteArraySource.REMOTE) {
-                    if (shouldCache) {
-                        bytesToCacheSize += context.byteArray.size
-                        if (bytesToCacheSize > debridavConfigProperties.chunkCachingSizeThreshold) {
-                            shouldCache = false
-                            bytesToCache = mutableListOf()
-                        } else bytesToCache.add(
+                if (shouldBufferInMemory && bytesToCache != null && context.source == ByteArraySource.REMOTE) {
+                    bytesToCacheSize += context.byteArray.size
+                    if (bytesToCacheSize > debridavConfigProperties.chunkCachingSizeThreshold) {
+                        // Stop buffering if over threshold, but keep streaming
+                        bytesToCache = null
+                    } else {
+                        bytesToCache?.add(
                             BytesToCache(
                                 context.byteArray, context.range.start, context.range.finish
                             )
@@ -362,7 +365,9 @@ class StreamingService(
         } finally {
             gaugeContext.outputStream.close()
             activeOutputStream.removeStream(gaugeContext)
-            if (bytesToCache.isNotEmpty()) {
+            
+            // Only save to database if we have bytes to cache
+            if (bytesToCache != null && bytesToCache.isNotEmpty()) {
                 fileChunkCachingService.cacheBytes(remotelyCachedEntity, bytesToCache)
             }
         }
