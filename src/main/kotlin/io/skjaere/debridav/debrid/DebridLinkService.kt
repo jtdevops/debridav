@@ -44,10 +44,9 @@ import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import kotlinx.coroutines.launch
 
 const val RETRIES = 3L
-
-private const val CACHE_GRACE_PERIOD_SECONDS = 5L
 
 private const val CACHE_SIZE = 100L
 
@@ -67,7 +66,7 @@ class DebridLinkService(
     data class LinkLivenessCacheKey(val provider: String, val cachedFile: CachedFile)
 
     val isLinkAliveCache: LoadingCache<LinkLivenessCacheKey, Boolean> = Caffeine.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(CACHE_GRACE_PERIOD_SECONDS))
+        .expireAfterWrite(debridavConfigurationProperties.linkLivenessCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<LinkLivenessCacheKey, Boolean> { key ->
             runBlocking {
@@ -78,7 +77,7 @@ class DebridLinkService(
             }
         })
     val cachedFileCache: LoadingCache<RemotelyCachedEntity, CachedFile?> = Caffeine.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(CACHE_GRACE_PERIOD_SECONDS))
+        .expireAfterWrite(debridavConfigurationProperties.cachedFileCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<RemotelyCachedEntity, CachedFile?> { entity ->
             runBlocking {
@@ -345,4 +344,38 @@ class DebridLinkService(
     fun List<DebridCachedContentClient>.getClient(debridProvider: DebridProvider): DebridCachedContentClient =
         this.first { it.getProvider() == debridProvider }
 
+    suspend fun refreshLinksProactively(file: RemotelyCachedEntity) {
+        val debridFileContents = file.contents ?: return
+
+        debridFileContents.debridLinks.forEach { debridLink ->
+            if (debridLink is CachedFile && isLinkAboutToExpire(debridLink)) {
+                // Refresh link proactively in background
+                launch {
+                    try {
+                        val freshLink = getFreshDebridLink(debridFileContents, debridClients.getClient(debridLink.provider!!))
+                        if (freshLink is CachedFile) {
+                            updateContentsOfDebridFile(file, debridFileContents, freshLink)
+                            logger.info("Proactively refreshed link for ${file.name} from ${debridLink.provider}")
+                        }
+                    } catch (e: Exception) {
+                        logger.warn("Failed to proactively refresh link for ${file.name}: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isLinkAboutToExpire(debridFile: CachedFile): Boolean {
+        val timeUntilExpiry = Duration.between(Instant.now(),
+            Instant.ofEpochMilli(debridFile.lastChecked!!).plus(debridavConfigurationProperties.cachedFileCacheDuration))
+        return timeUntilExpiry.toMinutes() < 5 // Refresh if less than 5 minutes until expiry
+    }
+
+    suspend fun preWarmLinks(file: RemotelyCachedEntity) {
+        if (cachedFileCache.getIfPresent(file) == null) {
+            // Pre-warm the cache by getting the cached file
+            getCachedFile(file)
+            logger.info("Pre-warmed links for ${file.name}")
+        }
+    }
 }

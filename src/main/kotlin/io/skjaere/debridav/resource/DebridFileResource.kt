@@ -75,6 +75,9 @@ class DebridFileResource(
     ) {
         runBlocking {
             out.use { outputStream ->
+                // Proactively refresh links before streaming
+                debridService.refreshLinksProactively(file)
+
                 debridService.getCachedFileCached(file)
                     ?.let { cachedFile ->
                         logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
