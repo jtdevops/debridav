@@ -43,6 +43,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
+import kotlinx.io.IOException
 
 class DebridLinkServiceTest {
     private val premiumizeClient = mockk<PremiumizeClient>()

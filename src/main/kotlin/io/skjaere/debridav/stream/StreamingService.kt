@@ -83,7 +83,7 @@ class StreamingService(
             logger.info("Link not found, attempting immediate retry for ${debridLink.path}")
             try {
                 val freshLink = debridLinkService.getCachedFile(remotelyCachedEntity)
-                if (freshLink != null && freshLink is io.skjaere.debridav.fs.CachedFile) {
+                if (freshLink != null) {
                     // Retry streaming with fresh link
                     streamBytes(remotelyCachedEntity, appliedRange, freshLink, outputStream)
                     StreamResult.OK
