@@ -45,6 +45,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
 
 const val RETRIES = 3L
 
@@ -350,15 +351,17 @@ class DebridLinkService(
         debridFileContents.debridLinks.forEach { debridLink ->
             if (debridLink is CachedFile && isLinkAboutToExpire(debridLink)) {
                 // Refresh link proactively in background
-                launch {
-                    try {
-                        val freshLink = getFreshDebridLink(debridFileContents, debridClients.getClient(debridLink.provider!!))
-                        if (freshLink is CachedFile) {
-                            updateContentsOfDebridFile(file, debridFileContents, freshLink)
-                            logger.info("Proactively refreshed link for ${file.name} from ${debridLink.provider}")
+                coroutineScope {
+                    launch {
+                        try {
+                            val freshLink = getFreshDebridLink(debridFileContents, debridClients.getClient(debridLink.provider!!))
+                            if (freshLink is CachedFile) {
+                                updateContentsOfDebridFile(file, debridFileContents, freshLink)
+                                logger.info("Proactively refreshed link for ${file.name} from ${debridLink.provider}")
+                            }
+                        } catch (e: Exception) {
+                            logger.warn("Failed to proactively refresh link for ${file.name}: ${e.message}")
                         }
-                    } catch (e: Exception) {
-                        logger.warn("Failed to proactively refresh link for ${file.name}: ${e.message}")
                     }
                 }
             }

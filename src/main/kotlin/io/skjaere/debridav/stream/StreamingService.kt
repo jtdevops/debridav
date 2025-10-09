@@ -50,6 +50,7 @@ class StreamingService(
     private val fileChunkCachingService: FileChunkCachingService,
     private val debridavConfigProperties: DebridavConfigurationProperties,
     private val streamPlanningService: StreamPlanningService,
+    private val debridLinkService: DebridLinkService,
     prometheusRegistry: PrometheusRegistry
 ) {
     private val logger = LoggerFactory.getLogger(StreamingService::class.java)
@@ -73,17 +74,16 @@ class StreamingService(
         outputStream: OutputStream,
         remotelyCachedEntity: RemotelyCachedEntity,
     ): StreamResult = coroutineScope {
+        val appliedRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
         val result = try {
-            val appliedRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
             streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
             StreamResult.OK
         } catch (e: LinkNotFoundException) {
             // Immediate retry with fresh link
             logger.info("Link not found, attempting immediate retry for ${debridLink.path}")
             try {
-                val debridLinkService = DebridLinkService(debridClients)
-                val freshLink = debridLinkService.getFreshDebridLinkForStreaming(remotelyCachedEntity, debridLink)
-                if (freshLink != null) {
+                val freshLink = debridLinkService.getCachedFile(remotelyCachedEntity)
+                if (freshLink != null && freshLink is io.skjaere.debridav.fs.CachedFile) {
                     // Retry streaming with fresh link
                     streamBytes(remotelyCachedEntity, appliedRange, freshLink, outputStream)
                     StreamResult.OK

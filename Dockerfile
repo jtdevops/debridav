@@ -13,7 +13,7 @@ COPY gradle.properties .
 COPY src src
 
 # Build the application
-RUN ./gradlew build -x test
+RUN ./gradlew bootJar
 
 # Runtime stage
 FROM openjdk:21-jdk-slim
@@ -24,7 +24,7 @@ RUN apt-get update
 
 RUN mkdir app
 # Copy the built JAR from the build stage
-COPY --from=build /app/build/libs/debridav-0.1.0.jar app/app.jar
+COPY --from=build /app/build/libs/debridav-*.jar app/app.jar
 
 EXPOSE 8080
 
