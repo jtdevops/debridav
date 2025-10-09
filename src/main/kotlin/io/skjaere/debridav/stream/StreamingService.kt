@@ -209,6 +209,9 @@ class StreamingService(
                             streamingContext, byteRangeInfo, source, started
                         )
                     }
+                } catch (e: CancellationException) {
+                    close(e)
+                    throw e
                 } catch (e: EOFException) {
                     // Re-throw EOFException so it can be handled by streamContents for link refresh
                     throw e
