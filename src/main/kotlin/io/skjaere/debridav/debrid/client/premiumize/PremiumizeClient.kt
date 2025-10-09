@@ -41,6 +41,8 @@ class PremiumizeClient(
     ) {
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
 
+    private val directDlResponseCache: MutableMap<String, SuccessfulDirectDownloadResponse> = mutableMapOf()
+
     init {
         require(premiumizeConfiguration.apiKey.isNotEmpty()) {
             "Missing API key for Premiumize"
@@ -49,6 +51,11 @@ class PremiumizeClient(
 
     @Suppress("TooGenericExceptionCaught")
     override suspend fun isCached(magnet: TorrentMagnet): Boolean {
+        val cacheKey = magnet.magnet
+        if (directDlResponseCache.containsKey(cacheKey)) {
+            return true
+        }
+
         val resp = httpClient
             .get(
                 premiumizeConfiguration.baseUrl +
@@ -60,7 +67,6 @@ class PremiumizeClient(
         return resp
             .body<CacheCheckResponse>()
             .response.first()
-
     }
 
     override suspend fun getStreamableLink(magnet: TorrentMagnet, cachedFile: CachedFile): String? {
@@ -80,6 +86,9 @@ class PremiumizeClient(
     }
 
     private suspend fun getDirectDlResponse(magnet: TorrentMagnet): SuccessfulDirectDownloadResponse {
+        val cacheKey = magnet.magnet
+        directDlResponseCache[cacheKey]?.let { return it }
+
         logger.info("getting cached files from premiumize")
         val resp =
             httpClient.post(
@@ -96,7 +105,9 @@ class PremiumizeClient(
         if (resp.status != HttpStatusCode.OK) {
             throwDebridProviderException(resp)
         }
-        return resp.body<SuccessfulDirectDownloadResponse>()
+        val response = resp.body<SuccessfulDirectDownloadResponse>()
+        directDlResponseCache[cacheKey] = response
+        return response
     }
 
     private fun getCachedFilesFromResponse(resp: SuccessfulDirectDownloadResponse) =

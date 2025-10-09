@@ -12,6 +12,7 @@ import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
+import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import kotlinx.coroutines.CancellationException
@@ -76,8 +77,23 @@ class StreamingService(
             val appliedRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
             streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
             StreamResult.OK
-        } catch (_: LinkNotFoundException) {
-            StreamResult.DEAD_LINK
+        } catch (e: LinkNotFoundException) {
+            // Immediate retry with fresh link
+            logger.info("Link not found, attempting immediate retry for ${debridLink.path}")
+            try {
+                val debridLinkService = DebridLinkService(debridClients)
+                val freshLink = debridLinkService.getFreshDebridLinkForStreaming(remotelyCachedEntity, debridLink)
+                if (freshLink != null) {
+                    // Retry streaming with fresh link
+                    streamBytes(remotelyCachedEntity, appliedRange, freshLink, outputStream)
+                    StreamResult.OK
+                } else {
+                    StreamResult.DEAD_LINK
+                }
+            } catch (retryException: Exception) {
+                logger.warn("Immediate retry failed for ${debridLink.path}: ${retryException.message}")
+                StreamResult.DEAD_LINK
+            }
         } catch (_: DebridProviderException) {
             StreamResult.PROVIDER_ERROR
         } catch (_: StreamToClientException) {

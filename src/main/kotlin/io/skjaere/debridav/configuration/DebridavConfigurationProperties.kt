@@ -29,6 +29,13 @@ data class DebridavConfigurationProperties(
     val defaultCategories: List<String>,
     val localEntityMaxSizeMb: Int,
     val cacheMaxSizeGb: Double,
+    val linkLivenessCacheDuration: Duration = Duration.ofMinutes(15),
+    val cachedFileCacheDuration: Duration = Duration.ofMinutes(30),
+    val streamingDelayBetweenRetries: Duration = Duration.ofMillis(50),
+    val streamingRetriesOnProviderError: Long = 2,
+    val streamingWaitAfterNetworkError: Duration = Duration.ofMillis(100),
+    val streamingWaitAfterProviderError: Duration = Duration.ofMinutes(1),
+    val streamingWaitAfterClientError: Duration = Duration.ofMillis(100),
 ) {
     init {
         require(debridClients.isNotEmpty()) {
