@@ -94,6 +94,22 @@ class StreamingService(
                 logger.warn("Immediate retry failed for ${debridLink.path}: ${retryException.message}")
                 StreamResult.DEAD_LINK
             }
+        } catch (e: EOFException) {
+            // Handle expired content by refreshing the link
+            logger.info("EOF encountered (likely expired content), attempting immediate retry for ${debridLink.path}")
+            try {
+                val freshLink = debridLinkService.getCachedFile(remotelyCachedEntity)
+                if (freshLink != null) {
+                    // Retry streaming with fresh link
+                    streamBytes(remotelyCachedEntity, appliedRange, freshLink, outputStream)
+                    StreamResult.OK
+                } else {
+                    StreamResult.DEAD_LINK
+                }
+            } catch (retryException: Exception) {
+                logger.warn("Immediate retry failed for ${debridLink.path}: ${retryException.message}")
+                StreamResult.DEAD_LINK
+            }
         } catch (_: DebridProviderException) {
             StreamResult.PROVIDER_ERROR
         } catch (_: StreamToClientException) {
