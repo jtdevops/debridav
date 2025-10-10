@@ -347,7 +347,10 @@ class StreamingService(
         val shouldCacheToDatabase = debridavConfigProperties.enableChunkCaching
         
         // Only initialize cache variables if both buffering and caching are enabled
-        var bytesToCache = if (shouldBufferInMemory && shouldCacheToDatabase) mutableListOf<BytesToCache>() else null
+        // AND byte range request chunking is not disabled (to prevent wasted caching)
+        var bytesToCache = if (shouldBufferInMemory && shouldCacheToDatabase && 
+                              !debridavConfigProperties.disableByteRangeRequestChunking) 
+            mutableListOf<BytesToCache>() else null
         var bytesToCacheSize = 0L
         var bytesSent = 0L
         val gaugeContext = OutputStreamingContext(
@@ -385,8 +388,9 @@ class StreamingService(
             gaugeContext.outputStream.close()
             activeOutputStream.removeStream(gaugeContext)
             
-            // Only save to database if we have bytes to cache
-            if (bytesToCache != null && bytesToCache.isNotEmpty()) {
+            // Only save to database if we have bytes to cache AND byte range request chunking is not disabled
+            if (bytesToCache != null && bytesToCache.isNotEmpty() && 
+                !debridavConfigProperties.disableByteRangeRequestChunking) {
                 fileChunkCachingService.cacheBytes(remotelyCachedEntity, bytesToCache)
             }
         }
