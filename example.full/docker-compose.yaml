@@ -60,6 +60,9 @@ services:
       # Cache durations
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
       - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
+      
+      # Byte range chunking control - set to true to prevent aggressive chunking and caching
+      - DEBRIDAV_DISABLE_BYTE_RANGE_REQUEST_CHUNKING=true
     ports:
       - ${DEBRIDAV_PORT}:8080
       - "8000:8000"
