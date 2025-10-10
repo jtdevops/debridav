@@ -38,6 +38,7 @@ data class DebridavConfigurationProperties(
     val streamingWaitAfterClientError: Duration = Duration.ofMillis(100),
     val enableChunkCaching: Boolean = true,
     val enableInMemoryBuffering: Boolean = true,
+    val disableByteRangeRequestChunking: Boolean = false,
 ) {
     init {
         require(debridClients.isNotEmpty()) {

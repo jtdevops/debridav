@@ -42,6 +42,7 @@ class DefaultStreamableLinkPreparer(
         return rateLimiter.executeSuspendFunction {
             httpClient.prepareGet(debridLink.link!!) {
                 headers {
+                    // Always handle byte range requests - the chunking control is internal
                     range?.let { range ->
                         getByteRange(range, debridLink.size!!)?.let { byteRange ->
                             logger.info(
@@ -54,9 +55,11 @@ class DefaultStreamableLinkPreparer(
                                 append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
                             }
                         }
-                        userAgent?.let {
-                            append(HttpHeaders.UserAgent, it)
-                        }
+                    }
+
+                    // Use user agent from constructor if provided
+                    userAgent?.let {
+                        append(HttpHeaders.UserAgent, it)
                     }
                 }
                 timeout {
