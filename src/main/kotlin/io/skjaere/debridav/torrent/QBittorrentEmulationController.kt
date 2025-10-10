@@ -78,8 +78,9 @@ class QBittorrentEmulationController(
 
     @GetMapping("/api/v2/torrents/info")
     fun torrentsInfo(requestParams: TorrentsInfoRequestParams): List<TorrentsInfoResponse> {
+        val category = requestParams.category ?: ""
         return torrentService
-            .getTorrentsByCategory(requestParams.category!!)
+            .getTorrentsByCategory(category)
             //.filter { it.files?.firstOrNull()?.originalPath != null }
             .map {
                 TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath)

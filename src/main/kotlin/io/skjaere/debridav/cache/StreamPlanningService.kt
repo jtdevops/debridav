@@ -16,7 +16,7 @@ class StreamPlanningService(
 
         // If byte range request chunking is disabled, use the exact user-requested range
         // without breaking it into chunks for caching optimization
-        if (debridavConfigurationProperties.disableByteRangeRequestChunking) {
+        if (debridavConfigurationProperties.disableByteRangeRequestChunking == true) {
             sequence.sources.add(
                 StreamSource.Remote(range, cachedFile)
             )
