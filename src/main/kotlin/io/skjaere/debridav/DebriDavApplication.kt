@@ -51,6 +51,12 @@ class DebriDavApplication : SpringBootServletInitializer() {
             logger.info("Torrent Lifetime: {}", debridavConfigurationProperties.torrentLifetime)
             logger.info("Default Categories: {}", debridavConfigurationProperties.defaultCategories)
             
+            // Byte range chunking control
+            logger.info(
+                "Disable Byte Range Request Chunking: {}", 
+                debridavConfigurationProperties.disableByteRangeRequestChunking
+            )
+            
             logger.info("=== End Configuration Properties ===")
         }
     }
