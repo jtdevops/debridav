@@ -2,15 +2,40 @@ package io.skjaere.debridav.test
 
 import io.skjaere.debridav.cache.FileChunk
 import io.skjaere.debridav.cache.StreamPlanningService
+import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.fs.Blob
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import kotlin.test.assertEquals
 import org.hibernate.engine.jdbc.BlobProxy
 import org.junit.jupiter.api.Test
+import java.time.Duration
 
 class FileCachingServiceTest {
-    private val underTest = StreamPlanningService()
+    private val mockConfig = DebridavConfigurationProperties(
+        rootPath = "/test",
+        downloadPath = "/test/downloads",
+        mountPath = "/test/mount",
+        debridClients = listOf(DebridProvider.REAL_DEBRID),
+        waitAfterMissing = Duration.ofMinutes(5),
+        waitAfterProviderError = Duration.ofMinutes(1),
+        waitAfterNetworkError = Duration.ofSeconds(30),
+        waitAfterClientError = Duration.ofMinutes(1),
+        retriesOnProviderError = 3,
+        delayBetweenRetries = Duration.ofSeconds(1),
+        connectTimeoutMilliseconds = 30000,
+        readTimeoutMilliseconds = 30000,
+        shouldDeleteNonWorkingFiles = false,
+        torrentLifetime = Duration.ofDays(7),
+        enableFileImportOnStartup = false,
+        chunkCachingSizeThreshold = 10485760,
+        chunkCachingGracePeriod = Duration.ofHours(24),
+        defaultCategories = emptyList(),
+        localEntityMaxSizeMb = 100,
+        cacheMaxSizeGb = 10.0
+    )
+    private val underTest = StreamPlanningService(mockConfig)
 
     @Test
     fun `that plan generation works`() {

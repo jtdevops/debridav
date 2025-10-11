@@ -21,6 +21,7 @@ import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.fs.UnknownDebridLinkError
 import io.skjaere.debridav.stream.StreamResult
 import io.skjaere.debridav.stream.StreamingService
+import io.skjaere.debridav.stream.HttpRequestInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.runBlocking
@@ -28,6 +29,9 @@ import org.slf4j.LoggerFactory
 import java.io.OutputStream
 import java.time.Instant
 import java.util.*
+import jakarta.servlet.http.HttpServletRequest
+import org.springframework.web.context.request.RequestContextHolder
+import org.springframework.web.context.request.ServletRequestAttributes
 
 class DebridFileResource(
     val file: RemotelyCachedEntity,
@@ -72,40 +76,46 @@ class DebridFileResource(
         range: Range?,
         params: MutableMap<String, String>?,
         contentType: String?
-    ) {
-        runBlocking {
-            out.use { outputStream ->
-                // Proactively refresh links before streaming
-                debridService.refreshLinksProactively(file)
+    ) = runBlocking<Unit> {
+        out.use { outputStream ->
+            // Track incoming byte range request and HTTP headers
+            val httpRequestInfo = if (debridavConfigurationProperties.enableStreamingDownloadTracking) {
+                extractHttpRequestInfo(range, file)
+            } else {
+                HttpRequestInfo()
+            }
+            
+            // Proactively refresh links before streaming
+            debridService.refreshLinksProactively(file)
 
-                debridService.getCachedFileCached(file)
-                    ?.let { cachedFile ->
-                        logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
-                        val result = try {
-                            streamingService.streamContents(
-                                cachedFile,
-                                range,
-                                outputStream,
-                                file
-                            )
-                        } catch (_: CancellationException) {
-                            this.coroutineContext.cancelChildren()
-                            StreamResult.OK
-                        }
-                        if (result != StreamResult.OK) {
-                            val updatedDebridLink = mapResultToDebridFile(result, cachedFile)
-                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
-                            fileService.saveDbEntity(file)
-                        }
-                    } ?: run {
-                    if (file.isNoLongerCached(debridavConfigurationProperties.debridClients)
-                        && debridavConfigurationProperties.shouldDeleteNonWorkingFiles
-                    ) {
-                        fileService.handleNoLongerCachedFile(file)
+            debridService.getCachedFileCached(file)
+                ?.let { cachedFile ->
+                    logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
+                    val result = try {
+                        streamingService.streamContents(
+                            cachedFile,
+                            range,
+                            outputStream,
+                            file,
+                            httpRequestInfo
+                        )
+                    } catch (_: CancellationException) {
+                        this.coroutineContext.cancelChildren()
+                        StreamResult.OK
                     }
-
-                    logger.info("No working link found for ${debridFileContents.originalPath}")
+                    if (result != StreamResult.OK) {
+                        val updatedDebridLink = mapResultToDebridFile(result, cachedFile)
+                        file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                        fileService.saveDbEntity(file)
+                    }
+                } ?: run {
+                if (file.isNoLongerCached(debridavConfigurationProperties.debridClients)
+                    && debridavConfigurationProperties.shouldDeleteNonWorkingFiles
+                ) {
+                    fileService.handleNoLongerCachedFile(file)
                 }
+
+                logger.info("No working link found for ${debridFileContents.originalPath}")
             }
         }
     }
@@ -160,5 +170,33 @@ class DebridFileResource(
 
     override fun getCreateDate(): Date {
         return modifiedDate
+    }
+
+    private fun extractHttpRequestInfo(range: Range?, file: RemotelyCachedEntity): HttpRequestInfo {
+        val httpHeaders = mutableMapOf<String, String>()
+        var sourceIpAddress: String? = null
+
+        val requestAttributes = RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
+        requestAttributes?.request?.let { httpRequest ->
+            // Extract HTTP headers as Map
+            httpRequest.headerNames?.toList()?.forEach { headerName ->
+                httpRequest.getHeaders(headerName)?.toList()?.forEach { headerValue ->
+                    httpHeaders[headerName] = headerValue
+                }
+            }
+
+            // Get source IP address
+            sourceIpAddress = httpRequest.remoteAddr
+                ?: httpRequest.getHeader("X-Forwarded-For")?.split(",")?.first()?.trim()
+                ?: httpRequest.getHeader("X-Real-IP")
+                ?: "unknown"
+        }
+
+        val requestedSize = if (range != null) (range.finish - range.start + 1) else file.contents?.size ?: 0L
+
+        logger.info("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} bytes, source_ip={}, headers_count={}",
+            file.name ?: "unknown", range?.start, range?.finish, requestedSize, sourceIpAddress, httpHeaders.size)
+
+        return HttpRequestInfo(httpHeaders, sourceIpAddress)
     }
 }
