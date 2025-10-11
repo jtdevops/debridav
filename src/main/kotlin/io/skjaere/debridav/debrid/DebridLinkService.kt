@@ -50,6 +50,7 @@ import kotlinx.coroutines.coroutineScope
 const val RETRIES = 3L
 
 private const val CACHE_SIZE = 100L
+private const val LINK_EXPIRY_WARNING_MINUTES = 5L
 
 @Service
 @Suppress("LongParameterList")
@@ -345,21 +346,24 @@ class DebridLinkService(
     fun List<DebridCachedContentClient>.getClient(debridProvider: DebridProvider): DebridCachedContentClient =
         this.first { it.getProvider() == debridProvider }
 
+    @Suppress("TooGenericExceptionCaught")
     suspend fun refreshLinksProactively(file: RemotelyCachedEntity) {
         val debridFileContents = file.contents ?: return
 
         debridFileContents.debridLinks.forEach { debridLink ->
             if (debridLink is CachedFile && isLinkAboutToExpire(debridLink)) {
-                // Refresh link proactively in background
                 coroutineScope {
                     launch {
                         try {
-                            val freshLink = getFreshDebridLink(debridFileContents, debridClients.getClient(debridLink.provider!!))
+                            val client = debridClients.getClient(debridLink.provider!!)
+                            val freshLink = getFreshDebridLink(debridFileContents, client)
                             if (freshLink is CachedFile) {
                                 updateContentsOfDebridFile(file, debridFileContents, freshLink)
-                                logger.info("Proactively refreshed link for ${file.name} from ${debridLink.provider}")
+                                logger.info(
+                                    "Proactively refreshed link for ${file.name} from ${debridLink.provider}"
+                                )
                             }
-                        } catch (e: Exception) {
+                        } catch (e: RuntimeException) {
                             logger.warn("Failed to proactively refresh link for ${file.name}: ${e.message}")
                         }
                     }
@@ -369,9 +373,10 @@ class DebridLinkService(
     }
 
     private fun isLinkAboutToExpire(debridFile: CachedFile): Boolean {
-        val timeUntilExpiry = Duration.between(Instant.now(),
-            Instant.ofEpochMilli(debridFile.lastChecked!!).plus(debridavConfigurationProperties.cachedFileCacheDuration))
-        return timeUntilExpiry.toMinutes() < 5 // Refresh if less than 5 minutes until expiry
+        val expiryTime = Instant.ofEpochMilli(debridFile.lastChecked!!)
+            .plus(debridavConfigurationProperties.cachedFileCacheDuration)
+        val timeUntilExpiry = Duration.between(Instant.now(), expiryTime)
+        return timeUntilExpiry.toMinutes() < LINK_EXPIRY_WARNING_MINUTES
     }
 
     suspend fun preWarmLinks(file: RemotelyCachedEntity) {
