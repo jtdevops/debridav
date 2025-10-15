@@ -11,6 +11,8 @@ import io.skjaere.debridav.cache.BytesToCache
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import org.apache.commons.io.FileUtils
+import java.net.InetAddress
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
@@ -62,8 +64,21 @@ data class DownloadTrackingContext(
 
 data class HttpRequestInfo(
     val headers: Map<String, String> = emptyMap(),
-    val sourceIpAddress: String? = null
-)
+    val sourceIpAddress: String? = null,
+    val sourceHostname: String? = null
+) {
+    val sourceInfo: String? get() {
+        val ip = sourceIpAddress ?: return null
+        val hostname = sourceHostname ?: run {
+            try {
+                InetAddress.getByName(ip).hostName
+            } catch (e: Exception) {
+                null
+            }
+        }
+        return if (hostname != null && hostname != ip) "$ip/$hostname" else ip
+    }
+}
 
 @Service
 class StreamingService(
@@ -218,10 +233,11 @@ class StreamingService(
 
             val duration = Duration.between(context.downloadStartTime, context.downloadEndTime)
             logger.info(
-                "DOWNLOAD_COMPLETED: file={}, range={}-{}, requested_size={} bytes, " +
-                        "downloaded={} bytes, status={}, duration={}ms",
+                "DOWNLOAD_COMPLETED: file={}, range={}-{}, requested_size={} ({}), " +
+                        "downloaded={} ({}), status={}, duration={}ms",
                 context.fileName, context.requestedRange?.start, context.requestedRange?.finish,
-                context.requestedSize, context.bytesDownloaded.get(),
+                FileUtils.byteCountToDisplaySize(context.requestedSize), context.requestedSize,
+                FileUtils.byteCountToDisplaySize(context.bytesDownloaded.get()), context.bytesDownloaded.get(),
                 context.completionStatus, duration.toMillis()
             )
 

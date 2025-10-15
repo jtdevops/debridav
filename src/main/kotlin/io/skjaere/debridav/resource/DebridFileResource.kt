@@ -6,6 +6,8 @@ import io.milton.http.Request
 import io.milton.resource.DeletableResource
 import io.milton.resource.GetableResource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import org.apache.commons.io.FileUtils
+import java.net.InetAddress
 import io.skjaere.debridav.debrid.DebridClient
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
@@ -175,6 +177,7 @@ class DebridFileResource(
     private fun extractHttpRequestInfo(range: Range?, file: RemotelyCachedEntity): HttpRequestInfo {
         val httpHeaders = mutableMapOf<String, String>()
         var sourceIpAddress: String? = null
+        var sourceHostname: String? = null
 
         val requestAttributes = RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
         requestAttributes?.request?.let { httpRequest ->
@@ -190,13 +193,28 @@ class DebridFileResource(
                 ?: httpRequest.getHeader("X-Forwarded-For")?.split(",")?.first()?.trim()
                 ?: httpRequest.getHeader("X-Real-IP")
                 ?: "unknown"
+
+            // Try to resolve hostname from IP address
+            if (sourceIpAddress != null && sourceIpAddress != "unknown") {
+                try {
+                    sourceHostname = InetAddress.getByName(sourceIpAddress).hostName
+                } catch (e: Exception) {
+                    // If hostname resolution fails, leave it null
+                }
+            }
         }
 
         val requestedSize = if (range != null) (range.finish - range.start + 1) else file.contents?.size ?: 0L
 
-        logger.info("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} bytes, source_ip={}, headers_count={}",
-            file.name ?: "unknown", range?.start, range?.finish, requestedSize, sourceIpAddress, httpHeaders.size)
+        val sourceInfo = if (sourceHostname != null && sourceHostname != sourceIpAddress) {
+            "$sourceIpAddress/$sourceHostname"
+        } else {
+            sourceIpAddress
+        }
 
-        return HttpRequestInfo(httpHeaders, sourceIpAddress)
+        logger.info("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} ({}), source_ip={}, headers_count={}",
+            file.name ?: "unknown", range?.start, range?.finish, FileUtils.byteCountToDisplaySize(requestedSize), requestedSize, sourceInfo, httpHeaders.size)
+
+        return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)
     }
 }
