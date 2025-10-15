@@ -1,6 +1,7 @@
 package io.skjaere.debridav
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -45,7 +46,9 @@ class DebridavConfiguration {
 
     @Bean
     @Primary
-    fun objectMapper(): ObjectMapper = jacksonObjectMapper()
+    fun objectMapper(): ObjectMapper = jacksonObjectMapper().apply {
+        registerModule(JavaTimeModule())
+    }
 
     @Bean
     fun clock(): Clock = Clock.systemDefaultZone()
