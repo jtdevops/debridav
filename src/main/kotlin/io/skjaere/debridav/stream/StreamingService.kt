@@ -11,6 +11,8 @@ import io.skjaere.debridav.cache.BytesToCache
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import com.google.common.cache.Cache
+import com.google.common.cache.CacheBuilder
 import org.apache.commons.io.FileUtils
 import java.net.InetAddress
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
@@ -35,6 +37,7 @@ import org.apache.catalina.connector.ClientAbortException
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
+import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.time.Duration
 import java.time.Instant
@@ -48,6 +51,43 @@ private const val DEFAULT_BUFFER_SIZE = 65536L //64kb
 private const val STREAMING_METRICS_POLLING_RATE_S = 5L //5 seconds
 private const val BYTE_CHANNEL_CAPACITY = 2000
 private const val MAX_COMPLETED_DOWNLOADS_HISTORY = 1000
+
+/**
+ * OutputStream that writes to two output streams simultaneously.
+ */
+private class TeeOutputStream(
+    private val stream1: OutputStream,
+    private val stream2: OutputStream
+) : OutputStream() {
+
+    override fun write(b: Int) {
+        stream1.write(b)
+        stream2.write(b)
+    }
+
+    override fun write(b: ByteArray) {
+        stream1.write(b)
+        stream2.write(b)
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        stream1.write(b, off, len)
+        stream2.write(b, off, len)
+    }
+
+    override fun flush() {
+        stream1.flush()
+        stream2.flush()
+    }
+
+    override fun close() {
+        try {
+            stream1.close()
+        } finally {
+            stream2.close()
+        }
+    }
+}
 
 data class DownloadTrackingContext(
     val filePath: String,
@@ -89,6 +129,15 @@ class StreamingService(
     private val debridLinkService: DebridLinkService,
     prometheusRegistry: PrometheusRegistry
 ) {
+    // Cache for rclone/arrs limited data - key is just "filePath" since we normalize ranges
+    private val rcloneArrsCache: Cache<String, ByteArray> = if (debridavConfigProperties.rcloneArrsCacheEnabled) {
+        CacheBuilder.newBuilder()
+            .maximumSize((debridavConfigProperties.rcloneArrsCacheSizeMb * 1024 * 1024 / (debridavConfigProperties.rcloneArrsMaxDataKb * 1024)).toLong()) // Estimate based on max data size
+            .expireAfterAccess(debridavConfigProperties.rcloneArrsCacheExpiryMinutes, TimeUnit.MINUTES) // Configurable expiry time
+            .build()
+    } else {
+        CacheBuilder.newBuilder().maximumSize(0).build() // Disabled cache
+    }
     private val logger = LoggerFactory.getLogger(StreamingService::class.java)
     private val outputGauge =
         Gauge.builder().name("debridav.output.stream.bitrate").labelNames("provider", "file").labelNames("file")
@@ -113,13 +162,81 @@ class StreamingService(
         remotelyCachedEntity: RemotelyCachedEntity,
         httpRequestInfo: HttpRequestInfo = HttpRequestInfo(),
     ): StreamResult = coroutineScope {
-        val appliedRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
+        val originalRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
+
+        // Apply range limiting for rclone/arrs requests if enabled
+        val appliedRange = if (range != null) {
+            debridavConfigProperties.getLimitedRangeForRcloneArrs(originalRange, httpRequestInfo)
+        } else {
+            originalRange
+        }
+
+        // Log if range was limited for rclone/arrs
+        if (appliedRange != originalRange && debridavConfigProperties.enableRcloneArrsDataLimiting) {
+            logger.info("RCLONE_ARRS_RANGE_LIMITED: file={}, original_range={}-{}, limited_range={}-{}, max_kb={}",
+                remotelyCachedEntity.name ?: "unknown",
+                originalRange.start, originalRange.finish,
+                appliedRange.start, appliedRange.finish,
+                debridavConfigProperties.rcloneArrsMaxDataKb)
+        }
+
+        // Check for cached data for rclone/arrs requests
+        val cachedData = getCachedRcloneArrsData(debridLink, appliedRange, httpRequestInfo)
+        if (cachedData != null) {
+            logger.info("RCLONE_ARRS_CACHE_HIT: file={}, range={}-{}, size={} bytes",
+                remotelyCachedEntity.name ?: "unknown",
+                appliedRange.start, appliedRange.finish,
+                cachedData.size)
+
+            // Write cached data directly to output stream
+            withContext(Dispatchers.IO) {
+                outputStream.write(cachedData)
+                outputStream.flush()
+            }
+
+            val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
+            trackingId?.let { id -> completeDownloadTracking(id, StreamResult.OK) }
+            logger.info("done streaming ${debridLink.path} from cache: OK")
+            return@coroutineScope StreamResult.OK
+        }
+
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
-        
+
         var result: StreamResult = StreamResult.OK
         try {
-            streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
-            result = StreamResult.OK
+            // For rclone/arrs requests with caching enabled, try to serve from cache first
+            // This is only executed when: cache enabled AND data limiting enabled AND request matches rclone/arrs patterns
+            // This ensures cached data is NEVER served to non-rclone/arrs clients
+            if (debridavConfigProperties.rcloneArrsCacheEnabled &&
+                debridavConfigProperties.enableRcloneArrsDataLimiting &&
+                debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
+
+                val cachedData = getCachedRcloneArrsData(debridLink, appliedRange, httpRequestInfo)
+                if (cachedData != null) {
+                    logger.info("RCLONE_ARRS_CACHE_HIT: file={}, requested_range={}-{}, cached_size={} bytes",
+                        remotelyCachedEntity.name ?: "unknown",
+                        appliedRange.start, appliedRange.finish,
+                        cachedData.size)
+
+                    withContext(Dispatchers.IO) {
+                        outputStream.write(cachedData)
+                        outputStream.flush()
+                    }
+                    result = StreamResult.OK
+                } else {
+                    // Fetch and cache the data
+                    val fetchedData = fetchAndCacheRcloneArrsData(debridLink, appliedRange, remotelyCachedEntity, outputStream)
+                    if (fetchedData != null) {
+                        result = StreamResult.OK
+                    } else {
+                        result = StreamResult.IO_ERROR
+                    }
+                }
+            } else {
+                // Normal streaming for non-rclone/arrs requests
+                streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
+                result = StreamResult.OK
+            }
         } catch (e: LinkNotFoundException) {
             result = handleLinkNotFound(debridLink, remotelyCachedEntity, appliedRange, outputStream)
         } catch (e: EOFException) {
@@ -543,5 +660,81 @@ class StreamingService(
      */
     fun getCompletedDownloads(): List<DownloadTrackingContext> {
         return completedDownloads.toList()
+    }
+
+    /**
+     * Gets cached data for rclone/arrs requests, or null if not cached or not a rclone/arrs request.
+     * Returns normalized cached data for the file (always starts from byte 0, limited size).
+     *
+     * SAFETY: This method has triple protection to ensure cached data is NEVER served to non-rclone/arrs clients:
+     * 1. Cache must be enabled
+     * 2. Data limiting must be enabled
+     * 3. Request must match rclone/arrs patterns (user agent or hostname)
+     */
+    private fun getCachedRcloneArrsData(debridLink: CachedFile, range: Range, httpRequestInfo: HttpRequestInfo): ByteArray? {
+        if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
+            !debridavConfigProperties.enableRcloneArrsDataLimiting ||
+            !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
+            return null
+        }
+
+        val cacheKey = debridLink.path // Just use filepath as cache key
+        return rcloneArrsCache.getIfPresent(cacheKey)
+    }
+
+    /**
+     * Fetches data for rclone/arrs requests and caches it.
+     * Always fetches the normalized range (starting from 0, limited size) and caches it for the filepath.
+     */
+    private suspend fun fetchAndCacheRcloneArrsData(
+        debridLink: CachedFile,
+        range: Range,
+        remotelyCachedEntity: RemotelyCachedEntity,
+        outputStream: OutputStream
+    ): ByteArray? {
+        return try {
+            // Always fetch the normalized range (0 to maxBytes-1) for caching
+            val maxBytes = debridavConfigProperties.rcloneArrsMaxDataKb * 1024L
+            val normalizedRange = Range(0, maxBytes - 1)
+
+            val byteArrayOutputStream = ByteArrayOutputStream()
+
+            // Create a tee output stream that writes to both the original output and our buffer
+            val teeOutputStream = TeeOutputStream(outputStream, byteArrayOutputStream)
+
+            // Stream the normalized range to the tee output stream
+            streamBytes(remotelyCachedEntity, normalizedRange, debridLink, teeOutputStream)
+
+            // Get the captured data
+            val data = byteArrayOutputStream.toByteArray()
+
+            // Cache the normalized data for future requests using just filepath as key
+            cacheRcloneArrsData(debridLink, data)
+
+            logger.info("RCLONE_ARRS_CACHE_MISS_FETCHED: file={}, normalized_range=0-{}, size={} bytes",
+                remotelyCachedEntity.name ?: "unknown",
+                maxBytes - 1, data.size)
+
+            data
+        } catch (e: Exception) {
+            logger.error("Failed to fetch and cache rclone/arrs data for ${debridLink.path}", e)
+            null
+        }
+    }
+
+    /**
+     * Caches normalized data for rclone/arrs requests.
+     */
+    private fun cacheRcloneArrsData(debridLink: CachedFile, data: ByteArray) {
+        if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
+            !debridavConfigProperties.enableRcloneArrsDataLimiting) {
+            return
+        }
+
+        val cacheKey = debridLink.path // Just use filepath as cache key
+        rcloneArrsCache.put(cacheKey, data)
+
+        logger.debug("RCLONE_ARRS_CACHE_STORE: file={}, size={} bytes",
+            debridLink.path, data.size)
     }
 }

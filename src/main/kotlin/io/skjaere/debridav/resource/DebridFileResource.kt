@@ -195,7 +195,7 @@ class DebridFileResource(
                 ?: "unknown"
 
             // Try to resolve hostname from IP address
-            if (sourceIpAddress != null && sourceIpAddress != "unknown") {
+            if (sourceIpAddress != "unknown") {
                 try {
                     sourceHostname = InetAddress.getByName(sourceIpAddress).hostName
                 } catch (e: Exception) {
