@@ -201,7 +201,7 @@ class StreamingService(
         }
 
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
-
+        
         var result: StreamResult = StreamResult.OK
         try {
             // For rclone/arrs requests with caching enabled, try to serve from cache first
@@ -234,8 +234,8 @@ class StreamingService(
                 }
             } else {
                 // Normal streaming for non-rclone/arrs requests
-                streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
-                result = StreamResult.OK
+            streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
+            result = StreamResult.OK
             }
         } catch (e: LinkNotFoundException) {
             result = handleLinkNotFound(debridLink, remotelyCachedEntity, appliedRange, outputStream)

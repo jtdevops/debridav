@@ -55,6 +55,7 @@ data class DebridavConfigurationProperties(
     val rcloneArrsCacheEnabled: Boolean = true, // Enable local caching of limited data
     val rcloneArrsCacheSizeMb: Long = 100, // Maximum cache size in MB
     val rcloneArrsCacheExpiryMinutes: Long = 30, // Cache expiry time in minutes
+    val enableReactiveLinkRefresh: Boolean = false, // Enable reactive link refresh instead of proactive refresh
 ) {
     init {
         require(debridClients.isNotEmpty()) {

@@ -87,15 +87,17 @@ class DebridFileResource(
                 HttpRequestInfo()
             }
             
-            // Proactively refresh links before streaming
-            debridService.refreshLinksProactively(file)
+            if (debridavConfigurationProperties.enableReactiveLinkRefresh) {
+                // New reactive behavior: only refresh links when streaming fails
+                logger.info("Using reactive link refresh for ${file.name}")
 
-            debridService.getCachedFileCached(file)
-                ?.let { cachedFile ->
-                    logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
+                var currentCachedFile = debridService.getCachedFileCached(file)
+                if (currentCachedFile != null) {
+                    logger.info("streaming: {} range {} from {}", currentCachedFile.path, range, currentCachedFile.provider)
+
                     val result = try {
                         streamingService.streamContents(
-                            cachedFile,
+                            currentCachedFile,
                             range,
                             outputStream,
                             file,
@@ -105,19 +107,76 @@ class DebridFileResource(
                         this.coroutineContext.cancelChildren()
                         StreamResult.OK
                     }
-                    if (result != StreamResult.OK) {
-                        val updatedDebridLink = mapResultToDebridFile(result, cachedFile)
-                        file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
-                        fileService.saveDbEntity(file)
-                    }
-                } ?: run {
-                if (file.isNoLongerCached(debridavConfigurationProperties.debridClients)
-                    && debridavConfigurationProperties.shouldDeleteNonWorkingFiles
-                ) {
-                    fileService.handleNoLongerCachedFile(file)
-                }
 
-                logger.info("No working link found for ${debridFileContents.originalPath}")
+                    if (result != StreamResult.OK) {
+                        // Try to refresh the failed link and retry once
+                        logger.info("Streaming failed for ${currentCachedFile.path}, attempting to refresh link and retry")
+                        val refreshedLink = runBlocking { debridService.refreshLinkOnError(file, currentCachedFile) }
+
+                        if (refreshedLink != null) {
+                            logger.info("Retrying streaming with refreshed link for ${refreshedLink.path}")
+                            val retryResult = try {
+                                streamingService.streamContents(
+                                    refreshedLink,
+                                    range,
+                                    outputStream,
+                                    file,
+                                    httpRequestInfo
+                                )
+                            } catch (_: CancellationException) {
+                                this.coroutineContext.cancelChildren()
+                                StreamResult.OK
+                            }
+
+                            if (retryResult == StreamResult.OK) {
+                                logger.info("Successfully retried streaming with refreshed link for ${refreshedLink.path}")
+                            } else {
+                                // If retry also failed, update with the error status
+                                val updatedDebridLink = mapResultToDebridFile(retryResult, refreshedLink)
+                                file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                                fileService.saveDbEntity(file)
+                            }
+                        } else {
+                            // If link refresh failed, update with the original error
+                            val updatedDebridLink = mapResultToDebridFile(result, currentCachedFile)
+                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                            fileService.saveDbEntity(file)
+                        }
+                    }
+                }
+            } else {
+                // Original behavior: proactively refresh links before streaming
+                debridService.refreshLinksProactively(file)
+
+                debridService.getCachedFileCached(file)
+                    ?.let { cachedFile ->
+                        logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
+                        val result = try {
+                            streamingService.streamContents(
+                                cachedFile,
+                                range,
+                                outputStream,
+                                file,
+                                httpRequestInfo
+                            )
+                        } catch (_: CancellationException) {
+                            this.coroutineContext.cancelChildren()
+                            StreamResult.OK
+                        }
+                        if (result != StreamResult.OK) {
+                            val updatedDebridLink = mapResultToDebridFile(result, cachedFile)
+                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                            fileService.saveDbEntity(file)
+                        }
+                    } ?: run {
+                        if (file.isNoLongerCached(debridavConfigurationProperties.debridClients)
+                            && debridavConfigurationProperties.shouldDeleteNonWorkingFiles
+                        ) {
+                            fileService.handleNoLongerCachedFile(file)
+                        }
+
+                        logger.info("No working link found for ${debridFileContents.originalPath}")
+                    }
             }
         }
     }

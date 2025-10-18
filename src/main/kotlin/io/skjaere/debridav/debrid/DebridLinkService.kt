@@ -386,4 +386,30 @@ class DebridLinkService(
             logger.info("Pre-warmed links for ${file.name}")
         }
     }
+
+    /**
+     * Refreshes a specific link when a streaming error occurs.
+     * Returns a fresh CachedFile if successful, null otherwise.
+     */
+    suspend fun refreshLinkOnError(file: RemotelyCachedEntity, failedLink: CachedFile): CachedFile? {
+        return try {
+            val debridFileContents = file.contents ?: return null
+            val client = debridClients.getClient(failedLink.provider!!)
+
+            logger.info("Refreshing link on error for ${file.name} from ${failedLink.provider}")
+
+            val freshLink = getFreshDebridLink(debridFileContents, client)
+            if (freshLink is CachedFile) {
+                updateContentsOfDebridFile(file, debridFileContents, freshLink)
+                logger.info("Successfully refreshed link for ${file.name} from ${failedLink.provider}")
+                freshLink
+            } else {
+                logger.warn("Failed to refresh link for ${file.name} from ${failedLink.provider}: got ${freshLink.javaClass.simpleName}")
+                null
+            }
+        } catch (e: RuntimeException) {
+            logger.error("Exception occurred while refreshing link for ${file.name}: ${e.message}", e)
+            null
+        }
+    }
 }
