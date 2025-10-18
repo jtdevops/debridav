@@ -183,7 +183,7 @@ class StreamingService(
         // Check for cached data for rclone/arrs requests
         val cachedData = getCachedRcloneArrsData(debridLink, appliedRange, httpRequestInfo)
         if (cachedData != null) {
-            logger.info("RCLONE_ARRS_CACHE_HIT: file={}, range={}-{}, size={} bytes",
+            logger.info("RCLONE_ARRS_CACHE_HIT: file={}, range={}-{}, cached_size={} bytes",
                 remotelyCachedEntity.name ?: "unknown",
                 appliedRange.start, appliedRange.finish,
                 cachedData.size)
@@ -213,7 +213,7 @@ class StreamingService(
 
                 val cachedData = getCachedRcloneArrsData(debridLink, appliedRange, httpRequestInfo)
                 if (cachedData != null) {
-                    logger.info("RCLONE_ARRS_CACHE_HIT: file={}, requested_range={}-{}, cached_size={} bytes",
+                    logger.info("RCLONE_ARRS_CACHE_HIT: file={}, range={}-{}, cached_size={} bytes",
                         remotelyCachedEntity.name ?: "unknown",
                         appliedRange.start, appliedRange.finish,
                         cachedData.size)
@@ -678,13 +678,16 @@ class StreamingService(
             return null
         }
 
-        val cacheKey = debridLink.path // Just use filepath as cache key
+        // Create a cache key that includes the approximate range to avoid serving wrong cached data
+        // We use a range bucket (rounded to nearest MB) to handle similar requests efficiently
+        val rangeBucket = (range.start / (1024 * 1024)) * (1024 * 1024) // Round to nearest MB
+        val cacheKey = "${debridLink.path}:$rangeBucket"
         return rcloneArrsCache.getIfPresent(cacheKey)
     }
 
     /**
-     * Fetches data for rclone/arrs requests and caches it.
-     * Always fetches the normalized range (starting from 0, limited size) and caches it for the filepath.
+     * Fetches sample data for rclone/arrs requests and caches it.
+     * Fetches a small sample from the requested range and caches it with a range-specific key.
      */
     private suspend fun fetchAndCacheRcloneArrsData(
         debridLink: CachedFile,
@@ -693,27 +696,35 @@ class StreamingService(
         outputStream: OutputStream
     ): ByteArray? {
         return try {
-            // Always fetch the normalized range (0 to maxBytes-1) for caching
-            val maxBytes = debridavConfigProperties.rcloneArrsMaxDataKb * 1024L
-            val normalizedRange = Range(0, maxBytes - 1)
+            // For rclone/arrs metadata analysis, we only need a small sample (8KB) from the requested range
+            // This is sufficient for file type detection and metadata analysis
+            val sampleSize = 8192L // 8KB sample
+            val rangeLength = range.finish - range.start + 1
+            val rangeToSample = if (rangeLength > sampleSize) {
+                // Take a sample from the start of the requested range
+                Range(range.start, range.start + sampleSize - 1)
+            } else {
+                // If the requested range is smaller than our sample, use the full requested range
+                range
+            }
 
             val byteArrayOutputStream = ByteArrayOutputStream()
 
             // Create a tee output stream that writes to both the original output and our buffer
             val teeOutputStream = TeeOutputStream(outputStream, byteArrayOutputStream)
 
-            // Stream the normalized range to the tee output stream
-            streamBytes(remotelyCachedEntity, normalizedRange, debridLink, teeOutputStream)
+            // Stream only the sample to the tee output stream
+            streamBytes(remotelyCachedEntity, rangeToSample, debridLink, teeOutputStream)
 
-            // Get the captured data
+            // Get the captured sample data
             val data = byteArrayOutputStream.toByteArray()
 
-            // Cache the normalized data for future requests using just filepath as key
-            cacheRcloneArrsData(debridLink, data)
+            // Cache the sample data for future requests using range-specific key
+            cacheRcloneArrsData(debridLink, data, rangeToSample)
 
-            logger.info("RCLONE_ARRS_CACHE_MISS_FETCHED: file={}, normalized_range=0-{}, size={} bytes",
+            logger.info("RCLONE_ARRS_CACHE_MISS_FETCHED: file={}, sample_range={}-{}, size={} bytes",
                 remotelyCachedEntity.name ?: "unknown",
-                maxBytes - 1, data.size)
+                rangeToSample.start, rangeToSample.finish, data.size)
 
             data
         } catch (e: Exception) {
@@ -725,16 +736,18 @@ class StreamingService(
     /**
      * Caches normalized data for rclone/arrs requests.
      */
-    private fun cacheRcloneArrsData(debridLink: CachedFile, data: ByteArray) {
+    private fun cacheRcloneArrsData(debridLink: CachedFile, data: ByteArray, range: Range) {
         if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
             !debridavConfigProperties.enableRcloneArrsDataLimiting) {
             return
         }
 
-        val cacheKey = debridLink.path // Just use filepath as cache key
+        // Use the same cache key format as retrieval
+        val rangeBucket = (range.start / (1024 * 1024)) * (1024 * 1024) // Round to nearest MB
+        val cacheKey = "${debridLink.path}:$rangeBucket"
         rcloneArrsCache.put(cacheKey, data)
 
-        logger.debug("RCLONE_ARRS_CACHE_STORE: file={}, size={} bytes",
-            debridLink.path, data.size)
+        logger.debug("RCLONE_ARRS_CACHE_STORE: file={}, range_bucket={}, size={} bytes",
+            debridLink.path, rangeBucket, data.size)
     }
 }
