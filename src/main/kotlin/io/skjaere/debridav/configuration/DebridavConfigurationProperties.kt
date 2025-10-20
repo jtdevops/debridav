@@ -19,6 +19,8 @@ data class DebridavConfigurationProperties(
     val rootPath: String,
     val downloadPath: String,
     val mountPath: String,
+    val strmRootMountPath: String? = null,
+    val enableStrmFolders: Boolean = false,
     var debridClients: List<DebridProvider>,
     val waitAfterMissing: Duration,
     val waitAfterProviderError: Duration,
