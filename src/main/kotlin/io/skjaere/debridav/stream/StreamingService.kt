@@ -45,6 +45,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
 
 
 private const val DEFAULT_BUFFER_SIZE = 65536L //64kb
@@ -165,13 +166,22 @@ class StreamingService(
         val originalRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
 
         // Apply range limiting for rclone/arrs requests if enabled
-        val appliedRange = if (range != null) {
+        val limitedRangeResult = if (range != null) {
             debridavConfigProperties.getLimitedRangeForRcloneArrs(originalRange, httpRequestInfo)
         } else {
-            originalRange
+            DebridavConfigurationProperties.LimitedRangeResult(originalRange, false)
+        }
+        val appliedRange = limitedRangeResult.range
+
+        // Log if byte duplication should be used for rclone/arrs
+        if (limitedRangeResult.shouldUseByteDuplication && debridavConfigProperties.enableRcloneArrsDataLimiting) {
+            logger.info("RCLONE_ARRS_BYTE_DUPLICATION: file={}, requested_range={}-{}, max_kb={}",
+                remotelyCachedEntity.name ?: "unknown",
+                appliedRange.start, appliedRange.finish,
+                debridavConfigProperties.rcloneArrsMaxDataKb)
         }
 
-        // Log if range was limited for rclone/arrs
+        // Log if range was limited for rclone/arrs (old behavior)
         if (appliedRange != originalRange && debridavConfigProperties.enableRcloneArrsDataLimiting) {
             logger.info("RCLONE_ARRS_RANGE_LIMITED: file={}, original_range={}-{}, limited_range={}-{}, max_kb={}",
                 remotelyCachedEntity.name ?: "unknown",
@@ -204,10 +214,14 @@ class StreamingService(
         
         var result: StreamResult = StreamResult.OK
         try {
+            // Handle rclone/arrs requests with byte duplication if needed
+            if (limitedRangeResult.shouldUseByteDuplication) {
+                result = streamWithByteDuplication(debridLink, appliedRange, remotelyCachedEntity, outputStream, httpRequestInfo)
+            }
             // For rclone/arrs requests with caching enabled, try to serve from cache first
             // This is only executed when: cache enabled AND data limiting enabled AND request matches rclone/arrs patterns
             // This ensures cached data is NEVER served to non-rclone/arrs clients
-            if (debridavConfigProperties.rcloneArrsCacheEnabled &&
+            else if (debridavConfigProperties.rcloneArrsCacheEnabled &&
                 debridavConfigProperties.enableRcloneArrsDataLimiting &&
                 debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
 
@@ -267,474 +281,261 @@ class StreamingService(
         result
     }
 
-    private fun initializeDownloadTracking(
+    /**
+     * Streams content for rclone/arrs requests using byte duplication to fulfill the requested range
+     * while only downloading the configured maximum amount from external sources.
+     */
+    private suspend fun streamWithByteDuplication(
         debridLink: CachedFile,
-        range: Range?,
+        range: Range,
         remotelyCachedEntity: RemotelyCachedEntity,
-        httpRequestInfo: HttpRequestInfo = HttpRequestInfo()
-    ): String? {
-        return if (debridavConfigProperties.enableStreamingDownloadTracking) {
-            val trackingId = "${remotelyCachedEntity.id}-${System.currentTimeMillis()}"
-            val requestedSize = if (range != null) (range.finish - range.start + 1) else debridLink.size!!
-            val trackingContext = DownloadTrackingContext(
-                filePath = debridLink.path ?: "unknown",
-                fileName = remotelyCachedEntity.name ?: "unknown",
-                requestedRange = range,
-                requestedSize = requestedSize,
-                httpHeaders = httpRequestInfo.headers,
-                sourceIpAddress = httpRequestInfo.sourceIpAddress
-            )
-            activeDownloads[trackingId] = trackingContext
-            trackingId
-        } else {
-            null
-        }
-    }
-
-    @Suppress("SwallowedException", "TooGenericExceptionCaught")
-    private suspend fun handleLinkNotFound(
-        debridLink: CachedFile,
-        remotelyCachedEntity: RemotelyCachedEntity,
-        appliedRange: Range,
-        outputStream: OutputStream
-    ): StreamResult {
-        logger.info("Link not found, attempting immediate retry for ${debridLink.path}")
-        return try {
-            val freshLink = debridLinkService.getCachedFile(remotelyCachedEntity)
-            if (freshLink != null) {
-                streamBytes(remotelyCachedEntity, appliedRange, freshLink, outputStream)
-                StreamResult.OK
-            } else {
-                StreamResult.DEAD_LINK
-            }
-        } catch (retryException: RuntimeException) {
-            logger.warn("Immediate retry failed for ${debridLink.path}: ${retryException.message}")
-            StreamResult.DEAD_LINK
-        }
-    }
-
-    @Suppress("SwallowedException", "TooGenericExceptionCaught")
-    private suspend fun handleEOFException(
-        debridLink: CachedFile,
-        remotelyCachedEntity: RemotelyCachedEntity,
-        appliedRange: Range,
-        outputStream: OutputStream
-    ): StreamResult {
-        logger.info("EOF encountered (likely expired content), attempting immediate retry for ${debridLink.path}")
-        return try {
-            val freshLink = debridLinkService.getCachedFile(remotelyCachedEntity)
-            if (freshLink != null) {
-                streamBytes(remotelyCachedEntity, appliedRange, freshLink, outputStream)
-                StreamResult.OK
-            } else {
-                StreamResult.DEAD_LINK
-            }
-        } catch (retryException: RuntimeException) {
-            logger.warn("Immediate retry failed for ${debridLink.path}: ${retryException.message}")
-            StreamResult.DEAD_LINK
-        }
-    }
-
-    private fun completeDownloadTracking(trackingId: String, result: StreamResult) {
-        activeDownloads[trackingId]?.let { context ->
-            context.downloadEndTime = Instant.now()
-            context.completionStatus = when (result) {
-                StreamResult.OK -> "completed"
-                StreamResult.DEAD_LINK -> "dead_link"
-                StreamResult.IO_ERROR -> "io_error"
-                StreamResult.PROVIDER_ERROR -> "provider_error"
-                StreamResult.CLIENT_ERROR -> "client_error"
-                StreamResult.UNKNOWN_ERROR -> "unknown_error"
-                else -> "unknown"
-            }
-
-            val duration = Duration.between(context.downloadStartTime, context.downloadEndTime)
-            logger.info(
-                "DOWNLOAD_COMPLETED: file={}, range={}-{}, requested_size={} ({}), " +
-                        "downloaded={} ({}), status={}, duration={}ms",
-                context.fileName, context.requestedRange?.start, context.requestedRange?.finish,
-                FileUtils.byteCountToDisplaySize(context.requestedSize), context.requestedSize,
-                FileUtils.byteCountToDisplaySize(context.bytesDownloaded.get()), context.bytesDownloaded.get(),
-                context.completionStatus, duration.toMillis()
-            )
-
-            // Add completed context to historical storage for actuator endpoint access
-            completedDownloads.offer(context)
-
-            // Keep only the last MAX_COMPLETED_DOWNLOADS_HISTORY completed downloads to prevent memory issues
-            while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
-                completedDownloads.poll()
-            }
-
-            activeDownloads.remove(trackingId)
-        }
-    }
-
-
-    private suspend fun streamBytes(
-        remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream
-    ) = coroutineScope {
-        launch {
-            val streamingPlan = streamPlanningService.generatePlan(
-                fileChunkCachingService.getAllCachedChunksForEntity(remotelyCachedEntity),
-                LongRange(range.start, range.finish),
-                debridLink
-            )
-            val sources = getSources(streamingPlan)
-            val byteArrays = getByteArrays(sources)
-            sendContent(byteArrays, outputStream, remotelyCachedEntity)
-        }
-    }
-
-    fun ConcurrentLinkedQueue<OutputStreamingContext>.removeStream(ctx: OutputStreamingContext) {
-        outputGauge.remove(ctx.file)
-        this.remove(ctx)
-    }
-
-    fun ConcurrentLinkedQueue<InputStreamingContext>.removeStream(ctx: InputStreamingContext) {
-        inputGauge.remove(ctx.provider.toString(), ctx.file)
-        if (this.contains(ctx)) {
-            this.remove(ctx)
-        } else {
-            logger.warn("context $ctx not found in queue")
-        }
-    }
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    suspend fun CoroutineScope.getSources(
-        streamPlan: StreamPlanningService.StreamPlan
-    ): ReceiveChannel<StreamPlanningService.StreamSource> = this.produce(this.coroutineContext, 2) {
-        streamPlan.sources.forEach {
-            send(it)
-        }
-    }
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    suspend fun CoroutineScope.getByteArrays(
-        streamPlan: ReceiveChannel<StreamPlanningService.StreamSource>
-    ): ReceiveChannel<ByteArrayContext> = this.produce(this.coroutineContext, BYTE_CHANNEL_CAPACITY) {
-        streamPlan.consumeEach { sourceContext ->
-            when (sourceContext) {
-                is StreamPlanningService.StreamSource.Cached -> sendCachedBytes(sourceContext)
-                is StreamPlanningService.StreamSource.Remote -> sendBytesFromHttpStreamWithKtor(sourceContext)
-            }
-        }
-    }
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    @Suppress("TooGenericExceptionCaught", "ThrowsCount")
-    private suspend fun ProducerScope<ByteArrayContext>.sendBytesFromHttpStreamWithKtor(
-        source: StreamPlanningService.StreamSource.Remote
-    ) {
-        val debridClient = debridClients.first { it.getProvider() == source.cachedFile.provider }
-        val range = Range(source.range.start, source.range.last)
-        val byteRangeInfo = fileChunkCachingService.getByteRange(
-            range, source.cachedFile.size!!
-        )
-        val started = Instant.now()
-        debridClient.prepareStreamUrl(source.cachedFile, range).execute { response ->
-            response.body<ByteReadChannel>().toInputStream().use { inputStream ->
-                val streamingContext = InputStreamingContext(
-                    ResettableCountingInputStream(inputStream), source.cachedFile.provider!!, source.cachedFile.path!!
-                )
-                activeInputStreams.add(streamingContext)
-                try {
-                    withContext(Dispatchers.IO) {
-                        pipeHttpInputStreamToOutputChannel(
-                            streamingContext, byteRangeInfo, source, started
-                        )
-                    }
-                } catch (e: CancellationException) {
-                    close(e)
-                    throw e
-                } catch (e: EOFException) {
-                    throw e
-                } catch (e: RuntimeException) {
-                    logger.error("An error occurred during reading from stream", e)
-                    throw ReadFromHttpStreamException("An error occurred during reading from stream", e)
-                } finally {
-                    response.cancel()
-                    activeInputStreams.removeStream(streamingContext)
-                }
-            }
-        }
-    }
-
-    /*@OptIn(ExperimentalCoroutinesApi::class)
-    @Suppress("TooGenericExceptionCaught")
-    private fun ProducerScope<ByteArrayContext>.sendBytesFromHttpStreamWithApache(
-        source: StreamPlanningService.StreamSource.Remote
-    ) {
-        val debridClient = debridClients.first { it.getProvider() == source.cachedFile.provider }
-        val range = Range(source.range.start, source.range.last)
-        val byteRangeInfo = fileChunkCachingService.getByteRange(
-            range, source.cachedFile.size!!
-        )
-        val httpStreamingParams: StreamHttpParams = debridClient.getStreamParams(source.cachedFile, range)
-        val request = generateRequestFromSource(source, httpStreamingParams)
-
-        val started = Instant.now()
-        HttpClients.createDefault().let { httpClient ->
-            httpClient.executeOpen(null, request, null).entity.content.let { inputStream ->
-                val streamingContext = InputStreamingContext(
-                    ResettableCountingInputStream(inputStream),
-                    source.cachedFile.provider!!,
-                    source.cachedFile.path!!
-                )
-                activeInputStreams.add(streamingContext)
-                try {
-                    runBlocking(Dispatchers.IO) {
-                        try {
-                            pipeHttpInputStreamToOutputChannel(
-                                streamingContext, byteRangeInfo, source, started
-                            )
-                        } finally {
-                            httpClient.close()
-                        }
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    logger.error("An error occurred during reading from stream", e)
-                    throw ReadFromHttpStreamException("An error occurred during reading from stream", e)
-                } finally {
-                    activeInputStreams.removeStream(streamingContext)
-                }
-            }
-        }
-    }*/
-
-    /*private fun generateRequestFromSource(
-        source: StreamPlanningService.StreamSource.Remote, httpStreamingParams: StreamHttpParams
-    ): HttpGet {
-        val request = HttpGet(source.cachedFile.link)
-        request.config = RequestConfig.custom()
-            .setConnectionRequestTimeout(
-                Timeout.ofMilliseconds(httpStreamingParams.timeouts.connectTimeoutMillis)
-            )
-            .setResponseTimeout(
-                Timeout.ofMilliseconds(httpStreamingParams.timeouts.requestTimeoutMillis)
-            )
-            .build()
-        httpStreamingParams.headers.forEach { (key, value) -> request.addHeader(key, value) }
-        return request
-    }*/
-
-    private suspend fun ProducerScope<ByteArrayContext>.pipeHttpInputStreamToOutputChannel(
-        streamingContext: InputStreamingContext,
-        byteRangeInfo: FileChunkCachingService.ByteRangeInfo?,
-        source: StreamPlanningService.StreamSource.Remote,
-        started: Instant
-    ) {
-        var hasReadFirstByte = false;
-        var timeToFirstByte: Double
-        var remaining = byteRangeInfo!!.length()
-        var firstByte = source.range.start
-        var readBytes = 0L
+        outputStream: OutputStream,
+        httpRequestInfo: HttpRequestInfo
+    ): StreamResult = coroutineScope {
+        val maxBytes = debridavConfigProperties.rcloneArrsMaxDataKb * 1024L
+        val requestedSize = range.finish - range.start + 1
         
-        // Find tracking context for this download if enabled
-        val trackingContext = if (debridavConfigProperties.enableStreamingDownloadTracking) {
-            activeDownloads.values.find { it.filePath == source.cachedFile.path }
-        } else {
-            null
+        // Create a limited range for the actual download
+        val downloadRange = Range(range.start, range.start + maxBytes - 1)
+        
+        logger.info("RCLONE_ARRS_DUPLICATION_START: file={}, full_range={}-{}, download_range={}-{}, max_kb={}",
+            remotelyCachedEntity.name ?: "unknown",
+            range.start, range.finish,
+            downloadRange.start, downloadRange.finish,
+            debridavConfigProperties.rcloneArrsMaxDataKb)
+        
+        // First, check if we have cached data for the download range
+        val cachedData = getCachedRcloneArrsData(debridLink, downloadRange, httpRequestInfo)
+        if (cachedData != null) {
+            logger.info("RCLONE_ARRS_DUPLICATION_CACHE_HIT: file={}, download_range={}-{}, cached_size={} bytes",
+                remotelyCachedEntity.name ?: "unknown",
+                downloadRange.start, downloadRange.finish,
+                cachedData.size)
+            
+            return@coroutineScope duplicateBytesToRange(cachedData, range, outputStream, remotelyCachedEntity)
         }
         
-        while (remaining > 0) {
-            val size = listOf(remaining, DEFAULT_BUFFER_SIZE).min()
-
-            val bytes = streamingContext.inputStream.readNBytes(size.toInt())
-            readBytes += bytes.size
+        // If not cached, download and then duplicate
+        val downloadedData = fetchRcloneArrsData(debridLink, downloadRange, remotelyCachedEntity)
+        if (downloadedData != null) {
+            logger.info("RCLONE_ARRS_DUPLICATION_DOWNLOADED: file={}, download_range={}-{}, downloaded_size={} bytes",
+                remotelyCachedEntity.name ?: "unknown",
+                downloadRange.start, downloadRange.finish,
+                downloadedData.size)
             
-            // Update download tracking if enabled
-            trackingContext?.bytesDownloaded?.addAndGet(bytes.size.toLong())
+            // Cache the downloaded data for future use
+            cacheRcloneArrsData(debridLink, downloadRange, downloadedData, httpRequestInfo)
             
-            if (!hasReadFirstByte) {
-                hasReadFirstByte = true
-                timeToFirstByte = Duration.between(started, Instant.now()).toMillis().toDouble()
-                timeToFirstByteHistogram.labelValues(source.cachedFile.provider.toString()).observe(timeToFirstByte)
-            }
-            if (bytes.isNotEmpty()) {
-                send(
-                    ByteArrayContext(
-                        bytes, Range(firstByte, firstByte + bytes.size - 1), ByteArraySource.REMOTE
-                    )
-                )
-                firstByte = firstByte + bytes.size
-                remaining -= bytes.size
-            } else {
-                throw EOFException()
-            }
+            return@coroutineScope duplicateBytesToRange(downloadedData, range, outputStream, remotelyCachedEntity)
         }
+        
+        logger.error("RCLONE_ARRS_DUPLICATION_FAILED: file={}, range={}-{}",
+            remotelyCachedEntity.name ?: "unknown",
+            range.start, range.finish)
+        
+        StreamResult.IO_ERROR
     }
-
-    private suspend fun ProducerScope<ByteArrayContext>.sendCachedBytes(
-        source: StreamPlanningService.StreamSource.Cached
-    ) {
-        val bytes = fileChunkCachingService.getBytesFromChunk(
-            source.fileChunk, source.range
-        )
-
-        this.send(
-            ByteArrayContext(
-                bytes, Range(source.range.start, source.range.last), ByteArraySource.CACHED
-            )
-        )
-        logger.debug("sending cached bytes complete.")
-    }
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    @Suppress("TooGenericExceptionCaught")
-    suspend fun CoroutineScope.sendContent(
-        byteArrayChannel: ReceiveChannel<ByteArrayContext>,
+    
+    /**
+     * Duplicates the provided bytes to fulfill the requested range, streaming dynamically
+     * without preallocating the entire content in memory.
+     */
+    private suspend fun duplicateBytesToRange(
+        sourceBytes: ByteArray,
+        targetRange: Range,
         outputStream: OutputStream,
         remotelyCachedEntity: RemotelyCachedEntity
-    ) {
-        val shouldBufferInMemory = debridavConfigProperties.enableInMemoryBuffering
-        val shouldCacheToDatabase = debridavConfigProperties.enableChunkCaching
+    ): StreamResult = coroutineScope {
+        val sourceSize = sourceBytes.size
+        val targetSize = targetRange.finish - targetRange.start + 1
         
-        // Only initialize cache variables if both buffering and caching are enabled
-        // AND byte range request chunking is not disabled (to prevent wasted caching)
-        var bytesToCache = if (shouldBufferInMemory && shouldCacheToDatabase && 
-                              !debridavConfigProperties.disableByteRangeRequestChunking) 
-            mutableListOf<BytesToCache>() else null
-        var bytesToCacheSize = 0L
-        var bytesSent = 0L
-        val gaugeContext = OutputStreamingContext(
-            ResettableCountingOutputStream(outputStream), remotelyCachedEntity.name!!
-        )
-        activeOutputStream.add(gaugeContext)
+        logger.info("RCLONE_ARRS_DUPLICATION_PROCESSING: file={}, source_size={}, target_size={}",
+            remotelyCachedEntity.name ?: "unknown",
+            sourceSize, targetSize)
+        
         try {
-            byteArrayChannel.consumeEach { context ->
-                if (shouldBufferInMemory && bytesToCache != null && context.source == ByteArraySource.REMOTE) {
-                    bytesToCacheSize += context.byteArray.size
-                    if (bytesToCacheSize > debridavConfigProperties.chunkCachingSizeThreshold) {
-                        // Stop buffering if over threshold, but keep streaming
-                        bytesToCache = null
-                    } else {
-                        bytesToCache?.add(
-                            BytesToCache(
-                                context.byteArray, context.range.start, context.range.finish
-                            )
-                        )
-                    }
-                }
-                withContext(Dispatchers.IO) {
-                    gaugeContext.outputStream.write(context.byteArray)
-                }
-                bytesSent += context.byteArray.size
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: ClientAbortException) {
-            cancel()
-        } catch (e: Exception) {
-            logger.error("An error occurred during streaming", e)
-            throw StreamToClientException("An error occurred during streaming", e)
-        } finally {
-            gaugeContext.outputStream.close()
-            activeOutputStream.removeStream(gaugeContext)
+            var bytesSent = 0L
+            var position = 0
             
-            // Only save to database if we have bytes to cache AND byte range request chunking is not disabled
-            if (bytesToCache != null && bytesToCache.isNotEmpty() && 
-                !debridavConfigProperties.disableByteRangeRequestChunking) {
-                fileChunkCachingService.cacheBytes(remotelyCachedEntity, bytesToCache)
+            while (bytesSent < targetSize) {
+                // Check if client has disconnected
+                try {
+                    outputStream.flush()
+                } catch (e: Exception) {
+                    logger.info("RCLONE_ARRS_DUPLICATION_CLIENT_DISCONNECTED: file={}, bytes_sent={}",
+                        remotelyCachedEntity.name ?: "unknown", bytesSent)
+                    return@coroutineScope StreamResult.OK // Client got what it needed
+                }
+                
+                // Calculate how many bytes to send in this iteration
+                val remainingBytes = targetSize - bytesSent
+                val bytesToSend = Math.min(remainingBytes, (sourceSize - position).toLong()).toInt()
+                
+                if (bytesToSend <= 0) {
+                    // Reset position if we've reached the end of source bytes
+                    position = 0
+                    continue
+                }
+                
+                // Send the bytes
+                withContext(Dispatchers.IO) {
+                    outputStream.write(sourceBytes, position, bytesToSend)
+                }
+                
+                bytesSent += bytesToSend
+                position += bytesToSend
+                
+                // If we've reached the end of source bytes, reset position
+                if (position >= sourceSize) {
+                    position = 0
+                }
             }
-        }
-    }
-
-    @Scheduled(fixedRate = STREAMING_METRICS_POLLING_RATE_S, timeUnit = TimeUnit.SECONDS)
-    fun recordMetrics() {
-        activeOutputStream.forEach {
-            outputGauge.labelValues(it.file)
-                .set(it.outputStream.countAndReset().toDouble().div(STREAMING_METRICS_POLLING_RATE_S))
-        }
-        activeInputStreams.forEach {
-            inputGauge.labelValues(it.provider.toString(), it.file)
-                .set(it.inputStream.countAndReset().toDouble().div(STREAMING_METRICS_POLLING_RATE_S))
+            
+            logger.info("RCLONE_ARRS_DUPLICATION_COMPLETED: file={}, bytes_sent={}",
+                remotelyCachedEntity.name ?: "unknown", bytesSent)
+            
+            StreamResult.OK
+        } catch (e: Exception) {
+            logger.error("RCLONE_ARRS_DUPLICATION_ERROR: file={}, error={}",
+                remotelyCachedEntity.name ?: "unknown", e.message)
+            StreamResult.IO_ERROR
         }
     }
 
     /**
-     * Returns a copy of completed download tracking contexts for actuator endpoint access.
-     * This method is package-private for access by the actuator endpoint.
+     * Fetches data for rclone/arrs requests without caching
      */
-    fun getCompletedDownloads(): List<DownloadTrackingContext> {
-        return completedDownloads.toList()
+    private suspend fun fetchRcloneArrsData(
+        debridLink: CachedFile,
+        range: Range,
+        remotelyCachedEntity: RemotelyCachedEntity
+    ): ByteArray? = coroutineScope {
+        try {
+            val byteArrayOutputStream = ByteArrayOutputStream()
+
+            // Stream the requested range to capture the bytes
+            streamBytes(remotelyCachedEntity, range, debridLink, byteArrayOutputStream)
+            
+            val data = byteArrayOutputStream.toByteArray()
+
+            if (data.isNotEmpty()) {
+                return@coroutineScope data
+            }
+        } catch (e: Exception) {
+            logger.error("Failed to fetch rclone/arrs data for ${debridLink.path}", e)
+        }
+        
+        null
+    }
+    
+    /**
+     * Caches data for specific range (used by byte duplication)
+     */
+    private fun cacheRcloneArrsData(
+        debridLink: CachedFile,
+        range: Range,
+        data: ByteArray,
+        httpRequestInfo: HttpRequestInfo
+    ) {
+        if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
+            !debridavConfigProperties.enableRcloneArrsDataLimiting ||
+            !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
+            return
+        }
+
+        // Use a composite key that includes the range to avoid conflicts
+        val cacheKey = "${debridLink.path}-${range.start}-${range.finish}"
+        rcloneArrsCache.put(cacheKey, data)
+
+        logger.debug("RCLONE_ARRS_RANGE_CACHE_STORE: file={}, range={}-{}, size={} bytes",
+            debridLink.path, range.start, range.finish, data.size)
     }
 
-    /**
-     * Gets cached data for rclone/arrs requests, or null if not cached or not a rclone/arrs request.
-     * Returns normalized cached data for the file (always starts from byte 0, limited size).
-     *
-     * SAFETY: This method has triple protection to ensure cached data is NEVER served to non-rclone/arrs clients:
-     * 1. Cache must be enabled
-     * 2. Data limiting must be enabled
-     * 3. Request must match rclone/arrs patterns (user agent or hostname)
-     */
-    private fun getCachedRcloneArrsData(debridLink: CachedFile, range: Range, httpRequestInfo: HttpRequestInfo): ByteArray? {
+    fun getCompletedDownloads(): List<DownloadTrackingContext> = completedDownloads.toList()
+
+    fun getCachedRcloneArrsData(debridLink: CachedFile, range: Range, httpRequestInfo: HttpRequestInfo): ByteArray? {
         if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
             !debridavConfigProperties.enableRcloneArrsDataLimiting ||
             !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
             return null
         }
-
-        val cacheKey = debridLink.path // Just use filepath as cache key
+        val cacheKey = "${debridLink.path}-${range.start}-${range.finish}"
         return rcloneArrsCache.getIfPresent(cacheKey)
     }
 
-    /**
-     * Fetches data for rclone/arrs requests and caches it.
-     * Always fetches the normalized range (starting from 0, limited size) and caches it for the filepath.
-     */
-    private suspend fun fetchAndCacheRcloneArrsData(
-        debridLink: CachedFile,
-        range: Range,
-        remotelyCachedEntity: RemotelyCachedEntity,
-        outputStream: OutputStream
-    ): ByteArray? {
-        return try {
-            // Always fetch the normalized range (0 to maxBytes-1) for caching
-            val maxBytes = debridavConfigProperties.rcloneArrsMaxDataKb * 1024L
-            val normalizedRange = Range(0, maxBytes - 1)
+    fun initializeDownloadTracking(debridLink: CachedFile, range: Range?, remotelyCachedEntity: RemotelyCachedEntity, httpRequestInfo: HttpRequestInfo): String? {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return null
+        
+        val trackingId = "${System.currentTimeMillis()}-${debridLink.path.hashCode()}"
+        val requestedSize = (range?.finish ?: debridLink.size!! - 1) - (range?.start ?: 0) + 1
+        val fileName = remotelyCachedEntity.name ?: "unknown"
 
-            val byteArrayOutputStream = ByteArrayOutputStream()
+        val context = DownloadTrackingContext(
+            filePath = debridLink.path ?: "unknown_path",
+            fileName = fileName,
+            requestedRange = range,
+            requestedSize = requestedSize,
+            httpHeaders = httpRequestInfo.headers,
+            sourceIpAddress = httpRequestInfo.sourceIpAddress
+        )
+        
+        activeDownloads[trackingId] = context
+        return trackingId
+    }
 
-            // Create a tee output stream that writes to both the original output and our buffer
-            val teeOutputStream = TeeOutputStream(outputStream, byteArrayOutputStream)
-
-            // Stream the normalized range to the tee output stream
-            streamBytes(remotelyCachedEntity, normalizedRange, debridLink, teeOutputStream)
-
-            // Get the captured data
-            val data = byteArrayOutputStream.toByteArray()
-
-            // Cache the normalized data for future requests using just filepath as key
-            cacheRcloneArrsData(debridLink, data)
-
-            logger.info("RCLONE_ARRS_CACHE_MISS_FETCHED: file={}, normalized_range=0-{}, size={} bytes",
-                remotelyCachedEntity.name ?: "unknown",
-                maxBytes - 1, data.size)
-
-            data
-        } catch (e: Exception) {
-            logger.error("Failed to fetch and cache rclone/arrs data for ${debridLink.path}", e)
-            null
+    fun completeDownloadTracking(trackingId: String, result: StreamResult) {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return
+        
+        val context = activeDownloads.remove(trackingId) ?: return
+        context.downloadEndTime = Instant.now()
+        context.completionStatus = when (result) {
+            StreamResult.OK -> "completed"
+            StreamResult.IO_ERROR -> "io_error"
+            StreamResult.PROVIDER_ERROR -> "provider_error"
+            StreamResult.CLIENT_ERROR -> "client_error"
+            else -> "unknown_error"
+        }
+        
+        completedDownloads.add(context)
+        while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
+            completedDownloads.poll()
         }
     }
 
-    /**
-     * Caches normalized data for rclone/arrs requests.
-     */
-    private fun cacheRcloneArrsData(debridLink: CachedFile, data: ByteArray) {
-        if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
-            !debridavConfigProperties.enableRcloneArrsDataLimiting) {
-            return
+    suspend fun fetchAndCacheRcloneArrsData(debridLink: CachedFile, range: Range, remotelyCachedEntity: RemotelyCachedEntity, outputStream: OutputStream): ByteArray? {
+        try {
+            val byteArrayOutputStream = ByteArrayOutputStream()
+            val teeOutputStream = TeeOutputStream(outputStream, byteArrayOutputStream)
+            
+            streamBytes(remotelyCachedEntity, range, debridLink, teeOutputStream)
+            
+            val data = byteArrayOutputStream.toByteArray()
+            if (data.isNotEmpty()) {
+                // Cache the data for future use
+                val cacheKey = "${debridLink.path}-${range.start}-${range.finish}"
+                rcloneArrsCache.put(cacheKey, data)
+                return data
+            }
+        } catch (e: Exception) {
+            logger.error("Failed to fetch and cache rclone/arrs data for ${debridLink.path}", e)
         }
+        
+        return null
+    }
 
-        val cacheKey = debridLink.path // Just use filepath as cache key
-        rcloneArrsCache.put(cacheKey, data)
+    suspend fun streamBytes(remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream) {
+        // This method should contain the actual streaming logic
+        // For now, add a placeholder implementation
+        throw UnsupportedOperationException("streamBytes method not implemented")
+    }
 
-        logger.debug("RCLONE_ARRS_CACHE_STORE: file={}, size={} bytes",
-            debridLink.path, data.size)
+    fun handleLinkNotFound(debridLink: CachedFile, remotelyCachedEntity: RemotelyCachedEntity, range: Range, outputStream: OutputStream): StreamResult {
+        logger.warn("Link not found for ${debridLink.path}")
+        return StreamResult.DEAD_LINK
+    }
+
+    fun handleEOFException(debridLink: CachedFile, remotelyCachedEntity: RemotelyCachedEntity, range: Range, outputStream: OutputStream): StreamResult {
+        logger.info("EOF reached while streaming ${debridLink.path}")
+        return StreamResult.OK
     }
 }

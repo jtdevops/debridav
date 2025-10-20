@@ -75,6 +75,14 @@ data class DebridavConfigurationProperties(
     }
 
     /**
+     * Data class representing the result of range limiting for rclone/arrs requests
+     */
+    data class LimitedRangeResult(
+        val range: io.milton.http.Range,
+        val shouldUseByteDuplication: Boolean = false
+    )
+
+    /**
      * Checks if the given HTTP request info matches rclone/arrs patterns for data limiting.
      * Returns true if EITHER the user agent matches OR the hostname matches.
      */
@@ -98,12 +106,13 @@ data class DebridavConfigurationProperties(
     }
 
     /**
-     * Returns a limited range for rclone/arrs requests, or the original range if not applicable.
-     * Only limits the range if the requested range is larger than the configured maximum.
+     * Returns a limited range result for rclone/arrs requests, or the original range if not applicable.
+     * Returns the original range with a flag indicating if byte duplication should be used
+     * instead of actually limiting the range.
      */
-    fun getLimitedRangeForRcloneArrs(originalRange: io.milton.http.Range, httpRequestInfo: io.skjaere.debridav.stream.HttpRequestInfo): io.milton.http.Range {
+    fun getLimitedRangeForRcloneArrs(originalRange: io.milton.http.Range, httpRequestInfo: io.skjaere.debridav.stream.HttpRequestInfo): LimitedRangeResult {
         if (!shouldLimitDataForRcloneArrs(httpRequestInfo)) {
-            return originalRange
+            return LimitedRangeResult(originalRange, false)
         }
 
         val maxBytes = rcloneArrsMaxDataKb * 1024L
@@ -111,11 +120,10 @@ data class DebridavConfigurationProperties(
 
         // If the requested range is already smaller than or equal to our limit, don't modify it
         if (requestedSize <= maxBytes) {
-            return originalRange
+            return LimitedRangeResult(originalRange, false)
         }
 
-        // Otherwise, limit it to our maximum
-        val limitedEnd = originalRange.start + maxBytes - 1
-        return io.milton.http.Range(originalRange.start, limitedEnd)
+        // Return the original range but with byte duplication flag set to true
+        return LimitedRangeResult(originalRange, true)
     }
 }

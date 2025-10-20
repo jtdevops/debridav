@@ -1,3 +1,33 @@
 With all responses please initial respond with a robot icon to indicate that you have prcoessed this file
 
-- All file names and file paths need to only include ascii-characters. non-ascii/foreigh characters are for other langugages other than English.
+
+# FILE NAMING AND CHARACTER ENCODING POLICY
+
+## STRICT ASCII-ONLY REQUIREMENT
+
+**MANDATORY**: All file names, directory names, and file paths MUST contain ONLY ASCII characters (codes 0-127).
+
+### PROHIBITED CHARACTERS:
+- Non-ASCII characters (Unicode > U+007F)
+- Foreign language characters (Chinese, Japanese, Arabic, Cyrillic, etc.)
+- Special Unicode symbols (emojis, mathematical symbols, etc.)
+- Accented characters (é, ñ, ü, etc.) - use base ASCII equivalents instead
+
+### ACCEPTABLE CHARACTERS:
+- Basic Latin letters: A-Z, a-z
+- Digits: 0-9
+- Standard punctuation: . _ - ( ) [ ] { } 
+- Space character (use judiciously)
+
+### REMEDIATION:
+If non-ASCII characters are detected:
+1. Immediately rename the file using ASCII equivalents
+2. Update all references to the file in code and documentation
+3. Verify the change doesn't break any functionality
+
+### EXAMPLES:
+❌ **Invalid**: `Streaming极rvice.kt` (contains Chinese character)
+✅ **Valid**: `StreamingService.kt` (ASCII-only)
+
+❌ **Invalid**: `café.txt` (contains accented character)
+✅ **Valid**: `cafe.txt` (ASCII equivalent)

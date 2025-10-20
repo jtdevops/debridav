@@ -7,6 +7,7 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.stereotype.Component
 import java.time.Instant
+import io.skjaere.debridav.stream.HttpRequestInfo
 
 @Component
 @Endpoint(id = "streaming-download-tracking")
@@ -18,7 +19,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
     fun getHistoricalDownloadTracking(): List<DownloadTrackingInfo> {
         return streamingService.getCompletedDownloads().map { context ->
             val httpRequestInfo = context.httpHeaders.entries.associate { it.key to it.value }
-                .let { headers -> io.skjaere.debridav.stream.HttpRequestInfo(headers, context.sourceIpAddress) }
+                .let { headers -> HttpRequestInfo(headers, context.sourceIpAddress) }
 
             DownloadTrackingInfo(
                 filePath = context.filePath,
