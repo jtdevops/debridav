@@ -123,7 +123,6 @@ open class Blob() {
     }
 }
 
-@Entity
 open class VirtualStrmDirectory(
     originalPath: String? = null
 ) : DbDirectory() {
@@ -145,7 +144,6 @@ open class VirtualStrmDirectory(
     }
 }
 
-@Entity
 open class VirtualStrmFile(
     originalFile: DbEntity? = null,
     originalPath: String? = null
