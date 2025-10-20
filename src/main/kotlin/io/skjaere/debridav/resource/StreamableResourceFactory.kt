@@ -13,7 +13,6 @@ import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalContentsService
 import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
-import io.skjaere.debridav.fs.VirtualStrmFile
 import io.skjaere.debridav.stream.StreamingService
 import org.slf4j.LoggerFactory
 
@@ -75,11 +74,6 @@ class StreamableResourceFactory(
             )
 
             is LocalEntity -> FileResource(dbItem, fileService, localContentsService)
-            is VirtualStrmFile -> StrmFileResource(
-                strmFile = dbItem,
-                fileService = fileService,
-                debridavConfigurationProperties = debridavConfigurationProperties
-            )
             else -> error("Unknown dbItemType type: ${dbItem::class.simpleName}")
         }
     }

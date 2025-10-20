@@ -36,7 +36,7 @@ class DatabaseFileService(
 ) {
     private val logger = LoggerFactory.getLogger(DatabaseFileService::class.java)
     private val lock = Mutex()
-    private val defaultDirectories = listOf("/", "/downloads", "/tv", "/movies", "/tv_strm", "/movies_strm")
+    private val defaultDirectories = listOf("/", "/downloads", "/tv", "/movies")
 
     init {
         defaultDirectories.forEach {
@@ -246,54 +246,12 @@ class DatabaseFileService(
 
 
     fun getFileAtPath(path: String): DbEntity? {
-        // Handle virtual strm paths (only if feature is enabled)
-        if (debridavConfigurationProperties.enableStrmFolders &&
-            (path.startsWith("/tv_strm") || path.startsWith("/movies_strm"))) {
-            return handleVirtualStrmPath(path)
+        return debridFileRepository.getDirectoryByPath(path.pathToLtree()) ?: debridFileRepository.getDirectoryByPath(
+            path.getDirectoryFromPath().pathToLtree()
+        )?.let { directory ->
+            return debridFileRepository.findByDirectoryAndName(directory, path.substringAfterLast("/"))
         }
 
-        // Regular file/directory lookup
-        val directory = debridFileRepository.getDirectoryByPath(path.pathToLtree()) ?:
-                       debridFileRepository.getDirectoryByPath(path.getDirectoryFromPath().pathToLtree())
-
-        return directory?.let { dir ->
-            debridFileRepository.findByDirectoryAndName(dir, path.substringAfterLast("/"))
-        }
-    }
-    
-    private fun handleVirtualStrmPath(path: String): DbEntity? {
-        // Double-check that STRM folders are enabled (defensive programming)
-        if (!debridavConfigurationProperties.enableStrmFolders) {
-            return null
-        }
-
-        // Convert strm path to original path
-        val originalPath = path.replace("/tv_strm", "/tv").replace("/movies_strm", "/movies")
-
-        return when {
-            // If this is a directory request, return a virtual strm directory
-            path.endsWith("/") || !path.contains(".") -> VirtualStrmDirectory(originalPath)
-
-            // If this is a file request, check if the original file exists and is a video
-            else -> {
-                val originalFile = debridFileRepository.getDirectoryByPath(originalPath.getDirectoryFromPath().pathToLtree())
-                    ?.let { directory ->
-                        debridFileRepository.findByDirectoryAndName(directory, originalPath.substringAfterLast("/"))
-                    }
-
-                if (originalFile != null && isVideoFile(originalFile.name)) {
-                    VirtualStrmFile(originalFile, originalPath)
-                } else {
-                    null
-                }
-            }
-        }
-    }
-    
-    private fun isVideoFile(filename: String?): Boolean {
-        if (filename == null) return false
-        val videoExtensions = listOf(".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg")
-        return videoExtensions.any { filename.lowercase().endsWith(it) }
     }
 
     @Transactional
@@ -303,67 +261,9 @@ class DatabaseFileService(
 
     @Transactional
     suspend fun getChildren(directory: DbDirectory): List<DbEntity> = withContext(Dispatchers.IO) {
-        // Handle virtual strm directories
-        if (directory is VirtualStrmDirectory) {
-            return@withContext getVirtualStrmChildren(directory)
-        }
-        
-        // Handle root directory - add virtual strm directories (only if feature is enabled)
-        if (directory.path == "ROOT" || directory.fileSystemPath() == "/") {
-            val regularChildren1 = debridFileRepository.getChildrenByDirectory(directory)
-            val regularChildren2 = debridFileRepository.getByDirectory(directory)
-            val regularChildren = regularChildren1 + regularChildren2
-
-            val virtualStrmDirs = if (debridavConfigurationProperties.enableStrmFolders) {
-                listOf(
-                    VirtualStrmDirectory("/tv"),
-                    VirtualStrmDirectory("/movies")
-                )
-            } else {
-                emptyList()
-            }
-
-            return@withContext regularChildren + virtualStrmDirs
-        }
-        
         listOf(
             async { debridFileRepository.getChildrenByDirectory(directory) },
             async { debridFileRepository.getByDirectory(directory) }).awaitAll().flatten()
-    }
-    
-    private suspend fun getVirtualStrmChildren(virtualDir: VirtualStrmDirectory): List<DbEntity> {
-        // Double-check that STRM folders are enabled (defensive programming)
-        if (!debridavConfigurationProperties.enableStrmFolders) {
-            return emptyList()
-        }
-
-        val originalPath = virtualDir.originalPath ?: return emptyList()
-
-        // Get the original directory
-        val originalDirectory = debridFileRepository.getDirectoryByPath(originalPath.pathToLtree())
-            ?: return emptyList()
-
-        // Get children from original directory
-        val children1 = debridFileRepository.getChildrenByDirectory(originalDirectory)
-        val children2 = debridFileRepository.getByDirectory(originalDirectory)
-        val originalChildren = children1 + children2
-
-        // Filter and convert to virtual strm entities
-        return originalChildren.mapNotNull { child ->
-            when {
-                child is DbDirectory -> {
-                    // Create virtual strm directory for subdirectories
-                    val childPath = "${originalPath}/${child.name}"
-                    VirtualStrmDirectory(childPath)
-                }
-                isVideoFile(child.name) -> {
-                    // Only create virtual strm files for video files
-                    val childPath = "${originalPath}/${child.name}"
-                    VirtualStrmFile(child, childPath)
-                }
-                else -> null
-            }
-        }
     }
 
     @Transactional
