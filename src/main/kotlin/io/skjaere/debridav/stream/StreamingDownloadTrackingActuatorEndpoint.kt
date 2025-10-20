@@ -37,7 +37,17 @@ class StreamingDownloadTrackingActuatorEndpoint(
                     java.time.Duration.between(context.downloadStartTime, endTime).toMillis()
                 },
                 httpHeaders = context.httpHeaders,
-                sourceInfo = httpRequestInfo.sourceInfo
+                sourceInfo = httpRequestInfo.sourceInfo,
+                // Rclone/Arrs byte duplication metrics
+                actualBytesSent = context.actualBytesSent,
+                actualBytesSentFormatted = context.actualBytesSent?.let { FileUtils.byteCountToDisplaySize(it) },
+                cachedChunkSize = context.cachedChunkSize,
+                cachedChunkSizeFormatted = context.cachedChunkSize?.let { FileUtils.byteCountToDisplaySize(it) },
+                wasCacheHit = context.wasCacheHit,
+                usedByteDuplication = context.usedByteDuplication,
+                duplicationRatio = if (context.cachedChunkSize != null && context.cachedChunkSize!! > 0 && context.actualBytesSent != null) {
+                    context.actualBytesSent!!.toDouble() / context.cachedChunkSize!!.toDouble()
+                } else null
             )
         }.sortedByDescending { it.downloadStartTime }
     }
@@ -58,6 +68,14 @@ class StreamingDownloadTrackingActuatorEndpoint(
         val completionStatus: String,
         val durationMs: Long?,
         val httpHeaders: Map<String, String>,
-        val sourceInfo: String?
+        val sourceInfo: String?,
+        // Rclone/Arrs byte duplication metrics
+        val actualBytesSent: Long?,
+        val actualBytesSentFormatted: String?,
+        val cachedChunkSize: Long?,
+        val cachedChunkSizeFormatted: String?,
+        val wasCacheHit: Boolean,
+        val usedByteDuplication: Boolean,
+        val duplicationRatio: Double?  // actualBytesSent / cachedChunkSize (e.g., 1024x for 1024x duplication)
     )
 }

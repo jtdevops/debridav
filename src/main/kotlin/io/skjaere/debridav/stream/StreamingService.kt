@@ -109,7 +109,12 @@ data class DownloadTrackingContext(
     var downloadEndTime: Instant? = null,
     var completionStatus: String = "in_progress",
     val httpHeaders: Map<String, String> = emptyMap(),
-    val sourceIpAddress: String? = null
+    val sourceIpAddress: String? = null,
+    // Rclone/Arrs byte duplication metrics
+    var actualBytesSent: Long? = null,  // Total bytes actually sent (after duplication)
+    var cachedChunkSize: Long? = null,  // Size of the cached chunk used
+    var wasCacheHit: Boolean = false,   // Whether this request used cached data
+    var usedByteDuplication: Boolean = false  // Whether byte duplication was used
 )
 
 data class HttpRequestInfo(
@@ -239,7 +244,11 @@ class StreamingService(
         try {
             // Handle rclone/arrs requests with byte duplication if needed
             if (limitedRangeResult.shouldUseByteDuplication) {
-                result = streamWithByteDuplication(debridLink, appliedRange, remotelyCachedEntity, outputStream, httpRequestInfo)
+                // Mark as byte duplication in tracking
+                trackingId?.let { id ->
+                    activeDownloads[id]?.usedByteDuplication = true
+                }
+                result = streamWithByteDuplication(debridLink, appliedRange, remotelyCachedEntity, outputStream, httpRequestInfo, trackingId)
             }
             // For rclone/arrs requests with caching enabled, try to serve from cache first
             // This is only executed when: cache enabled AND data limiting enabled AND request matches rclone/arrs patterns
@@ -314,7 +323,8 @@ class StreamingService(
         range: Range,
         remotelyCachedEntity: RemotelyCachedEntity,
         outputStream: OutputStream,
-        httpRequestInfo: HttpRequestInfo
+        httpRequestInfo: HttpRequestInfo,
+        trackingId: String?
     ): StreamResult = coroutineScope {
         val maxBytes = debridavConfigProperties.rcloneArrsMaxDataKb * 1024L
         val requestedSize = range.finish - range.start + 1
@@ -329,6 +339,7 @@ class StreamingService(
             debridavConfigProperties.rcloneArrsMaxDataKb)
         
         // Use thread-safe cache loading - only one thread will download, others will wait
+        val wasCacheHit = rcloneArrsCache.getIfPresent(debridLink.path ?: "") != null
         val downloadedData = getOrLoadCachedRcloneArrsData(
             debridLink, 
             downloadRange, 
@@ -337,7 +348,15 @@ class StreamingService(
         )
         
         if (downloadedData != null) {
-            return@coroutineScope duplicateBytesToRange(downloadedData, range, outputStream, remotelyCachedEntity)
+            // Update tracking context with cache metrics
+            trackingId?.let { id ->
+                activeDownloads[id]?.apply {
+                    cachedChunkSize = downloadedData.size.toLong()
+                    this.wasCacheHit = wasCacheHit
+                }
+            }
+            
+            return@coroutineScope duplicateBytesToRange(downloadedData, range, outputStream, remotelyCachedEntity, trackingId)
         }
         
         logger.error("RCLONE_ARRS_DUPLICATION_FAILED: file={}, range={}-{}",
@@ -355,7 +374,8 @@ class StreamingService(
         sourceBytes: ByteArray,
         targetRange: Range,
         outputStream: OutputStream,
-        remotelyCachedEntity: RemotelyCachedEntity
+        remotelyCachedEntity: RemotelyCachedEntity,
+        trackingId: String?
     ): StreamResult = coroutineScope {
         val sourceSize = sourceBytes.size
         val targetSize = targetRange.finish - targetRange.start + 1
@@ -427,6 +447,11 @@ class StreamingService(
             
             logger.info("RCLONE_ARRS_DUPLICATION_COMPLETED: file={}, bytes_sent={}",
                 remotelyCachedEntity.name ?: "unknown", bytesSent)
+            
+            // Update tracking context with actual bytes sent
+            trackingId?.let { id ->
+                activeDownloads[id]?.actualBytesSent = bytesSent
+            }
             
             StreamResult.OK
         } catch (e: java.io.IOException) {
