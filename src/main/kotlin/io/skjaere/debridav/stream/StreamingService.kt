@@ -13,6 +13,9 @@ import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import com.google.common.cache.Cache
 import com.google.common.cache.CacheBuilder
+import com.google.common.cache.CacheLoader
+import com.google.common.cache.LoadingCache
+import java.util.concurrent.ExecutionException
 import org.apache.commons.io.FileUtils
 import java.net.InetAddress
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
@@ -32,6 +35,11 @@ import kotlinx.coroutines.channels.produce
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.io.EOFException
 import org.apache.catalina.connector.ClientAbortException
 import org.slf4j.LoggerFactory
@@ -52,6 +60,7 @@ private const val DEFAULT_BUFFER_SIZE = 65536L //64kb
 private const val STREAMING_METRICS_POLLING_RATE_S = 5L //5 seconds
 private const val BYTE_CHANNEL_CAPACITY = 2000
 private const val MAX_COMPLETED_DOWNLOADS_HISTORY = 1000
+private const val CACHE_DOWNLOAD_TIMEOUT_MS = 60000L // 60 seconds timeout for cache downloads
 
 /**
  * OutputStream that writes to two output streams simultaneously.
@@ -121,6 +130,15 @@ data class HttpRequestInfo(
     }
 }
 
+/**
+ * Represents a cache fetch request with context needed for downloading
+ */
+private data class CacheFetchRequest(
+    val debridLink: CachedFile,
+    val range: Range,
+    val remotelyCachedEntity: RemotelyCachedEntity
+)
+
 @Service
 class StreamingService(
     private val debridClients: List<DebridCachedContentClient>,
@@ -139,6 +157,11 @@ class StreamingService(
     } else {
         CacheBuilder.newBuilder().maximumSize(0).build() // Disabled cache
     }
+    
+    // Map to track in-flight downloads to prevent duplicate fetches
+    // Key is cache key (filepath-start-finish), Value is Mutex for that specific download
+    private val inFlightDownloads = ConcurrentHashMap<String, Mutex>()
+    
     private val logger = LoggerFactory.getLogger(StreamingService::class.java)
     private val outputGauge =
         Gauge.builder().name("debridav.output.stream.bitrate").labelNames("provider", "file").labelNames("file")
@@ -284,6 +307,7 @@ class StreamingService(
     /**
      * Streams content for rclone/arrs requests using byte duplication to fulfill the requested range
      * while only downloading the configured maximum amount from external sources.
+     * Uses thread-safe cache loading to ensure only one download happens per range.
      */
     private suspend fun streamWithByteDuplication(
         debridLink: CachedFile,
@@ -304,28 +328,15 @@ class StreamingService(
             downloadRange.start, downloadRange.finish,
             debridavConfigProperties.rcloneArrsMaxDataKb)
         
-        // First, check if we have cached data for the download range
-        val cachedData = getCachedRcloneArrsData(debridLink, downloadRange, httpRequestInfo)
-        if (cachedData != null) {
-            logger.info("RCLONE_ARRS_DUPLICATION_CACHE_HIT: file={}, download_range={}-{}, cached_size={} bytes",
-                remotelyCachedEntity.name ?: "unknown",
-                downloadRange.start, downloadRange.finish,
-                cachedData.size)
-            
-            return@coroutineScope duplicateBytesToRange(cachedData, range, outputStream, remotelyCachedEntity)
-        }
+        // Use thread-safe cache loading - only one thread will download, others will wait
+        val downloadedData = getOrLoadCachedRcloneArrsData(
+            debridLink, 
+            downloadRange, 
+            remotelyCachedEntity, 
+            httpRequestInfo
+        )
         
-        // If not cached, download and then duplicate
-        val downloadedData = fetchRcloneArrsData(debridLink, downloadRange, remotelyCachedEntity)
         if (downloadedData != null) {
-            logger.info("RCLONE_ARRS_DUPLICATION_DOWNLOADED: file={}, download_range={}-{}, downloaded_size={} bytes",
-                remotelyCachedEntity.name ?: "unknown",
-                downloadRange.start, downloadRange.finish,
-                downloadedData.size)
-            
-            // Cache the downloaded data for future use
-            cacheRcloneArrsData(debridLink, downloadRange, downloadedData, httpRequestInfo)
-            
             return@coroutineScope duplicateBytesToRange(downloadedData, range, outputStream, remotelyCachedEntity)
         }
         
@@ -356,17 +367,10 @@ class StreamingService(
         try {
             var bytesSent = 0L
             var position = 0
+            val bufferSize = 65536 // 64KB buffer for flushing
+            var bytesInBuffer = 0
             
             while (bytesSent < targetSize) {
-                // Check if client has disconnected
-                try {
-                    outputStream.flush()
-                } catch (e: Exception) {
-                    logger.info("RCLONE_ARRS_DUPLICATION_CLIENT_DISCONNECTED: file={}, bytes_sent={}",
-                        remotelyCachedEntity.name ?: "unknown", bytesSent)
-                    return@coroutineScope StreamResult.OK // Client got what it needed
-                }
-                
                 // Calculate how many bytes to send in this iteration
                 val remainingBytes = targetSize - bytesSent
                 val bytesToSend = Math.min(remainingBytes, (sourceSize - position).toLong()).toInt()
@@ -378,8 +382,27 @@ class StreamingService(
                 }
                 
                 // Send the bytes
-                withContext(Dispatchers.IO) {
-                    outputStream.write(sourceBytes, position, bytesToSend)
+                try {
+                    withContext(Dispatchers.IO) {
+                        outputStream.write(sourceBytes, position, bytesToSend)
+                        bytesInBuffer += bytesToSend
+                        
+                        // Only flush periodically to reduce overhead
+                        if (bytesInBuffer >= bufferSize) {
+                            outputStream.flush()
+                            bytesInBuffer = 0
+                        }
+                    }
+                } catch (e: java.io.IOException) {
+                    // Check if it's a client disconnect (connection reset)
+                    if (e.message?.contains("Connection reset") == true || 
+                        e.message?.contains("Broken pipe") == true ||
+                        e.message?.contains("ClientAbortException") == true) {
+                        logger.info("RCLONE_ARRS_DUPLICATION_CLIENT_DISCONNECTED: file={}, bytes_sent={}",
+                            remotelyCachedEntity.name ?: "unknown", bytesSent)
+                        return@coroutineScope StreamResult.OK // Client got what it needed or cancelled
+                    }
+                    throw e
                 }
                 
                 bytesSent += bytesToSend
@@ -391,17 +414,130 @@ class StreamingService(
                 }
             }
             
+            // Final flush
+            withContext(Dispatchers.IO) {
+                try {
+                    outputStream.flush()
+                } catch (e: java.io.IOException) {
+                    // Ignore final flush errors - data is already sent
+                    logger.debug("RCLONE_ARRS_DUPLICATION_FINAL_FLUSH_IGNORED: file={}", 
+                        remotelyCachedEntity.name ?: "unknown")
+                }
+            }
+            
             logger.info("RCLONE_ARRS_DUPLICATION_COMPLETED: file={}, bytes_sent={}",
                 remotelyCachedEntity.name ?: "unknown", bytesSent)
             
             StreamResult.OK
+        } catch (e: java.io.IOException) {
+            logger.error("RCLONE_ARRS_DUPLICATION_ERROR: file={}, error={}",
+                remotelyCachedEntity.name ?: "unknown", e.toString())
+            StreamResult.IO_ERROR
         } catch (e: Exception) {
             logger.error("RCLONE_ARRS_DUPLICATION_ERROR: file={}, error={}",
-                remotelyCachedEntity.name ?: "unknown", e.message)
+                remotelyCachedEntity.name ?: "unknown", e.toString())
             StreamResult.IO_ERROR
         }
     }
 
+    /**
+     * Thread-safe method to get cached data or load it if not present.
+     * Ensures only one download happens per cache key, with other threads waiting for the result.
+     * Includes timeout protection to prevent indefinite waits on stalled downloads.
+     * 
+     * Note: Cache key is file-path only (not range-specific) because arrs projects only need
+     * metadata/codec info which can be served from any chunk of the file.
+     */
+    private suspend fun getOrLoadCachedRcloneArrsData(
+        debridLink: CachedFile,
+        range: Range,
+        remotelyCachedEntity: RemotelyCachedEntity,
+        httpRequestInfo: HttpRequestInfo
+    ): ByteArray? {
+        if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
+            !debridavConfigProperties.enableRcloneArrsDataLimiting ||
+            !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
+            // Caching disabled, download directly without coordination
+            return fetchRcloneArrsData(debridLink, range, remotelyCachedEntity)
+        }
+        
+        // Cache key is file-path only - any 128KB chunk works for arrs metadata probing
+        val cacheKey = debridLink.path ?: return null
+        
+        // Fast path: check if already in cache
+        val cachedData = rcloneArrsCache.getIfPresent(cacheKey)
+        if (cachedData != null) {
+            logger.info("RCLONE_ARRS_DUPLICATION_CACHE_HIT: file={}, requested_range={}-{}, cached_size={} bytes (serving cached chunk for metadata)",
+                remotelyCachedEntity.name ?: "unknown",
+                range.start, range.finish,
+                cachedData.size)
+            return cachedData
+        }
+        
+        // Get or create a mutex for this specific cache key
+        val mutex = inFlightDownloads.computeIfAbsent(cacheKey) { Mutex() }
+        
+        try {
+            // Lock the mutex with timeout to prevent indefinite waits on stalled downloads
+            return withTimeout(CACHE_DOWNLOAD_TIMEOUT_MS) {
+                mutex.withLock {
+                    // Double-check: another thread might have loaded it while we were waiting
+                    val cachedDataAfterWait = rcloneArrsCache.getIfPresent(cacheKey)
+                    if (cachedDataAfterWait != null) {
+                        logger.info("RCLONE_ARRS_DUPLICATION_CACHE_HIT_AFTER_WAIT: file={}, requested_range={}-{}, cached_size={} bytes (another thread cached it)",
+                            remotelyCachedEntity.name ?: "unknown",
+                            range.start, range.finish,
+                            cachedDataAfterWait.size)
+                        return@withTimeout cachedDataAfterWait
+                    }
+                    
+                    // Still not in cache, we need to download
+                    // Note: We download the requested range, but it will be cached and reused for any range request
+                    logger.info("RCLONE_ARRS_DUPLICATION_DOWNLOADING: file={}, requested_range={}-{}, thread={}",
+                        remotelyCachedEntity.name ?: "unknown",
+                        range.start, range.finish,
+                        Thread.currentThread().name)
+                    
+                    val downloadedData = fetchRcloneArrsData(debridLink, range, remotelyCachedEntity)
+                    
+                    if (downloadedData != null) {
+                        logger.info("RCLONE_ARRS_DUPLICATION_DOWNLOADED: file={}, requested_range={}-{}, downloaded_size={} bytes (cached for all ranges)",
+                            remotelyCachedEntity.name ?: "unknown",
+                            range.start, range.finish,
+                            downloadedData.size)
+                        
+                        // Cache the downloaded data - will be reused for ANY range request on this file
+                        rcloneArrsCache.put(cacheKey, downloadedData)
+                        
+                        logger.debug("RCLONE_ARRS_FILE_CACHE_STORE: file={}, size={} bytes (cached chunk for metadata probing)",
+                            debridLink.path, downloadedData.size)
+                    }
+                    
+                    return@withTimeout downloadedData
+                }
+            }
+        } catch (e: TimeoutCancellationException) {
+            logger.error("RCLONE_ARRS_DUPLICATION_TIMEOUT: file={}, requested_range={}-{}, timeout={}ms, thread={}",
+                remotelyCachedEntity.name ?: "unknown",
+                range.start, range.finish,
+                CACHE_DOWNLOAD_TIMEOUT_MS,
+                Thread.currentThread().name)
+            
+            // On timeout, try to download independently without coordination
+            // This allows the request to continue even if another thread's download stalled
+            logger.info("RCLONE_ARRS_DUPLICATION_FALLBACK_DOWNLOAD: file={}, requested_range={}-{}, thread={}",
+                remotelyCachedEntity.name ?: "unknown",
+                range.start, range.finish,
+                Thread.currentThread().name)
+            
+            return fetchRcloneArrsData(debridLink, range, remotelyCachedEntity)
+        } finally {
+            // Clean up the mutex from the map after download completes
+            // Only remove if it's the same mutex instance (to avoid race with new requests)
+            inFlightDownloads.remove(cacheKey, mutex)
+        }
+    }
+    
     /**
      * Fetches data for rclone/arrs requests without caching
      */
@@ -428,29 +564,6 @@ class StreamingService(
         null
     }
     
-    /**
-     * Caches data for specific range (used by byte duplication)
-     */
-    private fun cacheRcloneArrsData(
-        debridLink: CachedFile,
-        range: Range,
-        data: ByteArray,
-        httpRequestInfo: HttpRequestInfo
-    ) {
-        if (!debridavConfigProperties.rcloneArrsCacheEnabled ||
-            !debridavConfigProperties.enableRcloneArrsDataLimiting ||
-            !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
-            return
-        }
-
-        // Use a composite key that includes the range to avoid conflicts
-        val cacheKey = "${debridLink.path}-${range.start}-${range.finish}"
-        rcloneArrsCache.put(cacheKey, data)
-
-        logger.debug("RCLONE_ARRS_RANGE_CACHE_STORE: file={}, range={}-{}, size={} bytes",
-            debridLink.path, range.start, range.finish, data.size)
-    }
-
     fun getCompletedDownloads(): List<DownloadTrackingContext> = completedDownloads.toList()
 
     fun getCachedRcloneArrsData(debridLink: CachedFile, range: Range, httpRequestInfo: HttpRequestInfo): ByteArray? {
@@ -459,7 +572,8 @@ class StreamingService(
             !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
             return null
         }
-        val cacheKey = "${debridLink.path}-${range.start}-${range.finish}"
+        // Cache key is file-path only - any cached chunk works for arrs metadata probing
+        val cacheKey = debridLink.path ?: return null
         return rcloneArrsCache.getIfPresent(cacheKey)
     }
 
