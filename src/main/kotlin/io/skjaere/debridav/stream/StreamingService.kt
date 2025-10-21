@@ -106,15 +106,16 @@ data class DownloadTrackingContext(
     val requestedSize: Long,
     val downloadStartTime: Instant = Instant.now(),
     val bytesDownloaded: AtomicLong = AtomicLong(0),
-    var downloadEndTime: Instant? = null,
-    var completionStatus: String = "in_progress",
-    val httpHeaders: Map<String, String> = emptyMap(),
-    val sourceIpAddress: String? = null,
-    // Rclone/Arrs byte duplication metrics
+    // Rclone/Arrs byte duplication metrics (grouped with bytes data)
     var actualBytesSent: Long? = null,  // Total bytes actually sent (after duplication)
     var cachedChunkSize: Long? = null,  // Size of the cached chunk used
     var wasCacheHit: Boolean = false,   // Whether this request used cached data
-    var usedByteDuplication: Boolean = false  // Whether byte duplication was used
+    var usedByteDuplication: Boolean = false,  // Whether byte duplication was used
+    // Completion metadata
+    var downloadEndTime: Instant? = null,
+    var completionStatus: String = "in_progress",
+    val httpHeaders: Map<String, String> = emptyMap(),
+    val sourceIpAddress: String? = null
 )
 
 data class HttpRequestInfo(
@@ -226,16 +227,31 @@ class StreamingService(
                 appliedRange.start, appliedRange.finish,
                 cachedData.size)
 
-            // Write cached data directly to output stream
-            withContext(Dispatchers.IO) {
-                outputStream.write(cachedData)
-                outputStream.flush()
+            val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
+            
+            // If byte duplication is needed, use duplicateBytesToRange instead of direct write
+            val result = if (limitedRangeResult.shouldUseByteDuplication) {
+                // Mark as byte duplication in tracking
+                trackingId?.let { id ->
+                    activeDownloads[id]?.apply {
+                        usedByteDuplication = true
+                        cachedChunkSize = cachedData.size.toLong()
+                        wasCacheHit = true
+                    }
+                }
+                duplicateBytesToRange(cachedData, appliedRange, outputStream, remotelyCachedEntity, trackingId)
+            } else {
+                // Write cached data directly to output stream (old behavior for non-duplication cases)
+                withContext(Dispatchers.IO) {
+                    outputStream.write(cachedData)
+                    outputStream.flush()
+                }
+                StreamResult.OK
             }
 
-            val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
-            trackingId?.let { id -> completeDownloadTracking(id, StreamResult.OK) }
-            logger.info("done streaming ${debridLink.path} from cache: OK")
-            return@coroutineScope StreamResult.OK
+            trackingId?.let { id -> completeDownloadTracking(id, result) }
+            logger.info("done streaming ${debridLink.path} from cache: $result")
+            return@coroutineScope result
         }
 
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
@@ -369,6 +385,7 @@ class StreamingService(
     /**
      * Duplicates the provided bytes to fulfill the requested range, streaming dynamically
      * without preallocating the entire content in memory.
+     * Mimics normal streaming behavior by writing in 64KB chunks without explicit flushes.
      */
     private suspend fun duplicateBytesToRange(
         sourceBytes: ByteArray,
@@ -379,6 +396,7 @@ class StreamingService(
     ): StreamResult = coroutineScope {
         val sourceSize = sourceBytes.size
         val targetSize = targetRange.finish - targetRange.start + 1
+        val chunkSize = DEFAULT_BUFFER_SIZE.toInt() // Use same 64KB chunk size as normal streaming
         
         logger.info("RCLONE_ARRS_DUPLICATION_PROCESSING: file={}, source_size={}, target_size={}",
             remotelyCachedEntity.name ?: "unknown",
@@ -386,32 +404,24 @@ class StreamingService(
         
         try {
             var bytesSent = 0L
-            var position = 0
-            val bufferSize = 65536 // 64KB buffer for flushing
-            var bytesInBuffer = 0
+            var sourcePosition = 0
             
             while (bytesSent < targetSize) {
-                // Calculate how many bytes to send in this iteration
+                // Calculate how many bytes to send in this iteration (up to 64KB chunk size)
                 val remainingBytes = targetSize - bytesSent
-                val bytesToSend = Math.min(remainingBytes, (sourceSize - position).toLong()).toInt()
+                val remainingInSource = sourceSize - sourcePosition
+                val bytesToSend = Math.min(Math.min(remainingBytes, chunkSize.toLong()), remainingInSource.toLong()).toInt()
                 
                 if (bytesToSend <= 0) {
                     // Reset position if we've reached the end of source bytes
-                    position = 0
+                    sourcePosition = 0
                     continue
                 }
                 
-                // Send the bytes
+                // Send the bytes - matches normal streaming behavior (write without explicit flush)
                 try {
                     withContext(Dispatchers.IO) {
-                        outputStream.write(sourceBytes, position, bytesToSend)
-                        bytesInBuffer += bytesToSend
-                        
-                        // Only flush periodically to reduce overhead
-                        if (bytesInBuffer >= bufferSize) {
-                            outputStream.flush()
-                            bytesInBuffer = 0
-                        }
+                        outputStream.write(sourceBytes, sourcePosition, bytesToSend)
                     }
                 } catch (e: java.io.IOException) {
                     // Check if it's a client disconnect (connection reset)
@@ -420,29 +430,29 @@ class StreamingService(
                         e.message?.contains("ClientAbortException") == true) {
                         logger.info("RCLONE_ARRS_DUPLICATION_CLIENT_DISCONNECTED: file={}, bytes_sent={}",
                             remotelyCachedEntity.name ?: "unknown", bytesSent)
+                        
+                        // Update tracking context with actual bytes sent before returning
+                        trackingId?.let { id ->
+                            activeDownloads[id]?.actualBytesSent = bytesSent
+                        }
+                        
                         return@coroutineScope StreamResult.OK // Client got what it needed or cancelled
                     }
                     throw e
                 }
                 
                 bytesSent += bytesToSend
-                position += bytesToSend
+                sourcePosition += bytesToSend
                 
-                // If we've reached the end of source bytes, reset position
-                if (position >= sourceSize) {
-                    position = 0
+                // If we've reached the end of source bytes, reset position for next iteration
+                if (sourcePosition >= sourceSize) {
+                    sourcePosition = 0
                 }
             }
             
-            // Final flush
+            // Final flush to ensure all data is sent (matches non-duplication cache behavior)
             withContext(Dispatchers.IO) {
-                try {
-                    outputStream.flush()
-                } catch (e: java.io.IOException) {
-                    // Ignore final flush errors - data is already sent
-                    logger.debug("RCLONE_ARRS_DUPLICATION_FINAL_FLUSH_IGNORED: file={}", 
-                        remotelyCachedEntity.name ?: "unknown")
-                }
+                outputStream.flush()
             }
             
             logger.info("RCLONE_ARRS_DUPLICATION_COMPLETED: file={}, bytes_sent={}",

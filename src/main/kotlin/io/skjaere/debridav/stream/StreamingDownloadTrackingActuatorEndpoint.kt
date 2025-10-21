@@ -28,17 +28,10 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 requestedRangeFinish = context.requestedRange?.finish,
                 requestedSizeFormatted = FileUtils.byteCountToDisplaySize(context.requestedSize),
                 requestedSize = context.requestedSize,
+                downloadStartTime = context.downloadStartTime,
                 bytesDownloadedFormatted = FileUtils.byteCountToDisplaySize(context.bytesDownloaded.get()),
                 bytesDownloaded = context.bytesDownloaded.get(),
-                downloadStartTime = context.downloadStartTime,
-                downloadEndTime = context.downloadEndTime,
-                completionStatus = context.completionStatus,
-                durationMs = context.downloadEndTime?.let { endTime ->
-                    java.time.Duration.between(context.downloadStartTime, endTime).toMillis()
-                },
-                httpHeaders = context.httpHeaders,
-                sourceInfo = httpRequestInfo.sourceInfo,
-                // Rclone/Arrs byte duplication metrics
+                // Rclone/Arrs byte duplication metrics (grouped with bytes data)
                 actualBytesSent = context.actualBytesSent,
                 actualBytesSentFormatted = context.actualBytesSent?.let { FileUtils.byteCountToDisplaySize(it) },
                 cachedChunkSize = context.cachedChunkSize,
@@ -47,7 +40,15 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 usedByteDuplication = context.usedByteDuplication,
                 duplicationRatio = if (context.cachedChunkSize != null && context.cachedChunkSize!! > 0 && context.actualBytesSent != null) {
                     context.actualBytesSent!!.toDouble() / context.cachedChunkSize!!.toDouble()
-                } else null
+                } else null,
+                // Completion metadata
+                downloadEndTime = context.downloadEndTime,
+                completionStatus = context.completionStatus,
+                durationMs = context.downloadEndTime?.let { endTime ->
+                    java.time.Duration.between(context.downloadStartTime, endTime).toMillis()
+                },
+                httpHeaders = context.httpHeaders,
+                sourceInfo = httpRequestInfo.sourceInfo
             )
         }.sortedByDescending { it.downloadStartTime }
     }
@@ -59,23 +60,24 @@ class StreamingDownloadTrackingActuatorEndpoint(
         val requestedRangeFinish: Long?,
         val requestedSizeFormatted: String,
         val requestedSize: Long,
-        val bytesDownloadedFormatted: String,
-        val bytesDownloaded: Long,
         @JsonFormat(shape = JsonFormat.Shape.STRING)
         val downloadStartTime: Instant,
-        @JsonFormat(shape = JsonFormat.Shape.STRING)
-        val downloadEndTime: Instant?,
-        val completionStatus: String,
-        val durationMs: Long?,
-        val httpHeaders: Map<String, String>,
-        val sourceInfo: String?,
-        // Rclone/Arrs byte duplication metrics
+        val bytesDownloadedFormatted: String,
+        val bytesDownloaded: Long,
+        // Rclone/Arrs byte duplication metrics (grouped with bytes data)
         val actualBytesSent: Long?,
         val actualBytesSentFormatted: String?,
         val cachedChunkSize: Long?,
         val cachedChunkSizeFormatted: String?,
         val wasCacheHit: Boolean,
         val usedByteDuplication: Boolean,
-        val duplicationRatio: Double?  // actualBytesSent / cachedChunkSize (e.g., 1024x for 1024x duplication)
+        val duplicationRatio: Double?,  // actualBytesSent / cachedChunkSize (e.g., 1024x for 1024x duplication)
+        // Completion metadata
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
+        val downloadEndTime: Instant?,
+        val completionStatus: String,
+        val durationMs: Long?,
+        val httpHeaders: Map<String, String>,
+        val sourceInfo: String?
     )
 }
