@@ -1,0 +1,141 @@
+package io.skjaere.debridav.stream
+
+import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.io.File
+import java.io.FileInputStream
+import java.io.OutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/**
+ * Service for serving local video files to ARR projects to reduce bandwidth usage.
+ * Instead of serving the actual media files, this service serves small, locally-hosted
+ * video files that contain enough metadata for ARR projects to analyze.
+ */
+@Service
+class LocalVideoService(
+    private val debridavConfigProperties: DebridavConfigurationProperties
+) {
+    private val logger = LoggerFactory.getLogger(LocalVideoService::class.java)
+
+    /**
+     * Serves the local video file for ARR requests.
+     * Returns true if the file was served successfully, false otherwise.
+     */
+    suspend fun serveLocalVideoFile(
+        outputStream: OutputStream,
+        range: io.milton.http.Range?,
+        httpRequestInfo: HttpRequestInfo
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath
+                ?: return@withContext false
+
+            val localVideoFile = File(localVideoPath)
+            if (!localVideoFile.exists() || !localVideoFile.isFile) {
+                logger.error("LOCAL_VIDEO_FILE_NOT_FOUND: path={}", localVideoPath)
+                return@withContext false
+            }
+
+            val fileSize = localVideoFile.length()
+            val actualRange = range ?: io.milton.http.Range(0, fileSize - 1)
+            
+            // Ensure range doesn't exceed file size
+            val start = maxOf(0L, actualRange.start)
+            val end = minOf(fileSize - 1, actualRange.finish)
+            
+            if (start > end) {
+                logger.warn("LOCAL_VIDEO_INVALID_RANGE: start={}, end={}, file_size={}", start, end, fileSize)
+                return@withContext false
+            }
+
+            logger.info("LOCAL_VIDEO_SERVING: file={}, range={}-{}, size={} bytes, source={}",
+                localVideoFile.name, start, end, end - start + 1, httpRequestInfo.sourceInfo)
+
+            // Stream the requested range from the local file
+            FileInputStream(localVideoFile).use { inputStream ->
+                inputStream.skip(start)
+                val buffer = ByteArray(65536) // 64KB buffer
+                var remaining = end - start + 1
+                var position = start
+
+                while (remaining > 0) {
+                    val bytesToRead = minOf(buffer.size.toLong(), remaining).toInt()
+                    val bytesRead = inputStream.read(buffer, 0, bytesToRead)
+                    
+                    if (bytesRead == -1) {
+                        logger.warn("LOCAL_VIDEO_EOF_REACHED: position={}, expected_end={}", position, end)
+                        break
+                    }
+
+                    outputStream.write(buffer, 0, bytesRead)
+                    remaining -= bytesRead
+                    position += bytesRead
+                }
+                
+                outputStream.flush()
+            }
+
+            logger.info("LOCAL_VIDEO_SERVED_SUCCESSFULLY: file={}, range={}-{}, bytes_served={}",
+                localVideoFile.name, start, end, end - start + 1)
+
+            true
+        } catch (e: Exception) {
+            logger.error("LOCAL_VIDEO_SERVE_ERROR: path={}, error={}", 
+                debridavConfigProperties.rcloneArrsLocalVideoFilePath, e.message, e)
+            false
+        }
+    }
+
+    /**
+     * Gets the size of the local video file for content-length headers.
+     * Reads the actual file size from the filesystem.
+     */
+    fun getLocalVideoFileSize(): Long {
+        val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath ?: return 0L
+        val localVideoFile = File(localVideoPath)
+        return if (localVideoFile.exists() && localVideoFile.isFile) {
+            localVideoFile.length()
+        } else {
+            0L
+        }
+    }
+
+    /**
+     * Gets the MIME type of the local video file.
+     * Attempts to detect the MIME type from the file extension.
+     */
+    fun getLocalVideoFileMimeType(): String {
+        val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath ?: return "video/mp4"
+        val localVideoFile = File(localVideoPath)
+        
+        if (!localVideoFile.exists() || !localVideoFile.isFile) {
+            return "video/mp4" // fallback
+        }
+        
+        // Detect MIME type from file extension
+        val fileName = localVideoFile.name.lowercase()
+        return when {
+            fileName.endsWith(".mp4") -> "video/mp4"
+            fileName.endsWith(".avi") -> "video/x-msvideo"
+            fileName.endsWith(".mkv") -> "video/x-matroska"
+            fileName.endsWith(".mov") -> "video/quicktime"
+            fileName.endsWith(".wmv") -> "video/x-ms-wmv"
+            fileName.endsWith(".flv") -> "video/x-flv"
+            fileName.endsWith(".webm") -> "video/webm"
+            fileName.endsWith(".m4v") -> "video/x-m4v"
+            else -> "video/mp4" // fallback
+        }
+    }
+
+    /**
+     * Checks if the local video file exists and is accessible.
+     */
+    fun isLocalVideoFileAvailable(): Boolean {
+        val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath ?: return false
+        val localVideoFile = File(localVideoPath)
+        return localVideoFile.exists() && localVideoFile.isFile && localVideoFile.canRead()
+    }
+}

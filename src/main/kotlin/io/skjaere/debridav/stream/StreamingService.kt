@@ -152,6 +152,7 @@ class StreamingService(
     private val debridavConfigProperties: DebridavConfigurationProperties,
     private val streamPlanningService: StreamPlanningService,
     private val debridLinkService: DebridLinkService,
+    private val localVideoService: LocalVideoService,
     prometheusRegistry: PrometheusRegistry
 ) {
     // Cache for rclone/arrs limited data - key is just "filePath" since we normalize ranges
@@ -193,6 +194,17 @@ class StreamingService(
         httpRequestInfo: HttpRequestInfo = HttpRequestInfo(),
     ): StreamResult = coroutineScope {
         val originalRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
+
+        // Check if we should serve local video file for ARR requests
+        if (debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)) {
+            logger.info("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}",
+                remotelyCachedEntity.name ?: "unknown",
+                originalRange.start, originalRange.finish,
+                httpRequestInfo.sourceInfo)
+            
+            val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo)
+            return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+        }
 
         // Apply range limiting for rclone/arrs requests if enabled
         val limitedRangeResult = if (range != null) {

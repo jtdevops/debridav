@@ -58,6 +58,9 @@ data class DebridavConfigurationProperties(
     val rcloneArrsCacheKeyStrategy: String = "filepath-only", // Cache key strategy: "filepath-only" or "filepath-range"
     val rcloneArrsDirectDownloadThresholdKb: Long? = null, // Direct download threshold in KB (null = disabled)
     val enableReactiveLinkRefresh: Boolean = false, // Enable reactive link refresh instead of proactive refresh
+    // Local video file approach for ARR projects
+    val enableRcloneArrsLocalVideo: Boolean = false, // Enable serving local video files for ARR requests
+    val rcloneArrsLocalVideoFilePath: String? = null, // Path to local video file to serve for ARR requests
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -70,6 +73,11 @@ data class DebridavConfigurationProperties(
         }
         require(rcloneArrsCacheKeyStrategy in listOf("filepath-only", "filepath-range")) {
             "rcloneArrsCacheKeyStrategy must be either 'filepath-only' or 'filepath-range'"
+        }
+        if (enableRcloneArrsLocalVideo) {
+            require(rcloneArrsLocalVideoFilePath != null) {
+                "rcloneArrsLocalVideoFilePath must be specified when enableRcloneArrsLocalVideo is true"
+            }
         }
     }
 
@@ -147,5 +155,18 @@ data class DebridavConfigurationProperties(
 
         // Return the original range but with byte duplication flag set to true
         return LimitedRangeResult(originalRange, true)
+    }
+
+    /**
+     * Checks if we should serve a local video file for ARR requests instead of the actual media file.
+     * This helps reduce bandwidth usage by serving a small local file for metadata analysis.
+     */
+    fun shouldServeLocalVideoForArrs(httpRequestInfo: io.skjaere.debridav.stream.HttpRequestInfo): Boolean {
+        if (!enableRcloneArrsLocalVideo || rcloneArrsLocalVideoFilePath == null) {
+            return false
+        }
+        
+        // Use the same detection logic as rclone/arrs data limiting
+        return shouldLimitDataForRcloneArrs(httpRequestInfo)
     }
 }

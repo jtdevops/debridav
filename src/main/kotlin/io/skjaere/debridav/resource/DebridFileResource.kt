@@ -40,7 +40,8 @@ class DebridFileResource(
     fileService: DatabaseFileService,
     private val streamingService: StreamingService,
     private val debridService: DebridLinkService,
-    private val debridavConfigurationProperties: DebridavConfigurationProperties
+    private val debridavConfigurationProperties: DebridavConfigurationProperties,
+    private val arrRequestDetector: ArrRequestDetector
 ) : AbstractResource(fileService, file as DbEntity), GetableResource, DeletableResource {
     private val debridFileContents: DebridFileContents = (dbItem as RemotelyCachedEntity).contents!!
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
@@ -218,10 +219,45 @@ class DebridFileResource(
     }
 
     override fun getContentType(accepts: String?): String {
+        // Check if we should serve local video for ARR requests
+        if (arrRequestDetector.isArrRequest()) {
+            // Get MIME type from the local video file
+            val localVideoPath = debridavConfigurationProperties.rcloneArrsLocalVideoFilePath
+            if (localVideoPath != null) {
+                val localVideoFile = java.io.File(localVideoPath)
+                if (localVideoFile.exists() && localVideoFile.isFile) {
+                    val fileName = localVideoFile.name.lowercase()
+                    return when {
+                        fileName.endsWith(".mp4") -> "video/mp4"
+                        fileName.endsWith(".avi") -> "video/x-msvideo"
+                        fileName.endsWith(".mkv") -> "video/x-matroska"
+                        fileName.endsWith(".mov") -> "video/quicktime"
+                        fileName.endsWith(".wmv") -> "video/x-ms-wmv"
+                        fileName.endsWith(".flv") -> "video/x-flv"
+                        fileName.endsWith(".webm") -> "video/webm"
+                        fileName.endsWith(".m4v") -> "video/x-m4v"
+                        else -> "video/mp4" // fallback
+                    }
+                }
+            }
+            return "video/mp4" // fallback
+        }
         return "video/mp4"
     }
 
     override fun getContentLength(): Long {
+        // Check if we should serve local video for ARR requests
+        if (arrRequestDetector.isArrRequest()) {
+            // Get file size from the local video file
+            val localVideoPath = debridavConfigurationProperties.rcloneArrsLocalVideoFilePath
+            if (localVideoPath != null) {
+                val localVideoFile = java.io.File(localVideoPath)
+                if (localVideoFile.exists() && localVideoFile.isFile) {
+                    return localVideoFile.length()
+                }
+            }
+            return 0L // fallback
+        }
         return file.contents!!.size!!.toLong()
     }
 
