@@ -55,6 +55,7 @@ data class DebridavConfigurationProperties(
     val rcloneArrsCacheEnabled: Boolean = true, // Enable local caching of limited data
     val rcloneArrsCacheSizeMb: Long = 100, // Maximum cache size in MB
     val rcloneArrsCacheExpiryMinutes: Long = 30, // Cache expiry time in minutes
+    val rcloneArrsCacheKeyStrategy: String = "filepath-only", // Cache key strategy: "filepath-only" or "filepath-range"
     val enableReactiveLinkRefresh: Boolean = false, // Enable reactive link refresh instead of proactive refresh
 ) {
     init {
@@ -66,10 +67,32 @@ data class DebridavConfigurationProperties(
                 "debridav.cache-max-size-gb must be greater than debridav.chunk-caching-size-threshold in Gb"
             }
         }
+        require(rcloneArrsCacheKeyStrategy in listOf("filepath-only", "filepath-range")) {
+            "rcloneArrsCacheKeyStrategy must be either 'filepath-only' or 'filepath-range'"
+        }
     }
 
     fun getMaxCacheSizeInBytes(): Long {
         return (cacheMaxSizeGb * ONE_K * ONE_K * ONE_K).toLong()
+    }
+
+    /**
+     * Generates a consistent cache key based on the configured strategy
+     */
+    fun generateCacheKey(filePath: String?, range: io.milton.http.Range?): String? {
+        if (filePath == null) return null
+        
+        return when (rcloneArrsCacheKeyStrategy) {
+            "filepath-only" -> filePath
+            "filepath-range" -> {
+                if (range != null) {
+                    "${filePath}-${range.start}-${range.finish}"
+                } else {
+                    filePath
+                }
+            }
+            else -> filePath // fallback to filepath-only
+        }
     }
 
     /**

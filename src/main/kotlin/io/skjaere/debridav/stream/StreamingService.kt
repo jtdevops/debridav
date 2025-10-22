@@ -480,8 +480,8 @@ class StreamingService(
      * Ensures only one download happens per cache key, with other threads waiting for the result.
      * Includes timeout protection to prevent indefinite waits on stalled downloads.
      * 
-     * Note: Cache key is file-path only (not range-specific) because arrs projects only need
-     * metadata/codec info which can be served from any chunk of the file.
+     * Note: Cache key strategy is configurable - can be file-path only or include range information
+     * based on the rcloneArrsCacheKeyStrategy configuration.
      */
     private suspend fun getOrLoadCachedRcloneArrsData(
         debridLink: CachedFile,
@@ -496,8 +496,8 @@ class StreamingService(
             return fetchRcloneArrsData(debridLink, range, remotelyCachedEntity)
         }
         
-        // Cache key is file-path only - any 128KB chunk works for arrs metadata probing
-        val cacheKey = debridLink.path ?: return null
+        // Generate cache key based on configured strategy
+        val cacheKey = debridavConfigProperties.generateCacheKey(debridLink.path, range) ?: return null
         
         // Fast path: check if already in cache
         val cachedData = rcloneArrsCache.getIfPresent(cacheKey)
@@ -607,8 +607,8 @@ class StreamingService(
             !debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo)) {
             return null
         }
-        // Cache key is file-path only - any cached chunk works for arrs metadata probing
-        val cacheKey = debridLink.path ?: return null
+        // Generate cache key based on configured strategy
+        val cacheKey = debridavConfigProperties.generateCacheKey(debridLink.path, range) ?: return null
         return rcloneArrsCache.getIfPresent(cacheKey)
     }
 
@@ -660,9 +660,11 @@ class StreamingService(
             
             val data = byteArrayOutputStream.toByteArray()
             if (data.isNotEmpty()) {
-                // Cache the data for future use
-                val cacheKey = "${debridLink.path}-${range.start}-${range.finish}"
-                rcloneArrsCache.put(cacheKey, data)
+                // Cache the data for future use using configured strategy
+                val cacheKey = debridavConfigProperties.generateCacheKey(debridLink.path, range)
+                if (cacheKey != null) {
+                    rcloneArrsCache.put(cacheKey, data)
+                }
                 return data
             }
         } catch (e: Exception) {
