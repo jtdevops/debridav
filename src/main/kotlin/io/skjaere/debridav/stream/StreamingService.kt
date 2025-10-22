@@ -219,6 +219,20 @@ class StreamingService(
                 debridavConfigProperties.rcloneArrsMaxDataKb)
         }
 
+        // Check if this is a small range that should use direct download instead of chunking
+        val requestedSizeKb = (appliedRange.finish - appliedRange.start + 1) / 1024
+        val shouldUseDirectDownload = debridavConfigProperties.enableRcloneArrsDataLimiting &&
+            debridavConfigProperties.shouldLimitDataForRcloneArrs(httpRequestInfo) &&
+            debridavConfigProperties.rcloneArrsDirectDownloadThresholdKb != null &&
+            requestedSizeKb <= debridavConfigProperties.rcloneArrsDirectDownloadThresholdKb!!
+
+        if (shouldUseDirectDownload) {
+            logger.info("RCLONE_ARRS_DIRECT_DOWNLOAD: file={}, requested_range={}-{}, size_kb={}, threshold_kb={}",
+                remotelyCachedEntity.name ?: "unknown",
+                appliedRange.start, appliedRange.finish,
+                requestedSizeKb, debridavConfigProperties.rcloneArrsDirectDownloadThresholdKb!!)
+        }
+
         // Check for cached data for rclone/arrs requests
         val cachedData = getCachedRcloneArrsData(debridLink, appliedRange, httpRequestInfo)
         if (cachedData != null) {
@@ -230,7 +244,7 @@ class StreamingService(
             val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
             
             // If byte duplication is needed, use duplicateBytesToRange instead of direct write
-            val result = if (limitedRangeResult.shouldUseByteDuplication) {
+            val result = if (limitedRangeResult.shouldUseByteDuplication && !shouldUseDirectDownload) {
                 // Mark as byte duplication in tracking
                 trackingId?.let { id ->
                     activeDownloads[id]?.apply {
@@ -249,6 +263,20 @@ class StreamingService(
                     Range(downloadStart, appliedRange.finish)
                 }
                 duplicateBytesToRange(cachedData, appliedRange, cachedDownloadRange, outputStream, remotelyCachedEntity, trackingId)
+            } else if (shouldUseDirectDownload) {
+                // For small ranges, write cached data directly without duplication
+                trackingId?.let { id ->
+                    activeDownloads[id]?.apply {
+                        wasCacheHit = true
+                        cachedChunkSize = cachedData.size.toLong()
+                        usedByteDuplication = false
+                    }
+                }
+                withContext(Dispatchers.IO) {
+                    outputStream.write(cachedData)
+                    outputStream.flush()
+                }
+                StreamResult.OK
             } else {
                 // Write cached data directly to output stream (old behavior for non-duplication cases)
                 withContext(Dispatchers.IO) {
@@ -268,7 +296,7 @@ class StreamingService(
         var result: StreamResult = StreamResult.OK
         try {
             // Handle rclone/arrs requests with byte duplication if needed
-            if (limitedRangeResult.shouldUseByteDuplication) {
+            if (limitedRangeResult.shouldUseByteDuplication && !shouldUseDirectDownload) {
                 // Mark as byte duplication in tracking
                 trackingId?.let { id ->
                     activeDownloads[id]?.usedByteDuplication = true
@@ -303,6 +331,14 @@ class StreamingService(
                         result = StreamResult.IO_ERROR
                     }
                 }
+            } else if (shouldUseDirectDownload) {
+                // For small ranges, download directly without chunking
+                trackingId?.let { id ->
+                    activeDownloads[id]?.apply {
+                        usedByteDuplication = false
+                    }
+                }
+                result = streamDirectDownload(debridLink, appliedRange, remotelyCachedEntity, outputStream, httpRequestInfo, trackingId)
             } else {
                 // Normal streaming for non-rclone/arrs requests
             streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
@@ -337,7 +373,73 @@ class StreamingService(
         logger.info("done streaming ${debridLink.path}: $result")
         result
     }
-
+    
+    /**
+     * Streams content for small rclone/arrs requests using direct download without chunking.
+     * Downloads the exact requested range and caches it for future use.
+     */
+    private suspend fun streamDirectDownload(
+        debridLink: CachedFile,
+        range: Range,
+        remotelyCachedEntity: RemotelyCachedEntity,
+        outputStream: OutputStream,
+        httpRequestInfo: HttpRequestInfo,
+        trackingId: String?
+    ): StreamResult = coroutineScope {
+        logger.info("RCLONE_ARRS_DIRECT_DOWNLOAD_START: file={}, requested_range={}-{}, size_kb={}",
+            remotelyCachedEntity.name ?: "unknown",
+            range.start, range.finish,
+            (range.finish - range.start + 1) / 1024)
+        
+        try {
+            val byteArrayOutputStream = ByteArrayOutputStream()
+            val teeOutputStream = TeeOutputStream(outputStream, byteArrayOutputStream)
+            
+            // Stream the exact requested range
+            streamBytes(remotelyCachedEntity, range, debridLink, teeOutputStream)
+            
+            val downloadedData = byteArrayOutputStream.toByteArray()
+            
+            if (downloadedData.isNotEmpty()) {
+                // Cache the downloaded data for future use
+                val cacheKey = debridavConfigProperties.generateCacheKey(debridLink.path, range)
+                if (cacheKey != null) {
+                    rcloneArrsCache.put(cacheKey, downloadedData)
+                    logger.info("RCLONE_ARRS_DIRECT_DOWNLOAD_CACHED: file={}, range={}-{}, size={} bytes",
+                        remotelyCachedEntity.name ?: "unknown",
+                        range.start, range.finish,
+                        downloadedData.size)
+                }
+                
+                // Update tracking context
+                trackingId?.let { id ->
+                    activeDownloads[id]?.apply {
+                        cachedChunkSize = downloadedData.size.toLong()
+                        wasCacheHit = false
+                        bytesDownloaded.addAndGet(downloadedData.size.toLong())
+                    }
+                }
+                
+                logger.info("RCLONE_ARRS_DIRECT_DOWNLOAD_COMPLETED: file={}, range={}-{}, size={} bytes",
+                    remotelyCachedEntity.name ?: "unknown",
+                    range.start, range.finish,
+                    downloadedData.size)
+                
+                StreamResult.OK
+            } else {
+                logger.error("RCLONE_ARRS_DIRECT_DOWNLOAD_FAILED: file={}, range={}-{}, no data downloaded",
+                    remotelyCachedEntity.name ?: "unknown",
+                    range.start, range.finish)
+                StreamResult.IO_ERROR
+            }
+        } catch (e: Exception) {
+            logger.error("RCLONE_ARRS_DIRECT_DOWNLOAD_ERROR: file={}, range={}-{}, error={}",
+                remotelyCachedEntity.name ?: "unknown",
+                range.start, range.finish, e.toString())
+            StreamResult.IO_ERROR
+        }
+    }
+    
     /**
      * Streams content for rclone/arrs requests using byte duplication to fulfill the requested range
      * while only downloading the configured maximum amount from external sources.

@@ -56,6 +56,7 @@ data class DebridavConfigurationProperties(
     val rcloneArrsCacheSizeMb: Long = 100, // Maximum cache size in MB
     val rcloneArrsCacheExpiryMinutes: Long = 30, // Cache expiry time in minutes
     val rcloneArrsCacheKeyStrategy: String = "filepath-only", // Cache key strategy: "filepath-only" or "filepath-range"
+    val rcloneArrsDirectDownloadThresholdKb: Long? = null, // Direct download threshold in KB (null = disabled)
     val enableReactiveLinkRefresh: Boolean = false, // Enable reactive link refresh instead of proactive refresh
 ) {
     init {
