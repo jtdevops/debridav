@@ -239,7 +239,16 @@ class StreamingService(
                         wasCacheHit = true
                     }
                 }
-                duplicateBytesToRange(cachedData, appliedRange, outputStream, remotelyCachedEntity, trackingId)
+                // Determine the chunking strategy that was used to create this cached data
+                // This is independent of whether data came from cache or fresh download
+                val cachedDownloadRange = if (appliedRange.start == 0L) {
+                    Range(0L, debridavConfigProperties.rcloneArrsMaxDataKb * 1024L - 1)
+                } else {
+                    val maxBytes = debridavConfigProperties.rcloneArrsMaxDataKb * 1024L
+                    val downloadStart = maxOf(0L, appliedRange.finish - maxBytes + 1)
+                    Range(downloadStart, appliedRange.finish)
+                }
+                duplicateBytesToRange(cachedData, appliedRange, cachedDownloadRange, outputStream, remotelyCachedEntity, trackingId)
             } else {
                 // Write cached data directly to output stream (old behavior for non-duplication cases)
                 withContext(Dispatchers.IO) {
@@ -346,16 +355,27 @@ class StreamingService(
         val requestedSize = range.finish - range.start + 1
         
         // Create a limited range for the actual download
-        val downloadRange = Range(range.start, range.start + maxBytes - 1)
+        // If start is 0, download from start; otherwise, download ending at range end
+        val downloadRange = if (range.start == 0L) {
+            // Start from beginning: download from 0 to maxBytes-1
+            Range(0L, maxBytes - 1)
+        } else {
+            // Start from end: download ending at range.finish
+            val downloadStart = maxOf(0L, range.finish - maxBytes + 1)
+            Range(downloadStart, range.finish)
+        }
         
-        logger.info("RCLONE_ARRS_DUPLICATION_START: file={}, full_range={}-{}, download_range={}-{}, max_kb={}",
+        logger.info("RCLONE_ARRS_DUPLICATION_START: file={}, requested_range={}-{}, download_chunk={}-{}, chunk_strategy={}, max_kb={}",
             remotelyCachedEntity.name ?: "unknown",
             range.start, range.finish,
             downloadRange.start, downloadRange.finish,
+            if (range.start == 0L) "start-from-beginning" else "end-at-request-end",
             debridavConfigProperties.rcloneArrsMaxDataKb)
         
         // Use thread-safe cache loading - only one thread will download, others will wait
-        val wasCacheHit = rcloneArrsCache.getIfPresent(debridLink.path ?: "") != null
+        // Check for cache hit using the same cache key strategy as the actual cache operations
+        val cacheKey = debridavConfigProperties.generateCacheKey(debridLink.path, downloadRange)
+        val wasCacheHit = cacheKey?.let { rcloneArrsCache.getIfPresent(it) != null } ?: false
         val downloadedData = getOrLoadCachedRcloneArrsData(
             debridLink, 
             downloadRange, 
@@ -369,10 +389,14 @@ class StreamingService(
                 activeDownloads[id]?.apply {
                     cachedChunkSize = downloadedData.size.toLong()
                     this.wasCacheHit = wasCacheHit
+                    // Update bytesDownloaded with actual bytes downloaded from external sources
+                    if (!wasCacheHit) {
+                        bytesDownloaded.addAndGet(downloadedData.size.toLong())
+                    }
                 }
             }
             
-            return@coroutineScope duplicateBytesToRange(downloadedData, range, outputStream, remotelyCachedEntity, trackingId)
+            return@coroutineScope duplicateBytesToRange(downloadedData, range, downloadRange, outputStream, remotelyCachedEntity, trackingId)
         }
         
         logger.error("RCLONE_ARRS_DUPLICATION_FAILED: file={}, range={}-{}",
@@ -390,6 +414,7 @@ class StreamingService(
     private suspend fun duplicateBytesToRange(
         sourceBytes: ByteArray,
         targetRange: Range,
+        downloadRange: Range,
         outputStream: OutputStream,
         remotelyCachedEntity: RemotelyCachedEntity,
         trackingId: String?
@@ -398,13 +423,37 @@ class StreamingService(
         val targetSize = targetRange.finish - targetRange.start + 1
         val chunkSize = DEFAULT_BUFFER_SIZE.toInt() // Use same 64KB chunk size as normal streaming
         
-        logger.info("RCLONE_ARRS_DUPLICATION_PROCESSING: file={}, source_size={}, target_size={}",
+        // Calculate the offset within source bytes where the target range starts
+        val sourceOffset = targetRange.start - downloadRange.start
+        
+        // Handle different scenarios for byte duplication
+        val actualSourceOffset = when {
+            sourceOffset < 0 -> {
+                // Target range starts before download range - start from beginning of source bytes
+                logger.info("RCLONE_ARRS_DUPLICATION_PREPEND: file={}, target_start={}, download_start={}, using_prepend_strategy",
+                    remotelyCachedEntity.name ?: "unknown", targetRange.start, downloadRange.start)
+                0
+            }
+            sourceOffset >= sourceSize -> {
+                // Target range starts after download range - this shouldn't happen with our chunking strategy
+                logger.error("RCLONE_ARRS_DUPLICATION_RANGE_ERROR: file={}, target_range={}-{}, download_range={}-{}, source_offset={}, source_size={}",
+                    remotelyCachedEntity.name ?: "unknown",
+                    targetRange.start, targetRange.finish, downloadRange.start, downloadRange.finish, sourceOffset, sourceSize)
+                return@coroutineScope StreamResult.IO_ERROR
+            }
+            else -> {
+                // Target range starts within download range - use calculated offset
+                sourceOffset.toInt()
+            }
+        }
+        
+        logger.info("RCLONE_ARRS_DUPLICATION_PROCESSING: file={}, source_size={}, target_size={}, download_range={}-{}, source_offset={}",
             remotelyCachedEntity.name ?: "unknown",
-            sourceSize, targetSize)
+            sourceSize, targetSize, downloadRange.start, downloadRange.finish, sourceOffset)
         
         try {
             var bytesSent = 0L
-            var sourcePosition = 0
+            var sourcePosition = actualSourceOffset // Start from the calculated offset
             
             while (bytesSent < targetSize) {
                 // Calculate how many bytes to send in this iteration (up to 64KB chunk size)
@@ -413,8 +462,8 @@ class StreamingService(
                 val bytesToSend = Math.min(Math.min(remainingBytes, chunkSize.toLong()), remainingInSource.toLong()).toInt()
                 
                 if (bytesToSend <= 0) {
-                    // Reset position if we've reached the end of source bytes
-                    sourcePosition = 0
+                    // Reset position to the correct offset for duplication
+                    sourcePosition = actualSourceOffset
                     continue
                 }
                 
@@ -444,9 +493,9 @@ class StreamingService(
                 bytesSent += bytesToSend
                 sourcePosition += bytesToSend
                 
-                // If we've reached the end of source bytes, reset position for next iteration
+                // If we've reached the end of source bytes, reset position for duplication
                 if (sourcePosition >= sourceSize) {
-                    sourcePosition = 0
+                    sourcePosition = actualSourceOffset
                 }
             }
             
