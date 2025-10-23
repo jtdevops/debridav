@@ -197,13 +197,18 @@ class StreamingService(
 
         // Check if we should serve local video file for ARR requests
         if (debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)) {
-            logger.info("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}",
-                remotelyCachedEntity.name ?: "unknown",
-                originalRange.start, originalRange.finish,
-                httpRequestInfo.sourceInfo)
+            val fileName = remotelyCachedEntity.name ?: "unknown"
             
-            val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo)
-            return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+            // Check if the file path matches the configured regex pattern
+            if (!debridavConfigProperties.shouldServeLocalVideoForPath(fileName)) {
+                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, regex={}", fileName, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+            } else {
+                logger.info("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}",
+                    fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo)
+                
+                val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
+                return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+            }
         }
 
         // Apply range limiting for rclone/arrs requests if enabled

@@ -221,22 +221,28 @@ class DebridFileResource(
     override fun getContentType(accepts: String?): String {
         // Check if we should serve local video for ARR requests
         if (arrRequestDetector.isArrRequest()) {
-            // Get MIME type from the local video file
-            val localVideoPath = debridavConfigurationProperties.rcloneArrsLocalVideoFilePath
-            if (localVideoPath != null) {
-                val localVideoFile = java.io.File(localVideoPath)
-                if (localVideoFile.exists() && localVideoFile.isFile) {
-                    val fileName = localVideoFile.name.lowercase()
-                    return when {
-                        fileName.endsWith(".mp4") -> "video/mp4"
-                        fileName.endsWith(".avi") -> "video/x-msvideo"
-                        fileName.endsWith(".mkv") -> "video/x-matroska"
-                        fileName.endsWith(".mov") -> "video/quicktime"
-                        fileName.endsWith(".wmv") -> "video/x-ms-wmv"
-                        fileName.endsWith(".flv") -> "video/x-flv"
-                        fileName.endsWith(".webm") -> "video/webm"
-                        fileName.endsWith(".m4v") -> "video/x-m4v"
-                        else -> "video/mp4" // fallback
+            val fileName = file.name ?: "unknown"
+            val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            // Check if the file path matches the configured regex pattern
+            if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
+                // Get MIME type from the local video file
+                val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                if (localVideoPath != null) {
+                    val localVideoFile = java.io.File(localVideoPath)
+                    if (localVideoFile.exists() && localVideoFile.isFile) {
+                        val localFileName = localVideoFile.name.lowercase()
+                        return when {
+                            localFileName.endsWith(".mp4") -> "video/mp4"
+                            localFileName.endsWith(".avi") -> "video/x-msvideo"
+                            localFileName.endsWith(".mkv") -> "video/x-matroska"
+                            localFileName.endsWith(".mov") -> "video/quicktime"
+                            localFileName.endsWith(".wmv") -> "video/x-ms-wmv"
+                            localFileName.endsWith(".flv") -> "video/x-flv"
+                            localFileName.endsWith(".webm") -> "video/webm"
+                            localFileName.endsWith(".m4v") -> "video/x-m4v"
+                            else -> "video/mp4" // fallback
+                        }
                     }
                 }
             }
@@ -248,15 +254,20 @@ class DebridFileResource(
     override fun getContentLength(): Long {
         // Check if we should serve local video for ARR requests
         if (arrRequestDetector.isArrRequest()) {
-            // Get file size from the local video file
-            val localVideoPath = debridavConfigurationProperties.rcloneArrsLocalVideoFilePath
-            if (localVideoPath != null) {
-                val localVideoFile = java.io.File(localVideoPath)
-                if (localVideoFile.exists() && localVideoFile.isFile) {
-                    return localVideoFile.length()
+            val fileName = file.name ?: "unknown"
+            val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            // Check if the file path matches the configured regex pattern
+            if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
+                // Get file size from the local video file
+                val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                if (localVideoPath != null) {
+                    val localVideoFile = java.io.File(localVideoPath)
+                    if (localVideoFile.exists() && localVideoFile.isFile) {
+                        return localVideoFile.length()
+                    }
                 }
             }
-            return 0L // fallback
         }
         return file.contents!!.size!!.toLong()
     }

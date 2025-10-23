@@ -29,15 +29,21 @@ class LocalVideoService(
     suspend fun serveLocalVideoFile(
         outputStream: OutputStream,
         range: io.milton.http.Range?,
-        httpRequestInfo: HttpRequestInfo
+        httpRequestInfo: HttpRequestInfo,
+        fileName: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
         try {
-            val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath
-                ?: return@withContext false
+            // Get the appropriate local video file path based on resolution detection
+            val localVideoPath = if (fileName != null) {
+                debridavConfigProperties.getLocalVideoFilePath(fileName)
+            } else {
+                // Fallback to any available path when no fileName is provided
+                debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull()
+            } ?: return@withContext false
 
             val localVideoFile = File(localVideoPath)
             if (!localVideoFile.exists() || !localVideoFile.isFile) {
-                logger.error("LOCAL_VIDEO_FILE_NOT_FOUND: path={}", localVideoPath)
+                logger.error("LOCAL_VIDEO_FILE_NOT_FOUND: path={}, fileName={}", localVideoPath, fileName)
                 return@withContext false
             }
 
@@ -53,8 +59,12 @@ class LocalVideoService(
                 return@withContext false
             }
 
-            logger.info("LOCAL_VIDEO_SERVING: file={}, range={}-{}, size={} bytes, source={}",
-                localVideoFile.name, start, end, end - start + 1, httpRequestInfo.sourceInfo)
+            val detectedResolution = if (fileName != null) {
+                debridavConfigProperties.detectResolutionFromFileName(fileName)
+            } else null
+            
+            logger.info("LOCAL_VIDEO_SERVING: file={}, range={}-{}, size={} bytes, source={}, originalFileName={}, detectedResolution={}",
+                localVideoFile.name, start, end, end - start + 1, httpRequestInfo.sourceInfo, fileName, detectedResolution)
 
             // Stream the requested range from the local file
             FileInputStream(localVideoFile).use { inputStream ->
@@ -112,22 +122,22 @@ class LocalVideoService(
             true
         } catch (e: ClientAbortException) {
             logger.info("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected, path={}", 
-                debridavConfigProperties.rcloneArrsLocalVideoFilePath)
+                debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull())
             true // Client disconnected, but this is normal behavior
         } catch (e: IOException) {
             if (e.message?.contains("Connection reset") == true || 
                 e.message?.contains("Broken pipe") == true) {
                 logger.info("LOCAL_VIDEO_CONNECTION_RESET: client connection lost, path={}", 
-                    debridavConfigProperties.rcloneArrsLocalVideoFilePath)
+                    debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull())
                 true // Connection reset, but this is normal behavior
             } else {
                 logger.error("LOCAL_VIDEO_IO_ERROR: path={}, error={}", 
-                    debridavConfigProperties.rcloneArrsLocalVideoFilePath, e.message, e)
+                    debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull(), e.message, e)
                 false
             }
         } catch (e: Exception) {
             logger.error("LOCAL_VIDEO_SERVE_ERROR: path={}, error={}", 
-                debridavConfigProperties.rcloneArrsLocalVideoFilePath, e.message, e)
+                debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull(), e.message, e)
             false
         }
     }
@@ -136,8 +146,13 @@ class LocalVideoService(
      * Gets the size of the local video file for content-length headers.
      * Reads the actual file size from the filesystem.
      */
-    fun getLocalVideoFileSize(): Long {
-        val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath ?: return 0L
+    fun getLocalVideoFileSize(fileName: String? = null): Long {
+        val localVideoPath = if (fileName != null) {
+            debridavConfigProperties.getLocalVideoFilePath(fileName)
+        } else {
+            debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull()
+        } ?: return 0L
+        
         val localVideoFile = File(localVideoPath)
         return if (localVideoFile.exists() && localVideoFile.isFile) {
             localVideoFile.length()
@@ -150,8 +165,13 @@ class LocalVideoService(
      * Gets the MIME type of the local video file.
      * Attempts to detect the MIME type from the file extension.
      */
-    fun getLocalVideoFileMimeType(): String {
-        val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath ?: return "video/mp4"
+    fun getLocalVideoFileMimeType(fileName: String? = null): String {
+        val localVideoPath = if (fileName != null) {
+            debridavConfigProperties.getLocalVideoFilePath(fileName)
+        } else {
+            debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull()
+        } ?: return "video/mp4"
+        
         val localVideoFile = File(localVideoPath)
         
         if (!localVideoFile.exists() || !localVideoFile.isFile) {
@@ -176,8 +196,13 @@ class LocalVideoService(
     /**
      * Checks if the local video file exists and is accessible.
      */
-    fun isLocalVideoFileAvailable(): Boolean {
-        val localVideoPath = debridavConfigProperties.rcloneArrsLocalVideoFilePath ?: return false
+    fun isLocalVideoFileAvailable(fileName: String? = null): Boolean {
+        val localVideoPath = if (fileName != null) {
+            debridavConfigProperties.getLocalVideoFilePath(fileName)
+        } else {
+            debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull()
+        } ?: return false
+        
         val localVideoFile = File(localVideoPath)
         return localVideoFile.exists() && localVideoFile.isFile && localVideoFile.canRead()
     }
