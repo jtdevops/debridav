@@ -198,10 +198,14 @@ class StreamingService(
         // Check if we should serve local video file for ARR requests
         if (debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)) {
             val fileName = remotelyCachedEntity.name ?: "unknown"
+            val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            // Add debug logging to show the path construction in StreamingService
+            logger.info("LOCAL_VIDEO_STREAMING_PATH_CONSTRUCTION: fileName='$fileName', directoryPath='${remotelyCachedEntity.directory?.fileSystemPath()}', fullPath='$fullPath'")
             
             // Check if the file path matches the configured regex pattern
-            if (!debridavConfigProperties.shouldServeLocalVideoForPath(fileName)) {
-                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, regex={}", fileName, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+            if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
+                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, regex={}", fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
             } else {
                 logger.info("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}",
                     fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo)
