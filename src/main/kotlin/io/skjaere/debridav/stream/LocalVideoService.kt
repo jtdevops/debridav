@@ -1,10 +1,12 @@
 package io.skjaere.debridav.stream
 
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import org.apache.catalina.connector.ClientAbortException
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.io.OutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -70,18 +72,59 @@ class LocalVideoService(
                         break
                     }
 
-                    outputStream.write(buffer, 0, bytesRead)
-                    remaining -= bytesRead
-                    position += bytesRead
+                    try {
+                        outputStream.write(buffer, 0, bytesRead)
+                        remaining -= bytesRead
+                        position += bytesRead
+                    } catch (e: ClientAbortException) {
+                        logger.info("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected during streaming, position={}, remaining={}", 
+                            position, remaining)
+                        return@withContext true // Client disconnected, but this is normal behavior
+                    } catch (e: IOException) {
+                        if (e.message?.contains("Connection reset") == true || 
+                            e.message?.contains("Broken pipe") == true) {
+                            logger.info("LOCAL_VIDEO_CONNECTION_RESET: client connection lost during streaming, position={}, remaining={}", 
+                                position, remaining)
+                            return@withContext true // Connection reset, but this is normal behavior
+                        }
+                        throw e // Re-throw if it's not a connection-related issue
+                    }
                 }
                 
-                outputStream.flush()
+                try {
+                    outputStream.flush()
+                } catch (e: ClientAbortException) {
+                    logger.info("LOCAL_VIDEO_CLIENT_ABORTED_FLUSH: client disconnected during flush")
+                    return@withContext true
+                } catch (e: IOException) {
+                    if (e.message?.contains("Connection reset") == true || 
+                        e.message?.contains("Broken pipe") == true) {
+                        logger.info("LOCAL_VIDEO_CONNECTION_RESET_FLUSH: client connection lost during flush")
+                        return@withContext true
+                    }
+                    throw e
+                }
             }
 
             logger.info("LOCAL_VIDEO_SERVED_SUCCESSFULLY: file={}, range={}-{}, bytes_served={}",
                 localVideoFile.name, start, end, end - start + 1)
 
             true
+        } catch (e: ClientAbortException) {
+            logger.info("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected, path={}", 
+                debridavConfigProperties.rcloneArrsLocalVideoFilePath)
+            true // Client disconnected, but this is normal behavior
+        } catch (e: IOException) {
+            if (e.message?.contains("Connection reset") == true || 
+                e.message?.contains("Broken pipe") == true) {
+                logger.info("LOCAL_VIDEO_CONNECTION_RESET: client connection lost, path={}", 
+                    debridavConfigProperties.rcloneArrsLocalVideoFilePath)
+                true // Connection reset, but this is normal behavior
+            } else {
+                logger.error("LOCAL_VIDEO_IO_ERROR: path={}, error={}", 
+                    debridavConfigProperties.rcloneArrsLocalVideoFilePath, e.message, e)
+                false
+            }
         } catch (e: Exception) {
             logger.error("LOCAL_VIDEO_SERVE_ERROR: path={}, error={}", 
                 debridavConfigProperties.rcloneArrsLocalVideoFilePath, e.message, e)
