@@ -181,12 +181,8 @@ data class DebridavConfigurationProperties(
         }
         
         return try {
-            val matches = filePath.matches(Regex(rcloneArrsLocalVideoPathRegex))
-            // Add debug logging to help troubleshoot regex matching
-            println("LOCAL_VIDEO_REGEX_CHECK: filePath='$filePath', regex='$rcloneArrsLocalVideoPathRegex', matches=$matches")
-            matches
+            filePath.matches(Regex(rcloneArrsLocalVideoPathRegex))
         } catch (e: Exception) {
-            println("LOCAL_VIDEO_REGEX_ERROR: filePath='$filePath', regex='$rcloneArrsLocalVideoPathRegex', error=${e.message}")
             false // Invalid regex, don't serve
         }
     }

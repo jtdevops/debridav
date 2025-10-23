@@ -200,9 +200,6 @@ class StreamingService(
             val fileName = remotelyCachedEntity.name ?: "unknown"
             val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
-            // Add debug logging to show the path construction in StreamingService
-            logger.info("LOCAL_VIDEO_STREAMING_PATH_CONSTRUCTION: fileName='$fileName', directoryPath='${remotelyCachedEntity.directory?.fileSystemPath()}', fullPath='$fullPath'")
-            
             // Check if the file path matches the configured regex pattern
             if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
                 logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, regex={}", fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
