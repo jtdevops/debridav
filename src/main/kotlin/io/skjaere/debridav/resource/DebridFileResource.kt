@@ -224,6 +224,9 @@ class DebridFileResource(
             val fileName = file.name ?: "unknown"
             val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
+            // Add debug logging to show the path construction
+            println("LOCAL_VIDEO_PATH_CONSTRUCTION: fileName='$fileName', directoryPath='${file.directory?.fileSystemPath()}', fullPath='$fullPath'")
+            
             // Check if the file path matches the configured regex pattern
             if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
                 // Get MIME type from the local video file
@@ -256,6 +259,9 @@ class DebridFileResource(
         if (arrRequestDetector.isArrRequest()) {
             val fileName = file.name ?: "unknown"
             val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            // Add debug logging to show the path construction
+            println("LOCAL_VIDEO_PATH_CONSTRUCTION: fileName='$fileName', directoryPath='${file.directory?.fileSystemPath()}', fullPath='$fullPath'")
             
             // Check if the file path matches the configured regex pattern
             if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
