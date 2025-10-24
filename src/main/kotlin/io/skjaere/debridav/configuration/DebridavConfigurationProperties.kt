@@ -52,6 +52,7 @@ data class DebridavConfigurationProperties(
     val enableRcloneArrsLocalVideo: Boolean = false, // Enable serving local video files for ARR requests
     val rcloneArrsLocalVideoFilePaths: String? = null, // Video file mapping as comma-separated key=value pairs
     val rcloneArrsLocalVideoPathRegex: String? = null, // Regex pattern to match file paths for local video serving
+    val rcloneArrsLocalVideoMinSizeKb: Long? = null, // Minimum file size in KB to use local video (smaller files served externally)
     val rcloneArrsUserAgentPattern: String?, // User agent pattern for ARR detection
     val rcloneArrsHostnamePattern: String? // Hostname pattern for ARR detection
 ) {
@@ -202,5 +203,19 @@ data class DebridavConfigurationProperties(
         }?.value?.let { return it }
         
         return null
+    }
+    
+    /**
+     * Checks if a file should use local video serving based on its size.
+     * If rcloneArrsLocalVideoMinSizeKb is configured, files smaller than this threshold
+     * will be served externally instead of using local video files.
+     */
+    fun shouldUseLocalVideoForSize(fileSizeBytes: Long): Boolean {
+        if (rcloneArrsLocalVideoMinSizeKb == null) {
+            return true // No size threshold configured, use local video for all files
+        }
+        
+        val minSizeBytes = rcloneArrsLocalVideoMinSizeKb * 1024 // Convert KB to bytes
+        return fileSizeBytes >= minSizeBytes
     }
 }

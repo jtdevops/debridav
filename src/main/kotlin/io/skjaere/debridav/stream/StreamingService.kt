@@ -135,28 +135,45 @@ class StreamingService(
             val fileName = remotelyCachedEntity.name ?: "unknown"
             val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
-            logger.info("LOCAL_VIDEO_CHECK: file={}, fullPath={}, shouldServeLocalVideoForArrs=true", fileName, fullPath)
+            logger.debug("LOCAL_VIDEO_CHECK: file={}, fullPath={}, shouldServeLocalVideoForArrs=true", fileName, fullPath)
             
             // Check if the file path matches the configured regex pattern
             if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
-                logger.info("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}, will serve external file", 
+                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}, will serve external file", 
                     fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
             } else {
-                logger.info("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}",
-                    fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo)
-                
-                val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
-                return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+                // Only apply local video serving to media files, not subtitles or other files
+                if (isMediaFile(fileName)) {
+                    // Get the external file size to check against the minimum size threshold
+                    val externalFileSize = debridLink.size ?: 0L
+                    
+                    // Check if the file is large enough to use local video serving
+                    if (debridavConfigProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                        logger.debug("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}",
+                            fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo, 
+                            externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                        
+                        val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
+                        return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+                    } else {
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_TOO_SMALL: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}, will serve external file", 
+                            fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex, 
+                            externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                    }
+                } else {
+                    logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_NOT_MEDIA: file={}, fullPath={}, regex={}, isMediaFile=false, will serve external file", 
+                        fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+                }
             }
         } else {
-            logger.info("LOCAL_VIDEO_CHECK: file={}, shouldServeLocalVideoForArrs=false, will serve external file", 
+            logger.debug("LOCAL_VIDEO_CHECK: file={}, shouldServeLocalVideoForArrs=false, will serve external file", 
                 remotelyCachedEntity.name ?: "unknown")
         }
 
         // Use the original range for normal streaming
         val appliedRange = originalRange
         
-        logger.info("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes, provider={}, source={}", 
+        logger.debug("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes, provider={}, source={}", 
             remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
             appliedRange.finish - appliedRange.start + 1, debridLink.provider, httpRequestInfo.sourceInfo)
         
@@ -470,5 +487,19 @@ class StreamingService(
         while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
             completedDownloads.poll()
         }
+    }
+    
+    /**
+     * Checks if the given filename is a media file based on its extension.
+     * Only media files should use local video serving, not subtitles or other files.
+     */
+    private fun isMediaFile(fileName: String): Boolean {
+        val knownVideoExtensions = listOf(
+            ".mp4", ".mkv", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m4v", 
+            ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".asf", ".rm", ".rmvb"
+        )
+        
+        val lowerFileName = fileName.lowercase()
+        return knownVideoExtensions.any { lowerFileName.endsWith(it) }
     }
 }

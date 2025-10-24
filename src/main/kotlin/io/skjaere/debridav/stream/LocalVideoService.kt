@@ -63,7 +63,7 @@ class LocalVideoService(
                 debridavConfigProperties.detectResolutionFromFileName(fileName)
             } else null
             
-            logger.info("LOCAL_VIDEO_SERVING: file={}, range={}-{}, size={} bytes, source={}, originalFileName={}, detectedResolution={}",
+            logger.debug("LOCAL_VIDEO_SERVING: file={}, range={}-{}, size={} bytes, source={}, originalFileName={}, detectedResolution={}",
                 localVideoFile.name, start, end, end - start + 1, httpRequestInfo.sourceInfo, fileName, detectedResolution)
 
             // Stream the requested range from the local file
@@ -87,7 +87,7 @@ class LocalVideoService(
                         remaining -= bytesRead
                         position += bytesRead
                     } catch (e: ClientAbortException) {
-                        logger.info("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected during streaming, position={}, remaining={}", 
+                        logger.debug("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected during streaming, position={}, remaining={}", 
                             position, remaining)
                         return@withContext true // Client disconnected, but this is normal behavior
                     } catch (e: IOException) {
@@ -104,7 +104,7 @@ class LocalVideoService(
                 try {
                     outputStream.flush()
                 } catch (e: ClientAbortException) {
-                    logger.info("LOCAL_VIDEO_CLIENT_ABORTED_FLUSH: client disconnected during flush")
+                    logger.debug("LOCAL_VIDEO_CLIENT_ABORTED_FLUSH: client disconnected during flush")
                     return@withContext true
                 } catch (e: IOException) {
                     if (e.message?.contains("Connection reset") == true || 
@@ -116,12 +116,12 @@ class LocalVideoService(
                 }
             }
 
-            logger.info("LOCAL_VIDEO_SERVED_SUCCESSFULLY: file={}, range={}-{}, bytes_served={}",
+            logger.debug("LOCAL_VIDEO_SERVED_SUCCESSFULLY: file={}, range={}-{}, bytes_served={}",
                 localVideoFile.name, start, end, end - start + 1)
 
             true
         } catch (e: ClientAbortException) {
-            logger.info("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected, path={}", 
+            logger.debug("LOCAL_VIDEO_CLIENT_ABORTED: client disconnected, path={}", 
                 debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull())
             true // Client disconnected, but this is normal behavior
         } catch (e: IOException) {

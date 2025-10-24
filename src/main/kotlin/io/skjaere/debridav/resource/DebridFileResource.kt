@@ -257,47 +257,75 @@ class DebridFileResource(
             val fileName = file.name ?: "unknown"
             val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
-            logger.info("CONTENT_LENGTH_REQUEST: file={}, fullPath={}, isArrRequest=true", fileName, fullPath)
             
             // Check if the file path matches the configured regex pattern
             if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
-                logger.info("LOCAL_VIDEO_PATH_MATCHED: file={}, fullPath={}, regex={}", 
-                    fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
-                
-                // Get file size from the local video file
-                val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
-                if (localVideoPath != null) {
-                    val localVideoFile = java.io.File(localVideoPath)
-                    if (localVideoFile.exists() && localVideoFile.isFile) {
-                        val localFileSize = localVideoFile.length()
-                        logger.info("LOCAL_VIDEO_CONTENT_LENGTH: file={}, localPath={}, size={} bytes", 
-                            fileName, localVideoPath, localFileSize)
-                        return localFileSize
+                // Only apply local video serving to media files, not subtitles or other files
+                if (isMediaFile(fileName)) {
+                    // Get the external file size to check against the minimum size threshold
+                    val externalFileSize = file.contents!!.size!!.toLong()
+                    
+                    // Check if the file is large enough to use local video serving
+                    if (debridavConfigurationProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}", 
+                            fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex, 
+                            externalFileSize, debridavConfigurationProperties.rcloneArrsLocalVideoMinSizeKb)
+                        
+                        // Get file size from the local video file
+                        val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                        if (localVideoPath != null) {
+                            val localVideoFile = java.io.File(localVideoPath)
+                            if (localVideoFile.exists() && localVideoFile.isFile) {
+                                val localFileSize = localVideoFile.length()
+                                logger.debug("LOCAL_VIDEO_CONTENT_LENGTH: file={}, localPath={}, size={} bytes", 
+                                    fileName, localVideoPath, localFileSize)
+                                return localFileSize
+                            } else {
+                                logger.warn("LOCAL_VIDEO_FILE_NOT_FOUND: file={}, localPath={}, exists={}, isFile={}", 
+                                    fileName, localVideoPath, localVideoFile.exists(), localVideoFile.isFile)
+                            }
+                        } else {
+                            logger.warn("LOCAL_VIDEO_PATH_NULL: file={}, no local video path found", fileName)
+                        }
                     } else {
-                        logger.warn("LOCAL_VIDEO_FILE_NOT_FOUND: file={}, localPath={}, exists={}, isFile={}", 
-                            fileName, localVideoPath, localVideoFile.exists(), localVideoFile.isFile)
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_TOO_SMALL: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}", 
+                            fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex, 
+                            externalFileSize, debridavConfigurationProperties.rcloneArrsLocalVideoMinSizeKb)
                     }
                 } else {
-                    logger.warn("LOCAL_VIDEO_PATH_NULL: file={}, no local video path found", fileName)
+                    logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_NOT_MEDIA: file={}, fullPath={}, regex={}, isMediaFile=false", 
+                        fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
                 }
             } else {
-                logger.info("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}", 
+                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}", 
                     fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
             }
-        } else {
-            logger.info("CONTENT_LENGTH_REQUEST: file={}, isArrRequest=false", file.name ?: "unknown")
         }
         
         // Fallback to external file size
         val externalFileSize = file.contents!!.size!!.toLong()
         val workingDebridFile = file.contents!!.debridLinks.firstOrNull { it is CachedFile }
-        logger.info("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
+        logger.debug("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
             file.name ?: "unknown", externalFileSize, workingDebridFile?.provider)
         return externalFileSize
     }
 
     override fun isDigestAllowed(): Boolean {
         return true
+    }
+    
+    /**
+     * Checks if the given filename is a media file based on its extension.
+     * Only media files should use local video serving, not subtitles or other files.
+     */
+    private fun isMediaFile(fileName: String): Boolean {
+        val knownVideoExtensions = listOf(
+            ".mp4", ".mkv", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m4v", 
+            ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".asf", ".rm", ".rmvb"
+        )
+        
+        val lowerFileName = fileName.lowercase()
+        return knownVideoExtensions.any { lowerFileName.endsWith(it) }
     }
 
     override fun getCreateDate(): Date {
@@ -342,7 +370,7 @@ class DebridFileResource(
             sourceIpAddress
         }
 
-        logger.info("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} ({}), source_ip={}, headers_count={}",
+        logger.debug("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} ({}), source_ip={}, headers_count={}",
             file.name ?: "unknown", range?.start, range?.finish, FileUtils.byteCountToDisplaySize(requestedSize), requestedSize, sourceInfo, httpHeaders.size)
 
         return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)

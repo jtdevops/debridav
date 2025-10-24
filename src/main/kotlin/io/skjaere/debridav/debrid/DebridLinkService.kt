@@ -73,12 +73,12 @@ class DebridLinkService(
         .build(CacheLoader<LinkLivenessCacheKey, Boolean> { key ->
             runBlocking {
                 logger.info("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
-                logger.info("LINK_ALIVE_CHECK: file={}, provider={}, link={}, size={} bytes", 
+                logger.debug("LINK_ALIVE_CHECK: file={}, provider={}, link={}, size={} bytes", 
                     key.cachedFile.path, key.cachedFile.provider, key.cachedFile.link?.take(50) + "...", key.cachedFile.size)
                 val isAlive = debridClients
                     .firstOrNull { it.getProvider().toString() == key.provider }?.isLinkAlive(key.cachedFile)
                     ?: false
-                logger.info("LINK_ALIVE_RESULT: file={}, provider={}, isAlive={}", 
+                logger.debug("LINK_ALIVE_RESULT: file={}, provider={}, isAlive={}", 
                     key.cachedFile.path, key.cachedFile.provider, isAlive)
                 isAlive
             }
@@ -122,7 +122,7 @@ class DebridLinkService(
         val debridFileContents = file.contents!!
         val started = Instant.now()
         logger.info("Getting links for ${file.name} from ${debridFileContents.originalPath}")
-        logger.info("DEBRID_LINK_REQUEST: file={}, originalPath={}, debridLinksCount={}", 
+        logger.debug("DEBRID_LINK_REQUEST: file={}, originalPath={}, debridLinksCount={}", 
             file.name, debridFileContents.originalPath, debridFileContents.debridLinks.size)
         return getFlowOfDebridLinks(debridFileContents)
             .retry(RETRIES)
@@ -136,7 +136,7 @@ class DebridLinkService(
                 if (debridLink is CachedFile) {
                     val took = Duration.between(started, Instant.now()).toMillis().toDouble()
                     logger.info("Found link for ${file.name} from ${debridLink.provider}. took $took ms")
-                    logger.info("DEBRID_LINK_FOUND: file={}, provider={}, link={}, size={} bytes, took={} ms", 
+                    logger.debug("DEBRID_LINK_FOUND: file={}, provider={}, link={}, size={} bytes, took={} ms", 
                         file.name, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size, took)
                     linkFindingDurationSummary.record(took)
                     emit(debridLink)

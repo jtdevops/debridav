@@ -81,11 +81,11 @@ class DefaultStreamableLinkPreparer(
     }
 
     override suspend fun isLinkAlive(debridLink: CachedFile): Boolean = flow {
-        logger.info("LINK_ALIVE_HTTP_CHECK: file={}, provider={}, link={}, size={} bytes", 
+        logger.debug("LINK_ALIVE_HTTP_CHECK: file={}, provider={}, link={}, size={} bytes", 
             debridLink.path, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size)
         rateLimiter.executeSuspendFunction {
             val result = httpClient.head(debridLink.link!!).status.isSuccess()
-            logger.info("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
+            logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
                 debridLink.path, debridLink.provider, result)
             emit(result)
         }
