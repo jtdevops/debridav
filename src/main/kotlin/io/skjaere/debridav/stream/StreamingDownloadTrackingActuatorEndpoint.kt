@@ -18,7 +18,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
     @ReadOperation
     fun getHistoricalDownloadTracking(): List<DownloadTrackingInfo> {
         return streamingService.getCompletedDownloads().map { context ->
-            val httpRequestInfo = context.httpHeaders.entries.associate { it.key to it.value }
+            val httpRequestInfo = context.httpHeaders.entries.associate { entry -> entry.key to entry.value }
                 .let { headers -> HttpRequestInfo(headers, context.sourceIpAddress) }
 
             DownloadTrackingInfo(
@@ -33,9 +33,9 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 bytesDownloaded = context.bytesDownloaded.get(),
                 // Rclone/Arrs byte duplication metrics (grouped with bytes data)
                 actualBytesSent = context.actualBytesSent,
-                actualBytesSentFormatted = context.actualBytesSent?.let { FileUtils.byteCountToDisplaySize(it) },
+                actualBytesSentFormatted = context.actualBytesSent?.let { bytes -> FileUtils.byteCountToDisplaySize(bytes) },
                 cachedChunkSize = context.cachedChunkSize,
-                cachedChunkSizeFormatted = context.cachedChunkSize?.let { FileUtils.byteCountToDisplaySize(it) },
+                cachedChunkSizeFormatted = context.cachedChunkSize?.let { bytes -> FileUtils.byteCountToDisplaySize(bytes) },
                 wasCacheHit = context.wasCacheHit,
                 usedByteDuplication = context.usedByteDuplication,
                 duplicationRatio = if (context.cachedChunkSize != null && context.cachedChunkSize!! > 0 && context.actualBytesSent != null) {
@@ -50,7 +50,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 httpHeaders = context.httpHeaders,
                 sourceInfo = httpRequestInfo.sourceInfo
             )
-        }.sortedByDescending { it.downloadStartTime }
+        }.sortedByDescending { trackingInfo -> trackingInfo.downloadStartTime }
     }
 
     data class DownloadTrackingInfo(
