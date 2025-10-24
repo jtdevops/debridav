@@ -139,9 +139,12 @@ class StreamingService(
             val fileName = remotelyCachedEntity.name ?: "unknown"
             val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
+            logger.info("LOCAL_VIDEO_CHECK: file={}, fullPath={}, shouldServeLocalVideoForArrs=true", fileName, fullPath)
+            
             // Check if the file path matches the configured regex pattern
             if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
-                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, regex={}", fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+                logger.info("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}, will serve external file", 
+                    fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
             } else {
                 logger.info("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}",
                     fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo)
@@ -149,10 +152,17 @@ class StreamingService(
                 val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
                 return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
             }
+        } else {
+            logger.info("LOCAL_VIDEO_CHECK: file={}, shouldServeLocalVideoForArrs=false, will serve external file", 
+                remotelyCachedEntity.name ?: "unknown")
         }
 
         // Use the original range for normal streaming
         val appliedRange = originalRange
+        
+        logger.info("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes, provider={}, source={}", 
+            remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
+            appliedRange.finish - appliedRange.start + 1, debridLink.provider, httpRequestInfo.sourceInfo)
         
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
         

@@ -257,19 +257,43 @@ class DebridFileResource(
             val fileName = file.name ?: "unknown"
             val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
+            logger.info("CONTENT_LENGTH_REQUEST: file={}, fullPath={}, isArrRequest=true", fileName, fullPath)
+            
             // Check if the file path matches the configured regex pattern
             if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
+                logger.info("LOCAL_VIDEO_PATH_MATCHED: file={}, fullPath={}, regex={}", 
+                    fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
+                
                 // Get file size from the local video file
                 val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
                 if (localVideoPath != null) {
                     val localVideoFile = java.io.File(localVideoPath)
                     if (localVideoFile.exists() && localVideoFile.isFile) {
-                        return localVideoFile.length()
+                        val localFileSize = localVideoFile.length()
+                        logger.info("LOCAL_VIDEO_CONTENT_LENGTH: file={}, localPath={}, size={} bytes", 
+                            fileName, localVideoPath, localFileSize)
+                        return localFileSize
+                    } else {
+                        logger.warn("LOCAL_VIDEO_FILE_NOT_FOUND: file={}, localPath={}, exists={}, isFile={}", 
+                            fileName, localVideoPath, localVideoFile.exists(), localVideoFile.isFile)
                     }
+                } else {
+                    logger.warn("LOCAL_VIDEO_PATH_NULL: file={}, no local video path found", fileName)
                 }
+            } else {
+                logger.info("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}", 
+                    fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
             }
+        } else {
+            logger.info("CONTENT_LENGTH_REQUEST: file={}, isArrRequest=false", file.name ?: "unknown")
         }
-        return file.contents!!.size!!.toLong()
+        
+        // Fallback to external file size
+        val externalFileSize = file.contents!!.size!!.toLong()
+        val workingDebridFile = file.contents!!.debridLinks.firstOrNull { it is CachedFile }
+        logger.info("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
+            file.name ?: "unknown", externalFileSize, workingDebridFile?.provider)
+        return externalFileSize
     }
 
     override fun isDigestAllowed(): Boolean {
