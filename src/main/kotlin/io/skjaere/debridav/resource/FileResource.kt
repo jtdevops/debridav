@@ -69,6 +69,7 @@ class FileResource(
     }
 
     override fun getContentLength(): Long {
+        // For local files, we don't need to check ARR requests since they're already local
         return file.size!!
     }
 
