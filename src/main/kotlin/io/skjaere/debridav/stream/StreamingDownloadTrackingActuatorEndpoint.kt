@@ -31,16 +31,8 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 downloadStartTime = context.downloadStartTime,
                 bytesDownloadedFormatted = FileUtils.byteCountToDisplaySize(context.bytesDownloaded.get()),
                 bytesDownloaded = context.bytesDownloaded.get(),
-                // Rclone/Arrs byte duplication metrics (grouped with bytes data)
                 actualBytesSent = context.actualBytesSent,
                 actualBytesSentFormatted = context.actualBytesSent?.let { bytes -> FileUtils.byteCountToDisplaySize(bytes) },
-                cachedChunkSize = context.cachedChunkSize,
-                cachedChunkSizeFormatted = context.cachedChunkSize?.let { bytes -> FileUtils.byteCountToDisplaySize(bytes) },
-                wasCacheHit = context.wasCacheHit,
-                usedByteDuplication = context.usedByteDuplication,
-                duplicationRatio = if (context.cachedChunkSize != null && context.cachedChunkSize!! > 0 && context.actualBytesSent != null) {
-                    context.actualBytesSent!!.toDouble() / context.cachedChunkSize!!.toDouble()
-                } else null,
                 // Completion metadata
                 downloadEndTime = context.downloadEndTime,
                 completionStatus = context.completionStatus,
@@ -64,14 +56,8 @@ class StreamingDownloadTrackingActuatorEndpoint(
         val downloadStartTime: Instant,
         val bytesDownloadedFormatted: String,
         val bytesDownloaded: Long,
-        // Rclone/Arrs byte duplication metrics (grouped with bytes data)
         val actualBytesSent: Long?,
         val actualBytesSentFormatted: String?,
-        val cachedChunkSize: Long?,
-        val cachedChunkSizeFormatted: String?,
-        val wasCacheHit: Boolean,
-        val usedByteDuplication: Boolean,
-        val duplicationRatio: Double?,  // actualBytesSent / cachedChunkSize (e.g., 1024x for 1024x duplication)
         // Completion metadata
         @JsonFormat(shape = JsonFormat.Shape.STRING)
         val downloadEndTime: Instant?,

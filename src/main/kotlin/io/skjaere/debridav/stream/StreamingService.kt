@@ -58,12 +58,8 @@ data class DownloadTrackingContext(
     val requestedSize: Long,
     val downloadStartTime: Instant = Instant.now(),
     val bytesDownloaded: AtomicLong = AtomicLong(0),
-    // Rclone/Arrs byte duplication metrics (grouped with bytes data)
-    var actualBytesSent: Long? = null,  // Total bytes actually sent (after duplication)
-    var cachedChunkSize: Long? = null,  // Size of the cached chunk used
-    var wasCacheHit: Boolean = false,   // Whether this request used cached data
-    var usedByteDuplication: Boolean = false,  // Whether byte duplication was used
     // Completion metadata
+    var actualBytesSent: Long? = null,  // Total bytes actually sent
     var downloadEndTime: Instant? = null,
     var completionStatus: String = "in_progress",
     val httpHeaders: Map<String, String> = emptyMap(),
@@ -169,7 +165,7 @@ class StreamingService(
         var result: StreamResult = StreamResult.OK
         try {
             // Normal streaming
-            streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
+            streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream, trackingId)
             result = StreamResult.OK
         } catch (e: LinkNotFoundException) {
             result = handleLinkNotFound(debridLink, remotelyCachedEntity, appliedRange, outputStream)
@@ -203,7 +199,7 @@ class StreamingService(
     
 
     private suspend fun streamBytes(
-        remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream
+        remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream, trackingId: String?
     ) = coroutineScope {
         launch {
             val streamingPlan = streamPlanningService.generatePlan(
@@ -213,7 +209,7 @@ class StreamingService(
             )
             val sources = getSources(streamingPlan)
             val byteArrays = getByteArrays(sources)
-            sendContent(byteArrays, outputStream, remotelyCachedEntity)
+            sendContent(byteArrays, outputStream, remotelyCachedEntity, trackingId)
         }
     }
 
@@ -344,7 +340,8 @@ class StreamingService(
     suspend fun CoroutineScope.sendContent(
         byteArrayChannel: ReceiveChannel<ByteArrayContext>,
         outputStream: OutputStream,
-        remotelyCachedEntity: RemotelyCachedEntity
+        remotelyCachedEntity: RemotelyCachedEntity,
+        trackingId: String?
     ) {
         val shouldBufferInMemory = debridavConfigProperties.enableInMemoryBuffering
         val shouldCacheToDatabase = debridavConfigProperties.enableChunkCaching
@@ -376,6 +373,11 @@ class StreamingService(
                     gaugeContext.outputStream.write(context.byteArray)
                 }
                 bytesSent += context.byteArray.size
+                
+                // Update download tracking with bytes sent
+                trackingId?.let { id ->
+                    activeDownloads[id]?.bytesDownloaded?.addAndGet(context.byteArray.size.toLong())
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -438,6 +440,10 @@ class StreamingService(
         )
         
         activeDownloads[trackingId] = context
+        
+        logger.info("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
+            fileName, requestedSize, trackingId)
+        
         return trackingId
     }
 
@@ -453,6 +459,12 @@ class StreamingService(
             StreamResult.CLIENT_ERROR -> "client_error"
             else -> "unknown_error"
         }
+        
+        // Set actual bytes sent to the final downloaded count
+        context.actualBytesSent = context.bytesDownloaded.get()
+        
+        logger.info("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
+            context.fileName, context.bytesDownloaded.get(), context.actualBytesSent)
         
         completedDownloads.add(context)
         while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
