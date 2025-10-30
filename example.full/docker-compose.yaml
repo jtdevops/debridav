@@ -32,10 +32,42 @@ services:
       - EASYNEWS_USERNAME=${EASYNEWS_USERNAME}
       - EASYNEWS_PASSWORD=${EASYNEWS_PASSWORD}
       - TORBOX_APIKEY=${TORBOX_API_KEY}
+
+      # Disable the legacy import of .debridav files fom the /debridav container folder
+      - DEBRIDAV_ENABLE_FILE_IMPORT_ON_STARTUP=false
+
+      ### Buffer configuration options
+      # For Default Behavior (5MB database caching)
+      #- DEBRIDAV_ENABLE_CHUNK_CACHING=true
+      #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
+      ##- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD defaults to 5120000 (5MB)
+
+      # 256KB In-Memory Buffer Only
+      - DEBRIDAV_ENABLE_CHUNK_CACHING=false
+      - DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
+      - DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD=262144 # 256KB buffer
+
+      # Complete Direct Streaming (No buffering)
+      #- DEBRIDAV_ENABLE_CHUNK_CACHING=false
+      #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=false
+      ###
+
+      # Streaming optimization
+      - DEBRIDAV_STREAMING_DELAY_BETWEEN_RETRIES=50ms
+      - DEBRIDAV_STREAMING_RETRIES_ON_PROVIDER_ERROR=2
+      - DEBRIDAV_STREAMING_WAIT_AFTER_NETWORK_ERROR=100ms
+      
+      # Cache durations
+      - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
+      - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
+      
+      # Byte range chunking control - set to true to prevent aggressive chunking and caching
+      - DEBRIDAV_DISABLE_BYTE_RANGE_REQUEST_CHUNKING=true
     ports:
       - ${DEBRIDAV_PORT}:8080
       - "8000:8000"
     # volumes:
+    # Legacy storage folder for .debridav files
     #   - ${DEBRIDAV_ROOT_HOST_FS}:${DEBRIDAV_ROOT_PATH}
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8080/actuator/health/readiness" ]

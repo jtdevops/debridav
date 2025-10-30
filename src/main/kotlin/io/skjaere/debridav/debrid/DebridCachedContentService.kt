@@ -1,7 +1,7 @@
 package io.skjaere.debridav.debrid
 
 
-import io.ktor.utils.io.errors.IOException
+import kotlinx.io.IOException
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
 import io.skjaere.debridav.debrid.client.model.ClientErrorGetCachedFilesResponse

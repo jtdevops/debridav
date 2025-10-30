@@ -1,6 +1,6 @@
 package io.skjaere.debridav.debrid
 
-import io.ktor.utils.io.errors.IOException
+import kotlinx.io.IOException
 import io.skjaere.debridav.debrid.client.StreamableLinkPreparable
 import io.skjaere.debridav.fs.CachedFile
 import org.springframework.stereotype.Component

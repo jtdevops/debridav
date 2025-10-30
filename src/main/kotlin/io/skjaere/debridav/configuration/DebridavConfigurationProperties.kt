@@ -6,6 +6,13 @@ import java.time.Duration
 
 
 private const val ONE_K = 1024 * 1024
+private const val DEFAULT_LINK_LIVENESS_CACHE_MINUTES = 15L
+private const val DEFAULT_CACHED_FILE_CACHE_MINUTES = 30L
+private const val DEFAULT_STREAMING_DELAY_MILLIS = 50L
+private const val DEFAULT_STREAMING_RETRIES = 2L
+private const val DEFAULT_STREAMING_NETWORK_ERROR_WAIT_MILLIS = 100L
+private const val DEFAULT_STREAMING_CLIENT_ERROR_WAIT_MILLIS = 100L
+private const val DEFAULT_STREAMING_PROVIDER_ERROR_WAIT_MINUTES = 1L
 
 @ConfigurationProperties(prefix = "debridav")
 data class DebridavConfigurationProperties(
@@ -29,13 +36,26 @@ data class DebridavConfigurationProperties(
     val defaultCategories: List<String>,
     val localEntityMaxSizeMb: Int,
     val cacheMaxSizeGb: Double,
+    val linkLivenessCacheDuration: Duration = Duration.ofMinutes(DEFAULT_LINK_LIVENESS_CACHE_MINUTES),
+    val cachedFileCacheDuration: Duration = Duration.ofMinutes(DEFAULT_CACHED_FILE_CACHE_MINUTES),
+    val streamingDelayBetweenRetries: Duration = Duration.ofMillis(DEFAULT_STREAMING_DELAY_MILLIS),
+    val streamingRetriesOnProviderError: Long = DEFAULT_STREAMING_RETRIES,
+    val streamingWaitAfterNetworkError: Duration = Duration.ofMillis(DEFAULT_STREAMING_NETWORK_ERROR_WAIT_MILLIS),
+    val streamingWaitAfterProviderError: Duration = Duration.ofMinutes(DEFAULT_STREAMING_PROVIDER_ERROR_WAIT_MINUTES),
+    val streamingWaitAfterClientError: Duration = Duration.ofMillis(DEFAULT_STREAMING_CLIENT_ERROR_WAIT_MILLIS),
+    val enableChunkCaching: Boolean = true,
+    val enableInMemoryBuffering: Boolean = true,
+    val disableByteRangeRequestChunking: Boolean = false,
+    val enableStreamingDownloadTracking: Boolean = false,
 ) {
     init {
         require(debridClients.isNotEmpty()) {
             "No debrid providers defined"
         }
-        require((cacheMaxSizeGb * ONE_K * ONE_K) > localEntityMaxSizeMb) {
-            "debridav.cache-max-size-gb must be greater than debridav.chunk-caching-size-threshold in Gb"
+        if (enableChunkCaching) {
+            require((cacheMaxSizeGb * ONE_K * ONE_K) > localEntityMaxSizeMb) {
+                "debridav.cache-max-size-gb must be greater than debridav.chunk-caching-size-threshold in Gb"
+            }
         }
     }
 

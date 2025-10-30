@@ -74,6 +74,7 @@ tasks.jacocoTestReport {
 dependencies {
     api(libs.org.springframework.boot.spring.boot.starter.web)
     api(libs.com.fasterxml.jackson.module.jackson.module.kotlin)
+    api(libs.com.fasterxml.jackson.datatype.jackson.datatype.jsr310)
     api(libs.org.jetbrains.kotlin.kotlin.reflect)
     api(libs.org.jetbrains.kotlin.kotlin.stdlib)
     api(libs.io.milton.milton.server.ce)

@@ -42,21 +42,33 @@ class DefaultStreamableLinkPreparer(
         return rateLimiter.executeSuspendFunction {
             httpClient.prepareGet(debridLink.link!!) {
                 headers {
+                    // Always handle byte range requests - the chunking control is internal
                     range?.let { range ->
                         getByteRange(range, debridLink.size!!)?.let { byteRange ->
-                            logger.info(
-                                "Applying byteRange $byteRange " +
-                                        "for ${debridLink.link}" +
-                                        " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
-                            )
+                            // Only apply byte range if chunking is not disabled
+                            if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
+                                logger.info(
+                                    "Applying byteRange $byteRange " +
+                                            "for ${debridLink.link}" +
+                                            " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
+                                )
 
-                            if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
+                                if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                    append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
+                                }
+                            } else {
+                                logger.info("Byte range chunking disabled - using exact user range")
+                                // When chunking is disabled, use the exact range requested by user
+                                if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                    append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                }
                             }
                         }
-                        userAgent?.let {
-                            append(HttpHeaders.UserAgent, it)
-                        }
+                    }
+
+                    // Use user agent from constructor if provided
+                    userAgent?.let {
+                        append(HttpHeaders.UserAgent, it)
                     }
                 }
                 timeout {
