@@ -47,6 +47,14 @@ data class DebridavConfigurationProperties(
     val enableInMemoryBuffering: Boolean = true,
     val disableByteRangeRequestChunking: Boolean = false,
     val enableStreamingDownloadTracking: Boolean = false,
+    val enableReactiveLinkRefresh: Boolean = false, // Enable reactive link refresh instead of proactive refresh
+    // Local video file approach for ARR projects
+    val enableRcloneArrsLocalVideo: Boolean = false, // Enable serving local video files for ARR requests
+    val rcloneArrsLocalVideoFilePaths: String? = null, // Video file mapping as comma-separated key=value pairs
+    val rcloneArrsLocalVideoPathRegex: String? = null, // Regex pattern to match file paths for local video serving
+    val rcloneArrsLocalVideoMinSizeKb: Long? = null, // Minimum file size in KB to use local video (smaller files served externally)
+    val rcloneArrsUserAgentPattern: String?, // User agent pattern for ARR detection
+    val rcloneArrsHostnamePattern: String? // Hostname pattern for ARR detection
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -57,9 +65,157 @@ data class DebridavConfigurationProperties(
                 "debridav.cache-max-size-gb must be greater than debridav.chunk-caching-size-threshold in Gb"
             }
         }
+        if (enableRcloneArrsLocalVideo) {
+            require(!rcloneArrsLocalVideoFilePaths.isNullOrBlank()) {
+                "rcloneArrsLocalVideoFilePaths must be specified when enableRcloneArrsLocalVideo is true"
+            }
+        }
     }
 
     fun getMaxCacheSizeInBytes(): Long {
         return (cacheMaxSizeGb * ONE_K * ONE_K * ONE_K).toLong()
+    }
+
+
+    /**
+     * Checks if we should serve a local video file for ARR requests instead of the actual media file.
+     * This helps reduce bandwidth usage by serving a small local file for metadata analysis.
+     */
+    fun shouldServeLocalVideoForArrs(httpRequestInfo: io.skjaere.debridav.stream.HttpRequestInfo): Boolean {
+        if (!enableRcloneArrsLocalVideo || rcloneArrsLocalVideoFilePaths.isNullOrBlank()) {
+            return false
+        }
+        
+        // Check user agent
+        val userAgent = httpRequestInfo.headers["user-agent"]
+        if (userAgent != null && rcloneArrsUserAgentPattern != null && userAgent.contains(rcloneArrsUserAgentPattern)) {
+            return true
+        }
+
+        // Check hostname
+        val sourceInfo = httpRequestInfo.sourceInfo
+        if (sourceInfo != null && rcloneArrsHostnamePattern != null && sourceInfo.contains(rcloneArrsHostnamePattern)) {
+            return true
+        }
+
+        return false
+    }
+
+    /**
+     * Checks if the given file path matches the configured regex pattern for local video serving.
+     * Returns true if no regex is configured (matches all paths) or if the path matches the regex.
+     */
+    fun shouldServeLocalVideoForPath(filePath: String): Boolean {
+        if (rcloneArrsLocalVideoPathRegex == null) {
+            return true // No regex configured, serve for all paths
+        }
+        
+        return try {
+            filePath.matches(Regex(rcloneArrsLocalVideoPathRegex))
+        } catch (e: Exception) {
+            false // Invalid regex, don't serve
+        }
+    }
+
+    /**
+     * Detects the resolution from a file name (case-insensitive).
+     * Returns the resolution key if found, null otherwise.
+     */
+    fun detectResolutionFromFileName(fileName: String): String? {
+        val fileNameLower = fileName.lowercase()
+        
+        // Common resolution patterns
+        val resolutionPatterns = listOf(
+            "2160p", "4k", "uhd",
+            "1080p", "1080i",
+            "720p", "720i", 
+            "480p", "480i",
+            "360p", "360i",
+            "240p", "240i"
+        )
+        
+        for (pattern in resolutionPatterns) {
+            if (fileNameLower.contains(pattern)) {
+                return pattern
+            }
+        }
+        
+        return null
+    }
+
+    /**
+     * Parses the rcloneArrsLocalVideoFilePaths string into a map.
+     * Format: "key1=value1,key2=value2" or just "value" for default
+     */
+    fun parseLocalVideoFilePaths(): Map<String, String> {
+        if (rcloneArrsLocalVideoFilePaths.isNullOrBlank()) {
+            return emptyMap()
+        }
+        
+        return rcloneArrsLocalVideoFilePaths.split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { entry ->
+                if (entry.contains("=")) {
+                    val parts = entry.split("=", limit = 2)
+                    if (parts.size == 2) {
+                        parts[0].trim() to parts[1].trim()
+                    } else null
+                } else {
+                    // No key, treat as default
+                    "" to entry
+                }
+            }.toMap()
+    }
+
+    /**
+     * Gets the appropriate local video file path based on resolution detection and configuration.
+     * Returns the file path to serve, or null if no suitable file is found.
+     */
+    fun getLocalVideoFilePath(fileName: String): String? {
+        val filePaths = parseLocalVideoFilePaths()
+        
+        // First, try to detect resolution from filename
+        val detectedResolution = detectResolutionFromFileName(fileName)
+        
+        if (detectedResolution != null) {
+            // Look for exact match first
+            filePaths[detectedResolution]?.let { return it }
+            
+            // Look for case-insensitive match
+            filePaths.entries.find { 
+                it.key.lowercase() == detectedResolution 
+            }?.value?.let { return it }
+            
+            // Look for pipe-separated keys (e.g., "2160p|1080p", "720p|")
+            filePaths.entries.forEach { (key, value) ->
+                val resolutionKeys = key.split("|").map { it.trim() }
+                if (resolutionKeys.contains(detectedResolution) || 
+                    resolutionKeys.any { it.lowercase() == detectedResolution.lowercase() }) {
+                    return value
+                }
+            }
+        }
+        
+        // Look for default entries (keys ending with "|", starting with "=", or empty key)
+        filePaths.entries.find { 
+            it.key.endsWith("|") || it.key.startsWith("=") || it.key.isEmpty() 
+        }?.value?.let { return it }
+        
+        return null
+    }
+    
+    /**
+     * Checks if a file should use local video serving based on its size.
+     * If rcloneArrsLocalVideoMinSizeKb is configured, files smaller than this threshold
+     * will be served externally instead of using local video files.
+     */
+    fun shouldUseLocalVideoForSize(fileSizeBytes: Long): Boolean {
+        if (rcloneArrsLocalVideoMinSizeKb == null) {
+            return true // No size threshold configured, use local video for all files
+        }
+        
+        val minSizeBytes = rcloneArrsLocalVideoMinSizeKb * 1024 // Convert KB to bytes
+        return fileSizeBytes >= minSizeBytes
     }
 }

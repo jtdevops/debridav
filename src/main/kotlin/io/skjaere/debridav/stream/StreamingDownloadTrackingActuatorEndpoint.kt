@@ -7,6 +7,7 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.stereotype.Component
 import java.time.Instant
+import io.skjaere.debridav.stream.HttpRequestInfo
 
 @Component
 @Endpoint(id = "streaming-download-tracking")
@@ -17,8 +18,8 @@ class StreamingDownloadTrackingActuatorEndpoint(
     @ReadOperation
     fun getHistoricalDownloadTracking(): List<DownloadTrackingInfo> {
         return streamingService.getCompletedDownloads().map { context ->
-            val httpRequestInfo = context.httpHeaders.entries.associate { it.key to it.value }
-                .let { headers -> io.skjaere.debridav.stream.HttpRequestInfo(headers, context.sourceIpAddress) }
+            val httpRequestInfo = context.httpHeaders.entries.associate { entry -> entry.key to entry.value }
+                .let { headers -> HttpRequestInfo(headers, context.sourceIpAddress) }
 
             DownloadTrackingInfo(
                 filePath = context.filePath,
@@ -27,9 +28,12 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 requestedRangeFinish = context.requestedRange?.finish,
                 requestedSizeFormatted = FileUtils.byteCountToDisplaySize(context.requestedSize),
                 requestedSize = context.requestedSize,
+                downloadStartTime = context.downloadStartTime,
                 bytesDownloadedFormatted = FileUtils.byteCountToDisplaySize(context.bytesDownloaded.get()),
                 bytesDownloaded = context.bytesDownloaded.get(),
-                downloadStartTime = context.downloadStartTime,
+                actualBytesSent = context.actualBytesSent,
+                actualBytesSentFormatted = context.actualBytesSent?.let { bytes -> FileUtils.byteCountToDisplaySize(bytes) },
+                // Completion metadata
                 downloadEndTime = context.downloadEndTime,
                 completionStatus = context.completionStatus,
                 durationMs = context.downloadEndTime?.let { endTime ->
@@ -38,7 +42,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 httpHeaders = context.httpHeaders,
                 sourceInfo = httpRequestInfo.sourceInfo
             )
-        }.sortedByDescending { it.downloadStartTime }
+        }.sortedByDescending { trackingInfo -> trackingInfo.downloadStartTime }
     }
 
     data class DownloadTrackingInfo(
@@ -48,10 +52,13 @@ class StreamingDownloadTrackingActuatorEndpoint(
         val requestedRangeFinish: Long?,
         val requestedSizeFormatted: String,
         val requestedSize: Long,
-        val bytesDownloadedFormatted: String,
-        val bytesDownloaded: Long,
         @JsonFormat(shape = JsonFormat.Shape.STRING)
         val downloadStartTime: Instant,
+        val bytesDownloadedFormatted: String,
+        val bytesDownloaded: Long,
+        val actualBytesSent: Long?,
+        val actualBytesSentFormatted: String?,
+        // Completion metadata
         @JsonFormat(shape = JsonFormat.Shape.STRING)
         val downloadEndTime: Instant?,
         val completionStatus: String,

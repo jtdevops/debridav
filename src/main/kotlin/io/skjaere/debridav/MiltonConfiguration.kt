@@ -5,6 +5,7 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.LocalContentsService
+import io.skjaere.debridav.resource.ArrRequestDetector
 import io.skjaere.debridav.resource.StreamableResourceFactory
 import io.skjaere.debridav.stream.StreamingService
 import org.springframework.context.annotation.Bean
@@ -28,12 +29,14 @@ class MiltonConfiguration {
         debridService: DebridLinkService,
         streamingService: StreamingService,
         debridavConfigurationProperties: DebridavConfigurationProperties,
-        localContentsService: LocalContentsService
+        localContentsService: LocalContentsService,
+        arrRequestDetector: ArrRequestDetector
     ): StreamableResourceFactory = StreamableResourceFactory(
         fileService,
         debridService,
         streamingService,
         debridavConfigurationProperties,
-        localContentsService
+        localContentsService,
+        arrRequestDetector
     )
 }

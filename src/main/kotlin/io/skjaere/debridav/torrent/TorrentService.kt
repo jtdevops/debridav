@@ -7,6 +7,7 @@ import io.skjaere.debridav.debrid.DebridCachedContentService
 import io.skjaere.debridav.debrid.TorrentMagnet
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridFileContents
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 import jakarta.transaction.Transactional
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -61,6 +62,15 @@ class TorrentService(
     ): Torrent {
         val hash = getHashFromMagnet(magnet) ?: error("could not get hash from magnet")
         val torrent = torrentRepository.getByHashIgnoreCase(hash.hash) ?: Torrent()
+        
+        // If reusing an existing torrent, clean up old files first
+        if (torrent.id != null) {
+            torrent.files.forEach { file ->
+                fileService.deleteFile(file)
+            }
+            torrent.files.clear()
+        }
+        
         torrent.category = categoryService.findByName(categoryName)
             ?: run { categoryService.createCategory(categoryName) }
         torrent.name =
@@ -100,6 +110,15 @@ class TorrentService(
 
     @Transactional
     fun deleteTorrentByHash(hash: String) {
+        // First, get the torrent to clean up associated files
+        val torrent = torrentRepository.getByHashIgnoreCase(hash)
+        if (torrent != null) {
+            // Clean up associated files
+            torrent.files.forEach { file ->
+                fileService.deleteFile(file)
+            }
+        }
+        
         return torrentRepository.deleteByHashIgnoreCase(hash)
     }
 

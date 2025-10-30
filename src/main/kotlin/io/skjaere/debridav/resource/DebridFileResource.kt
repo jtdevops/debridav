@@ -40,7 +40,8 @@ class DebridFileResource(
     fileService: DatabaseFileService,
     private val streamingService: StreamingService,
     private val debridService: DebridLinkService,
-    private val debridavConfigurationProperties: DebridavConfigurationProperties
+    private val debridavConfigurationProperties: DebridavConfigurationProperties,
+    private val arrRequestDetector: ArrRequestDetector
 ) : AbstractResource(fileService, file as DbEntity), GetableResource, DeletableResource {
     private val debridFileContents: DebridFileContents = (dbItem as RemotelyCachedEntity).contents!!
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
@@ -87,15 +88,17 @@ class DebridFileResource(
                 HttpRequestInfo()
             }
             
-            // Proactively refresh links before streaming
-            debridService.refreshLinksProactively(file)
+            if (debridavConfigurationProperties.enableReactiveLinkRefresh) {
+                // New reactive behavior: only refresh links when streaming fails
+                logger.info("Using reactive link refresh for ${file.name}")
 
-            debridService.getCachedFileCached(file)
-                ?.let { cachedFile ->
-                    logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
+                var currentCachedFile = debridService.getCachedFileCached(file)
+                if (currentCachedFile != null) {
+                    logger.info("streaming: {} range {} from {}", currentCachedFile.path, range, currentCachedFile.provider)
+
                     val result = try {
                         streamingService.streamContents(
-                            cachedFile,
+                            currentCachedFile,
                             range,
                             outputStream,
                             file,
@@ -105,19 +108,76 @@ class DebridFileResource(
                         this.coroutineContext.cancelChildren()
                         StreamResult.OK
                     }
-                    if (result != StreamResult.OK) {
-                        val updatedDebridLink = mapResultToDebridFile(result, cachedFile)
-                        file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
-                        fileService.saveDbEntity(file)
-                    }
-                } ?: run {
-                if (file.isNoLongerCached(debridavConfigurationProperties.debridClients)
-                    && debridavConfigurationProperties.shouldDeleteNonWorkingFiles
-                ) {
-                    fileService.handleNoLongerCachedFile(file)
-                }
 
-                logger.info("No working link found for ${debridFileContents.originalPath}")
+                    if (result != StreamResult.OK) {
+                        // Try to refresh the failed link and retry once
+                        logger.info("Streaming failed for ${currentCachedFile.path}, attempting to refresh link and retry")
+                        val refreshedLink = runBlocking { debridService.refreshLinkOnError(file, currentCachedFile) }
+
+                        if (refreshedLink != null) {
+                            logger.info("Retrying streaming with refreshed link for ${refreshedLink.path}")
+                            val retryResult = try {
+                                streamingService.streamContents(
+                                    refreshedLink,
+                                    range,
+                                    outputStream,
+                                    file,
+                                    httpRequestInfo
+                                )
+                            } catch (_: CancellationException) {
+                                this.coroutineContext.cancelChildren()
+                                StreamResult.OK
+                            }
+
+                            if (retryResult == StreamResult.OK) {
+                                logger.info("Successfully retried streaming with refreshed link for ${refreshedLink.path}")
+                            } else {
+                                // If retry also failed, update with the error status
+                                val updatedDebridLink = mapResultToDebridFile(retryResult, refreshedLink)
+                                file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                                fileService.saveDbEntity(file)
+                            }
+                        } else {
+                            // If link refresh failed, update with the original error
+                            val updatedDebridLink = mapResultToDebridFile(result, currentCachedFile)
+                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                            fileService.saveDbEntity(file)
+                        }
+                    }
+                }
+            } else {
+                // Original behavior: proactively refresh links before streaming
+                debridService.refreshLinksProactively(file)
+
+                debridService.getCachedFileCached(file)
+                    ?.let { cachedFile ->
+                        logger.info("streaming: {} range {} from {}", cachedFile.path, range, cachedFile.provider)
+                        val result = try {
+                            streamingService.streamContents(
+                                cachedFile,
+                                range,
+                                outputStream,
+                                file,
+                                httpRequestInfo
+                            )
+                        } catch (_: CancellationException) {
+                            this.coroutineContext.cancelChildren()
+                            StreamResult.OK
+                        }
+                        if (result != StreamResult.OK) {
+                            val updatedDebridLink = mapResultToDebridFile(result, cachedFile)
+                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                            fileService.saveDbEntity(file)
+                        }
+                    } ?: run {
+                        if (file.isNoLongerCached(debridavConfigurationProperties.debridClients)
+                            && debridavConfigurationProperties.shouldDeleteNonWorkingFiles
+                        ) {
+                            fileService.handleNoLongerCachedFile(file)
+                        }
+
+                        logger.info("No working link found for ${debridFileContents.originalPath}")
+                    }
             }
         }
     }
@@ -159,15 +219,113 @@ class DebridFileResource(
     }
 
     override fun getContentType(accepts: String?): String {
+        // Check if we should serve local video for ARR requests
+        if (arrRequestDetector.isArrRequest()) {
+            val fileName = file.name ?: "unknown"
+            val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            // Check if the file path matches the configured regex pattern
+            if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
+                // Get MIME type from the local video file
+                val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                if (localVideoPath != null) {
+                    val localVideoFile = java.io.File(localVideoPath)
+                    if (localVideoFile.exists() && localVideoFile.isFile) {
+                        val localFileName = localVideoFile.name.lowercase()
+                        return when {
+                            localFileName.endsWith(".mp4") -> "video/mp4"
+                            localFileName.endsWith(".avi") -> "video/x-msvideo"
+                            localFileName.endsWith(".mkv") -> "video/x-matroska"
+                            localFileName.endsWith(".mov") -> "video/quicktime"
+                            localFileName.endsWith(".wmv") -> "video/x-ms-wmv"
+                            localFileName.endsWith(".flv") -> "video/x-flv"
+                            localFileName.endsWith(".webm") -> "video/webm"
+                            localFileName.endsWith(".m4v") -> "video/x-m4v"
+                            else -> "video/mp4" // fallback
+                        }
+                    }
+                }
+            }
+            return "video/mp4" // fallback
+        }
         return "video/mp4"
     }
 
     override fun getContentLength(): Long {
-        return file.contents!!.size!!.toLong()
+        // Check if we should serve local video for ARR requests
+        if (arrRequestDetector.isArrRequest()) {
+            val fileName = file.name ?: "unknown"
+            val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            
+            // Check if the file path matches the configured regex pattern
+            if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
+                // Only apply local video serving to media files, not subtitles or other files
+                if (isMediaFile(fileName)) {
+                    // Get the external file size to check against the minimum size threshold
+                    val externalFileSize = file.contents!!.size!!.toLong()
+                    
+                    // Check if the file is large enough to use local video serving
+                    if (debridavConfigurationProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}", 
+                            fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex, 
+                            externalFileSize, debridavConfigurationProperties.rcloneArrsLocalVideoMinSizeKb)
+                        
+                        // Get file size from the local video file
+                        val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                        if (localVideoPath != null) {
+                            val localVideoFile = java.io.File(localVideoPath)
+                            if (localVideoFile.exists() && localVideoFile.isFile) {
+                                val localFileSize = localVideoFile.length()
+                                logger.debug("LOCAL_VIDEO_CONTENT_LENGTH: file={}, localPath={}, size={} bytes", 
+                                    fileName, localVideoPath, localFileSize)
+                                return localFileSize
+                            } else {
+                                logger.warn("LOCAL_VIDEO_FILE_NOT_FOUND: file={}, localPath={}, exists={}, isFile={}", 
+                                    fileName, localVideoPath, localVideoFile.exists(), localVideoFile.isFile)
+                            }
+                        } else {
+                            logger.warn("LOCAL_VIDEO_PATH_NULL: file={}, no local video path found", fileName)
+                        }
+                    } else {
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_TOO_SMALL: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}", 
+                            fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex, 
+                            externalFileSize, debridavConfigurationProperties.rcloneArrsLocalVideoMinSizeKb)
+                    }
+                } else {
+                    logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_NOT_MEDIA: file={}, fullPath={}, regex={}, isMediaFile=false", 
+                        fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
+                }
+            } else {
+                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}", 
+                    fileName, fullPath, debridavConfigurationProperties.rcloneArrsLocalVideoPathRegex)
+            }
+        }
+        
+        // Fallback to external file size
+        val externalFileSize = file.contents!!.size!!.toLong()
+        val workingDebridFile = file.contents!!.debridLinks.firstOrNull { it is CachedFile }
+        logger.debug("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
+            file.name ?: "unknown", externalFileSize, workingDebridFile?.provider)
+        return externalFileSize
     }
 
     override fun isDigestAllowed(): Boolean {
         return true
+    }
+    
+    /**
+     * Checks if the given filename is a media file based on its extension.
+     * Only media files should use local video serving, not subtitles or other files.
+     */
+    private fun isMediaFile(fileName: String): Boolean {
+        val knownVideoExtensions = listOf(
+            ".mp4", ".mkv", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m4v", 
+            ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".asf", ".rm", ".rmvb"
+        )
+        
+        val lowerFileName = fileName.lowercase()
+        return knownVideoExtensions.any { lowerFileName.endsWith(it) }
     }
 
     override fun getCreateDate(): Date {
@@ -195,7 +353,7 @@ class DebridFileResource(
                 ?: "unknown"
 
             // Try to resolve hostname from IP address
-            if (sourceIpAddress != null && sourceIpAddress != "unknown") {
+            if (sourceIpAddress != "unknown") {
                 try {
                     sourceHostname = InetAddress.getByName(sourceIpAddress).hostName
                 } catch (e: Exception) {
@@ -212,7 +370,7 @@ class DebridFileResource(
             sourceIpAddress
         }
 
-        logger.info("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} ({}), source_ip={}, headers_count={}",
+        logger.debug("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} ({}), source_ip={}, headers_count={}",
             file.name ?: "unknown", range?.start, range?.finish, FileUtils.byteCountToDisplaySize(requestedSize), requestedSize, sourceInfo, httpHeaders.size)
 
         return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)
