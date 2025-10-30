@@ -1,0 +1,192 @@
+# https://docs.docker.com/compose/compose-file/14-include/
+include:
+  - path:
+    # - docker-compose.plex.yml
+    # - docker-compose.overseerr.yml
+    # - docker-compose.jellyfin.yml
+
+services:
+  debridav:
+    image: ghcr.io/skjaere/debridav:v0
+    container_name: debridav
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - DEBRIDAV_ROOTPATH=${DEBRIDAV_ROOT_PATH}
+      - DEBRIDAV_DOWNLOADPATH=${DEBRIDAV_DOWNLOAD_PATH}
+      - DEBRIDAV_MOUNTPATH=${DEBRIDAV_MOUNT_PATH_CONTAINERS}
+      - DEBRIDAV_DEBRIDCLIENTS=${DEBRIDAV_DEBRID_CLIENTS}
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://${DEBRIDAV_DB_HOST}:${DEBRIDAV_DB_PORT}/${DEBRIDAV_DB_DATABASE_NAME}?user=${DEBRIDAV_DB_USERNAME}&password=${DEBRIDAV_DB_PASSWORD}
+      - PREMIUMIZE_APIKEY=${PREMIUMIZE_API_KEY}
+      - REALDEBRID_APIKEY=${REAL_DEBRID_API_KEY}
+      - SONARR_INTEGRATIONENABLED=${SONARR_INTEGRATION_ENABLED}
+      - SONARR_HOST=${SONARR_HOST}
+      - SONARR_PORT=${SONARR_PORT}
+      - SONARR_APIKEY=${SONARR_API_KEY}
+      - RADARR_INTEGRATIONENABLED=${RADARR_INTEGRATION_ENABLED}
+      - RADARR_HOST=${RADARR_HOST}
+      - RADARR_PORT=${RADARR_PORT}
+      - RADARR_APIKEY=${RADARR_API_KEY}
+      - EASYNEWS_USERNAME=${EASYNEWS_USERNAME}
+      - EASYNEWS_PASSWORD=${EASYNEWS_PASSWORD}
+      - TORBOX_APIKEY=${TORBOX_API_KEY}
+    ports:
+      - ${DEBRIDAV_PORT}:8080
+      - "8000:8000"
+    # volumes:
+    #   - ${DEBRIDAV_ROOT_HOST_FS}:${DEBRIDAV_ROOT_PATH}
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/actuator/health/readiness" ]
+      interval: 2s
+      start_period: 2s
+      retries: 1000
+    depends_on:
+      postgres-debridav:
+        condition: service_healthy
+
+  # NOTE: Fails to unmount FUSE folder when being restarted
+  # rclone:
+  #   container_name: rclone
+  #   image: rclone/rclone:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: ${TZ}
+  #     PUID: ${PUID}
+  #     PGID: ${PGID}
+  #   volumes:
+  #     - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+  #     - ./rclone.conf:/config/rclone/rclone.conf
+  #   cap_add:
+  #     - SYS_ADMIN
+  #   security_opt:
+  #     - apparmor:unconfined
+  #   devices:
+  #     - /dev/fuse:/dev/fuse:rwm
+  #   command: "mount debridav: $DEBRIDAV_MOUNT_PATH_CONTAINERS 
+  #             --allow-other 
+  #             --allow-non-empty 
+  #             --vfs-cache-mode off 
+  #             --rc-enable-metrics
+  #             --metrics-addr :9002
+  #             --low-level-retries=1
+  #             --dir-cache-time=1s
+  #             -vv
+  #             "
+  #   ports:
+  #     - "5572:5572"
+  #     - "9002:9002"
+  #   depends_on:
+  #     debridav:
+  #       condition: service_healthy
+
+  rclone:
+    container_name: rclone
+    # https://github.com/peterbuga/docker-services/tree/master/rclone-mount
+    image: peterbuga/rclone-mount:latest
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID}
+      PGID: ${PGID}
+      RemotePath: "debridav:"
+      MountPoint: "$DEBRIDAV_MOUNT_PATH_CONTAINERS"
+      ConfigName: "rclone.conf"
+      MountCommands: "--allow-other 
+            --allow-non-empty 
+            --vfs-cache-mode off 
+            --rc-enable-metrics
+            --metrics-addr :9002
+            --low-level-retries=1
+            --dir-cache-time=1s
+            -vv
+            "
+    volumes:
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+      - ./rclone.conf:/config/rclone.conf
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/fuse:/dev/fuse:rwm
+    ports:
+      - "5572:5572"
+      - "9002:9002"
+    depends_on:
+      debridav:
+        condition: service_healthy
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr-debridav
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./sonarr-config:/config
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    ports:
+      - 8989:8989
+    depends_on:
+      - rclone
+    restart: unless-stopped
+    labels:
+      filebeat_enabled:
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr-debridav
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./radarr-config:/config
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    ports:
+      - "7878:7878"
+    depends_on:
+      - rclone
+    restart: unless-stopped
+
+  prowlarr-debridav:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr-debridav
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./prowlarr-config:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+    depends_on:
+      - rclone
+
+  postgres-debridav:
+    image: postgres:17
+    container_name: postgres-debridav
+    environment:
+      - POSTGRES_PASSWORD=debridav
+      - POSTGRES_USER=debridav
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - PGUSER=debridav
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready", "-d", "debridav" ]
+      interval: 1s
+      timeout: 60s
+      retries: 10
+      start_period: 2s
+    restart: unless-stopped
+
+networks:
+  default:
+    name: debridav
