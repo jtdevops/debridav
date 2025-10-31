@@ -44,13 +44,10 @@ import org.springframework.stereotype.Service
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.coroutineScope
 
 const val RETRIES = 3L
 
 private const val CACHE_SIZE = 100L
-private const val LINK_EXPIRY_WARNING_MINUTES = 5L
 
 @Service
 @Suppress("LongParameterList")
@@ -357,46 +354,6 @@ class DebridLinkService(
     fun List<DebridCachedContentClient>.getClient(debridProvider: DebridProvider): DebridCachedContentClient =
         this.first { it.getProvider() == debridProvider }
 
-    @Suppress("TooGenericExceptionCaught")
-    suspend fun refreshLinksProactively(file: RemotelyCachedEntity) {
-        val debridFileContents = file.contents ?: return
-
-        debridFileContents.debridLinks.forEach { debridLink ->
-            if (debridLink is CachedFile && isLinkAboutToExpire(debridLink)) {
-                coroutineScope {
-                    launch {
-                        try {
-                            val client = debridClients.getClient(debridLink.provider!!)
-                            val freshLink = getFreshDebridLink(debridFileContents, client)
-                            if (freshLink is CachedFile) {
-                                updateContentsOfDebridFile(file, debridFileContents, freshLink)
-                                logger.info(
-                                    "Proactively refreshed link for ${file.name} from ${debridLink.provider}"
-                                )
-                            }
-                        } catch (e: RuntimeException) {
-                            logger.warn("Failed to proactively refresh link for ${file.name}: ${e.message}")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun isLinkAboutToExpire(debridFile: CachedFile): Boolean {
-        val expiryTime = Instant.ofEpochMilli(debridFile.lastChecked!!)
-            .plus(debridavConfigurationProperties.cachedFileCacheDuration)
-        val timeUntilExpiry = Duration.between(Instant.now(), expiryTime)
-        return timeUntilExpiry.toMinutes() < LINK_EXPIRY_WARNING_MINUTES
-    }
-
-    suspend fun preWarmLinks(file: RemotelyCachedEntity) {
-        if (cachedFileCache.getIfPresent(file) == null) {
-            // Pre-warm the cache by getting the cached file
-            getCachedFile(file)
-            logger.info("Pre-warmed links for ${file.name}")
-        }
-    }
 
     /**
      * Refreshes a specific link when a streaming error occurs.

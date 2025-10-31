@@ -49,6 +49,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import org.springframework.transaction.annotation.Transactional
+import java.time.Duration
 import java.time.Instant
 
 private const val CREATED = 204
@@ -74,6 +75,14 @@ class RealDebridClient(
 ) {
     private val logger = LoggerFactory.getLogger(RealDebridClient::class.java)
     private val knownVideoExtensions = listOf(".mp4", ".mkv", ".avi", ".ts")
+
+    private data class CachedTorrentInfoEntry(
+        val torrentInfo: TorrentsInfo,
+        var lastAccessed: Instant
+    )
+
+    private val torrentInfoCache: MutableMap<String, CachedTorrentInfoEntry> = mutableMapOf()
+    private val debridavConfig: DebridavConfigurationProperties = debridavConfigurationProperties
 
     var torrentImportEnabled = realDebridConfigurationProperties.syncEnabled
 
@@ -232,13 +241,38 @@ class RealDebridClient(
     }
 
 
-    private suspend fun getTorrentInfo(id: String): TorrentsInfo = realDebridRateLimiter.executeSuspendFunction {
-        httpClient.get("${realDebridConfigurationProperties.baseUrl}/torrents/info/$id") {
-            headers {
-                set(HttpHeaders.Accept, "application/json")
-                bearerAuth(realDebridConfigurationProperties.apiKey)
+    private suspend fun getTorrentInfo(id: String): TorrentsInfo {
+        cleanupExpiredCacheEntries()
+        val now = Instant.now()
+        torrentInfoCache[id]?.let { entry ->
+            entry.lastAccessed = now
+            return entry.torrentInfo
+        }
+
+        val torrentInfo = realDebridRateLimiter.executeSuspendFunction {
+            httpClient.get("${realDebridConfigurationProperties.baseUrl}/torrents/info/$id") {
+                headers {
+                    set(HttpHeaders.Accept, "application/json")
+                    bearerAuth(realDebridConfigurationProperties.apiKey)
+                }
+            }.body<TorrentsInfo>()
+        }
+        torrentInfoCache[id] = CachedTorrentInfoEntry(torrentInfo, now)
+        return torrentInfo
+    }
+
+    private fun cleanupExpiredCacheEntries() {
+        val now = Instant.now()
+        val expirationDuration = debridavConfig.debridDirectDlResponseCacheExpirationSeconds
+        val expiredKeys = torrentInfoCache.entries
+            .filter { (_, entry) ->
+                Duration.between(entry.lastAccessed, now) >= expirationDuration
             }
-        }.body<TorrentsInfo>()
+            .map { it.key }
+        expiredKeys.forEach { torrentInfoCache.remove(it) }
+        if (expiredKeys.isNotEmpty()) {
+            logger.debug("Cleaned up ${expiredKeys.size} expired RealDebrid cache entries")
+        }
     }
 
 

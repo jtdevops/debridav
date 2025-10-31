@@ -443,6 +443,8 @@ class StreamingService(
     fun initializeDownloadTracking(debridLink: CachedFile, range: Range?, remotelyCachedEntity: RemotelyCachedEntity, httpRequestInfo: HttpRequestInfo): String? {
         if (!debridavConfigProperties.enableStreamingDownloadTracking) return null
         
+        cleanupExpiredDownloadTracking()
+        
         val trackingId = "${System.currentTimeMillis()}-${debridLink.path.hashCode()}"
         val requestedSize = (range?.finish ?: debridLink.size!! - 1) - (range?.start ?: 0) + 1
         val fileName = remotelyCachedEntity.name ?: "unknown"
@@ -486,6 +488,33 @@ class StreamingService(
         completedDownloads.add(context)
         while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
             completedDownloads.poll()
+        }
+    }
+
+    private fun cleanupExpiredDownloadTracking() {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return
+        
+        val now = Instant.now()
+        val expirationDuration = debridavConfigProperties.streamingDownloadTrackingCacheExpirationHours
+        
+        val iterator = completedDownloads.iterator()
+        var removedCount = 0
+        
+        while (iterator.hasNext()) {
+            val context = iterator.next()
+            val downloadEndTime = context.downloadEndTime
+            
+            if (downloadEndTime != null) {
+                val age = Duration.between(downloadEndTime, now)
+                if (age >= expirationDuration) {
+                    iterator.remove()
+                    removedCount++
+                }
+            }
+        }
+        
+        if (removedCount > 0) {
+            logger.debug("Cleaned up $removedCount expired download tracking entries")
         }
     }
     

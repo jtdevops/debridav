@@ -1,8 +1,8 @@
 ---
 services:
-  overseerr:
-    image: sctx/overseerr:latest
-    container_name: overseerr
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
     restart: unless-stopped
     environment:
       # - LOG_LEVEL=debug
