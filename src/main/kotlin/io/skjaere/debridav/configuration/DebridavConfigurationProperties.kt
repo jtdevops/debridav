@@ -13,6 +13,8 @@ private const val DEFAULT_STREAMING_RETRIES = 2L
 private const val DEFAULT_STREAMING_NETWORK_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_CLIENT_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_PROVIDER_ERROR_WAIT_MINUTES = 1L
+private const val DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS = 24L
+private const val DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS = 30L
 
 @ConfigurationProperties(prefix = "debridav")
 data class DebridavConfigurationProperties(
@@ -47,7 +49,8 @@ data class DebridavConfigurationProperties(
     val enableInMemoryBuffering: Boolean = true,
     val disableByteRangeRequestChunking: Boolean = false,
     val enableStreamingDownloadTracking: Boolean = false,
-    val enableReactiveLinkRefresh: Boolean = false, // Enable reactive link refresh instead of proactive refresh
+    val streamingDownloadTrackingCacheExpirationHours: Duration = Duration.ofHours(DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS),
+    val debridDirectDlResponseCacheExpirationSeconds: Duration = Duration.ofSeconds(DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS),
     // Local video file approach for ARR projects
     val enableRcloneArrsLocalVideo: Boolean = false, // Enable serving local video files for ARR requests
     val rcloneArrsLocalVideoFilePaths: String? = null, // Video file mapping as comma-separated key=value pairs

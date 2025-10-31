@@ -72,6 +72,10 @@ class DatabaseFileService(
         fileEntity.contents = debridFileContents
         fileEntity.hash = hash
 
+        // Was originally
+        // debridFileRepository.getByHash("asd")
+        // logger.debug("Creating ${directory.path}/${fileEntity.name}")
+        // fileEntity
         logger.debug("Creating ${directory.path}/${fileEntity.name}")
         debridFileRepository.save(fileEntity)
     }
