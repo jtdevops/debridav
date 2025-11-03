@@ -189,9 +189,9 @@ jib {
         }
     }
     to {
-        image = "ghcr.io/skjaere/debridav"
+        image = "ghcr.io/jtdevops/debridav"
         auth {
-            username = "skjaere"
+            username = "jtdevops"
             password = System.getenv("GHCR_TOKEN")
         }
     }

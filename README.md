@@ -13,8 +13,8 @@
 > - [Example Configurations (including optimized streaming setup)](#example-configurations)
 > - [Building the Application](#building-the-application)
 
-[![build](https://github.com/skjaere/debridav/actions/workflows/build.yaml/badge.svg)](#)
-[![codecov](https://codecov.io/gh/skjaere/debridav/graph/badge.svg?token=LIE8M1XE4H)](https://codecov.io/gh/skjaere/debridav)
+[![build](https://github.com/jtdevops/debridav/actions/workflows/build.yaml/badge.svg)](#)
+[![codecov](https://codecov.io/gh/jtdevops/debridav/graph/badge.svg?token=LIE8M1XE4H)](https://codecov.io/gh/jtdevops/debridav)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-6DB33F?logo=springboot&logoColor=fff)](#)
@@ -239,7 +239,7 @@ Alternatively `./gradlew bootRun` can be used.
 
 ### Running with docker
 
-`docker run ghcr.io/skjaere/debridav:v0`
+`docker run ghcr.io/jtdevops/debridav:latest`
 
 ### Build docker image
 

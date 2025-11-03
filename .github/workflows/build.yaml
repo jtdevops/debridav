@@ -3,6 +3,12 @@ name: Master build
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -48,18 +54,35 @@ jobs:
         uses: booxmedialtd/ws-action-parse-semver@v1
         with:
           input_string: '${{ steps.get_next_version.outputs.version }}'
-
-      - name: Build docker image
-        env:
-          GHCR_TOKEN: '${{ secrets.GHCR_TOKEN }}'
-        run:
-          ./gradlew jib -Djib.to.tags=v${{ steps.get_next_version.outputs.version }},v${{ steps.semver_parser.outputs.major }},v${{ steps.semver_parser.outputs.major }}.${{ steps.semver_parser.outputs.minor }}
         if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' || github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push docker image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run:
+          ./gradlew jib -Djib.to.tags=v${{ steps.get_next_version.outputs.version }},v${{ steps.semver_parser.outputs.major }},v${{ steps.semver_parser.outputs.major }}.${{ steps.semver_parser.outputs.minor }},latest
+        if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
+
+      - name: Build and push docker image (manual trigger)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run:
+          ./gradlew jib -Djib.to.tags=latest
+        if: ${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: skjaere/DebriDav
+          slug: jtdevops/debridav
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
 
 
