@@ -2,6 +2,16 @@
 
 > [!NOTE]
 > This is a fork of the original [DebriDav project](https://github.com/skjaere/debridav) with enhanced features and improved configuration options. All original features remain as default options, with new capabilities available as opt-in enhancements.
+>
+> **Quick links to new features:**
+> - [Fork Enhancements Overview](#fork-enhancements)
+> - [Enhanced Caching & Performance Options](#enhanced-caching--performance-options)
+> - [Streaming & Retry Configuration](#streaming--retry-configuration)
+> - [Download Tracking & Monitoring](#download-tracking--monitoring)
+> - [Local Video File Serving for ARR Projects](#local-video-file-serving-for-arr-projects)
+> - [Streaming Download Tracking Endpoint](#streaming-download-tracking-endpoint)
+> - [Example Configurations (including optimized streaming setup)](#example-configurations)
+> - [Building the Application](#building-the-application)
 
 [![build](https://github.com/skjaere/debridav/actions/workflows/build.yaml/badge.svg)](#)
 [![codecov](https://codecov.io/gh/skjaere/debridav/graph/badge.svg?token=LIE8M1XE4H)](https://codecov.io/gh/skjaere/debridav)

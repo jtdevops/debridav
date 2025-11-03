@@ -11,7 +11,7 @@ import org.gradle.api.tasks.testing.logging.TestExceptionFormat
  */
 
 group = "io.skjaere"
-version = "0.1.0"
+version = "0.10.2"
 description = "DebriDav"
 
 plugins {
