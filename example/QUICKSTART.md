@@ -17,25 +17,24 @@ Docker, docker compose, and a basic understanding of how the *arr ecosystem work
 Open the .env file for editing.
 Typically you need to change two values:
 
-- Set `DEBRIDAV_DEBRID-CLIENTS` to a comma separated list of debrid providers you would like to use. eg.
+- Set `DEBRIDAV_DEBRID_CLIENTS` to a comma separated list of debrid providers you would like to use. eg.
   `premiumize,real_debrid`, or `premiumize`. If you add multiple providers they will be preferred in the order
   specified. if `premiumize,real_debrid` is used, Real Debrid will only be used for torrents not cached at Premiumize.
-- If using Premiumize, set the `PREMIUMIZE_API-KEY` property to your Premiumize api key, obtained by clicking the "Show
+- If using Premiumize, set the `PREMIUMIZE_API_KEY` property to your Premiumize api key, obtained by clicking the "Show
   API Key" button at `https://www.premiumize.me/account`
-- If using Real Debrid, set the `REAL-DEBRID_API-KEY` property to your real debrid API key, obtained at
+- If using Real Debrid, set the `REAL_DEBRID_API_KEY` property to your real debrid API key, obtained at
   `https://real-debrid.com/apitoken`
 - If using EasyNews set `EASYNEWS_USERNAME` and `EASYNEWS_PASSWORD` to your EasyNews username and password respectively.
 - Save when done.
 
-### Addtional configuration options
+### Additional configuration options
 
-In addition the the configuration options described in [README](../README.md#configuration), the following configuration
-variables may be set for
-docker compose:
+In addition to the configuration options described in [README](../README.md#configuration), the following configuration
+variables may be set for docker compose:
 
 | NAME                           | Explanation                                                                                                                                                    | Default            |
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------|
-| DEBRIDAV_MOUNT_PATH_LOCAL_FS   | The path where DebriDav will be mounted on your host filesystem.                                                                                               | ./debridav         |
+| DEBRIDAV_MOUNT_PATH_HOST_FS    | The path where DebriDav will be mounted on your host filesystem.                                                                                               | ./debridav         |
 | DEBRIDAV_MOUNT_PATH_CONTAINERS | The path where DebriDav will be mounted inside the docker containers. If kept at it's default values, downloads will be visible to the arrs in /data/downloads | /data              |
 | DEBRIDAV_ROOT_HOST_FS          | The path on the host filesystem DebriDav will use for storage                                                                                                  | ./debridav-storage |
 

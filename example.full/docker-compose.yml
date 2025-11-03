@@ -41,7 +41,7 @@ x-rclone-base: &rclone-base
 services:
   debridav:
     build:
-      context: debridav-repo
+      context: ..
     image: ghcr.io/skjaere/debridav:v0
     container_name: debridav
     restart: unless-stopped

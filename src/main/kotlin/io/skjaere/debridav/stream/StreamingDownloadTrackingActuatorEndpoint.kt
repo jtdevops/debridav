@@ -11,7 +11,7 @@ import io.skjaere.debridav.stream.HttpRequestInfo
 
 @Component
 @Endpoint(id = "streaming-download-tracking")
-@ConditionalOnExpression("#{'\${debridav.enable-streaming-download-tracking}'.equals('true')}")
+@ConditionalOnExpression("\${debridav.enable-streaming-download-tracking:false}")
 class StreamingDownloadTrackingActuatorEndpoint(
     private val streamingService: StreamingService
 ) {
