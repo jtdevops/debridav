@@ -16,8 +16,8 @@ class StreamingDownloadTrackingActuatorEndpoint(
     private val streamingService: StreamingService
 ) {
     @ReadOperation
-    fun getHistoricalDownloadTracking(): List<DownloadTrackingInfo> {
-        return streamingService.getCompletedDownloads().map { context ->
+    fun getHistoricalDownloadTracking(): TrackingResponse {
+        val trackingInfoList = streamingService.getCompletedDownloads().map { context ->
             val httpRequestInfo = context.httpHeaders.entries.associate { entry -> entry.key to entry.value }
                 .let { headers -> HttpRequestInfo(headers, context.sourceIpAddress) }
 
@@ -43,7 +43,69 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 sourceInfo = httpRequestInfo.sourceInfo
             )
         }.sortedByDescending { trackingInfo -> trackingInfo.downloadStartTime }
+        
+        // Calculate metrics grouped by filePath
+        val metricsByFilePath = trackingInfoList
+            .groupBy { it.filePath }
+            .mapValues { (_, entries) ->
+                val totalRequestedBytes = entries.sumOf { it.requestedSize }
+                val totalDownloadedBytes = entries.sumOf { it.bytesDownloaded }
+                val totalActualBytesSent = entries.sumOf { it.actualBytesSent ?: 0L }
+                val requestCount = entries.size
+                val firstAccessTime = entries.minOfOrNull { it.downloadStartTime }
+                val lastAccessTime = entries.maxOfOrNull { it.downloadStartTime }
+                val completionStatusCounts = entries.groupingBy { it.completionStatus }.eachCount()
+                val totalDurationMs = entries.sumOf { it.durationMs ?: 0L }
+                
+                FilePathMetrics(
+                    filePath = entries.first().filePath,
+                    fileName = entries.first().fileName,
+                    totalRequestedBytes = totalRequestedBytes,
+                    totalRequestedBytesFormatted = FileUtils.byteCountToDisplaySize(totalRequestedBytes),
+                    totalDownloadedBytes = totalDownloadedBytes,
+                    totalDownloadedBytesFormatted = FileUtils.byteCountToDisplaySize(totalDownloadedBytes),
+                    totalActualBytesSent = totalActualBytesSent,
+                    totalActualBytesSentFormatted = FileUtils.byteCountToDisplaySize(totalActualBytesSent),
+                    requestCount = requestCount,
+                    firstAccessTime = firstAccessTime,
+                    lastAccessTime = lastAccessTime,
+                    completionStatusCounts = completionStatusCounts,
+                    totalDurationMs = totalDurationMs,
+                    averageDurationMs = if (requestCount > 0) totalDurationMs / requestCount else null
+                )
+            }
+            .values
+            .sortedByDescending { it.lastAccessTime ?: Instant.EPOCH }
+        
+        return TrackingResponse(
+            metrics = metricsByFilePath,
+            details = trackingInfoList
+        )
     }
+
+    data class TrackingResponse(
+        val metrics: List<FilePathMetrics>,
+        val details: List<DownloadTrackingInfo>
+    )
+    
+    data class FilePathMetrics(
+        val filePath: String,
+        val fileName: String,
+        val totalRequestedBytes: Long,
+        val totalRequestedBytesFormatted: String,
+        val totalDownloadedBytes: Long,
+        val totalDownloadedBytesFormatted: String,
+        val totalActualBytesSent: Long,
+        val totalActualBytesSentFormatted: String,
+        val requestCount: Int,
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
+        val firstAccessTime: Instant?,
+        @JsonFormat(shape = JsonFormat.Shape.STRING)
+        val lastAccessTime: Instant?,
+        val completionStatusCounts: Map<String, Int>,
+        val totalDurationMs: Long,
+        val averageDurationMs: Long?
+    )
 
     data class DownloadTrackingInfo(
         val filePath: String,
