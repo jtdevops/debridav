@@ -21,7 +21,8 @@ class StreamableResourceFactory(
     private val debridService: DebridLinkService,
     private val streamingService: StreamingService,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
-    private val localContentsService: LocalContentsService
+    private val localContentsService: LocalContentsService,
+    private val arrRequestDetector: ArrRequestDetector
 ) : ResourceFactory {
     private val logger = LoggerFactory.getLogger(StreamableResourceFactory::class.java)
 
@@ -70,7 +71,8 @@ class StreamableResourceFactory(
                 fileService = fileService,
                 streamingService = streamingService,
                 debridService = debridService,
-                debridavConfigurationProperties = debridavConfigurationProperties
+                debridavConfigurationProperties = debridavConfigurationProperties,
+                arrRequestDetector = arrRequestDetector
             )
 
             is LocalEntity -> FileResource(dbItem, fileService, localContentsService)

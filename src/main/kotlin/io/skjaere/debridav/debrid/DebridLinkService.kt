@@ -47,8 +47,6 @@ import java.time.Instant
 
 const val RETRIES = 3L
 
-private const val CACHE_GRACE_PERIOD_SECONDS = 5L
-
 private const val CACHE_SIZE = 100L
 
 @Service
@@ -67,18 +65,23 @@ class DebridLinkService(
     data class LinkLivenessCacheKey(val provider: String, val cachedFile: CachedFile)
 
     val isLinkAliveCache: LoadingCache<LinkLivenessCacheKey, Boolean> = Caffeine.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(CACHE_GRACE_PERIOD_SECONDS))
+        .expireAfterWrite(debridavConfigurationProperties.linkLivenessCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<LinkLivenessCacheKey, Boolean> { key ->
             runBlocking {
                 logger.info("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
-                debridClients
+                logger.debug("LINK_ALIVE_CHECK: file={}, provider={}, link={}, size={} bytes", 
+                    key.cachedFile.path, key.cachedFile.provider, key.cachedFile.link?.take(50) + "...", key.cachedFile.size)
+                val isAlive = debridClients
                     .firstOrNull { it.getProvider().toString() == key.provider }?.isLinkAlive(key.cachedFile)
                     ?: false
+                logger.debug("LINK_ALIVE_RESULT: file={}, provider={}, isAlive={}", 
+                    key.cachedFile.path, key.cachedFile.provider, isAlive)
+                isAlive
             }
         })
     val cachedFileCache: LoadingCache<RemotelyCachedEntity, CachedFile?> = Caffeine.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(CACHE_GRACE_PERIOD_SECONDS))
+        .expireAfterWrite(debridavConfigurationProperties.cachedFileCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<RemotelyCachedEntity, CachedFile?> { entity ->
             runBlocking {
@@ -116,6 +119,8 @@ class DebridLinkService(
         val debridFileContents = file.contents!!
         val started = Instant.now()
         logger.info("Getting links for ${file.name} from ${debridFileContents.originalPath}")
+        logger.debug("DEBRID_LINK_REQUEST: file={}, originalPath={}, debridLinksCount={}", 
+            file.name, debridFileContents.originalPath, debridFileContents.debridLinks.size)
         return getFlowOfDebridLinks(debridFileContents)
             .retry(RETRIES)
             .catch { e ->
@@ -128,6 +133,8 @@ class DebridLinkService(
                 if (debridLink is CachedFile) {
                     val took = Duration.between(started, Instant.now()).toMillis().toDouble()
                     logger.info("Found link for ${file.name} from ${debridLink.provider}. took $took ms")
+                    logger.debug("DEBRID_LINK_FOUND: file={}, provider={}, link={}, size={} bytes, took={} ms", 
+                        file.name, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size, took)
                     linkFindingDurationSummary.record(took)
                     emit(debridLink)
                 } else {
@@ -135,6 +142,8 @@ class DebridLinkService(
                         "result was ${debridLink.javaClass.simpleName} " +
                                 "for ${file.name} from ${debridLink.provider}"
                     )
+                    logger.info("DEBRID_LINK_ERROR: file={}, provider={}, errorType={}", 
+                        file.name, debridLink.provider, debridLink.javaClass.simpleName)
                 }
                 debridLink !is CachedFile
             }
@@ -345,4 +354,30 @@ class DebridLinkService(
     fun List<DebridCachedContentClient>.getClient(debridProvider: DebridProvider): DebridCachedContentClient =
         this.first { it.getProvider() == debridProvider }
 
+
+    /**
+     * Refreshes a specific link when a streaming error occurs.
+     * Returns a fresh CachedFile if successful, null otherwise.
+     */
+    suspend fun refreshLinkOnError(file: RemotelyCachedEntity, failedLink: CachedFile): CachedFile? {
+        return try {
+            val debridFileContents = file.contents ?: return null
+            val client = debridClients.getClient(failedLink.provider!!)
+
+            logger.info("Refreshing link on error for ${file.name} from ${failedLink.provider}")
+
+            val freshLink = getFreshDebridLink(debridFileContents, client)
+            if (freshLink is CachedFile) {
+                updateContentsOfDebridFile(file, debridFileContents, freshLink)
+                logger.info("Successfully refreshed link for ${file.name} from ${failedLink.provider}")
+                freshLink
+            } else {
+                logger.warn("Failed to refresh link for ${file.name} from ${failedLink.provider}: got ${freshLink.javaClass.simpleName}")
+                null
+            }
+        } catch (e: RuntimeException) {
+            logger.error("Exception occurred while refreshing link for ${file.name}: ${e.message}", e)
+            null
+        }
+    }
 }

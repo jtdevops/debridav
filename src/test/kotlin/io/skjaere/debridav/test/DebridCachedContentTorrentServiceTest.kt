@@ -36,6 +36,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
+import kotlinx.io.IOException
 
 class DebridCachedContentTorrentServiceTest {
     private val premiumizeClient = mockk<PremiumizeClient>()

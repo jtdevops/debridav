@@ -3,7 +3,7 @@ package io.skjaere.debridav.debrid.client
 import io.ktor.client.call.body
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.request
-import io.ktor.utils.io.errors.IOException
+import kotlinx.io.IOException
 import io.skjaere.debridav.debrid.CachedContentKey
 import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.debrid.model.DebridClientError

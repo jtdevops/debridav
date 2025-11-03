@@ -11,7 +11,7 @@ import org.gradle.api.tasks.testing.logging.TestExceptionFormat
  */
 
 group = "io.skjaere"
-version = "0.1.0"
+version = "0.10.2"
 description = "DebriDav"
 
 plugins {
@@ -74,6 +74,7 @@ tasks.jacocoTestReport {
 dependencies {
     api(libs.org.springframework.boot.spring.boot.starter.web)
     api(libs.com.fasterxml.jackson.module.jackson.module.kotlin)
+    api(libs.com.fasterxml.jackson.datatype.jackson.datatype.jsr310)
     api(libs.org.jetbrains.kotlin.kotlin.reflect)
     api(libs.org.jetbrains.kotlin.kotlin.stdlib)
     api(libs.io.milton.milton.server.ce)
@@ -188,9 +189,9 @@ jib {
         }
     }
     to {
-        image = "ghcr.io/skjaere/debridav"
+        image = "ghcr.io/jtdevops/debridav"
         auth {
-            username = "skjaere"
+            username = "jtdevops"
             password = System.getenv("GHCR_TOKEN")
         }
     }

@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.stereotype.Component
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 
 @Component
@@ -41,6 +42,14 @@ class PremiumizeClient(
     ) {
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
 
+    private data class CachedResponseEntry(
+        val response: SuccessfulDirectDownloadResponse,
+        var lastAccessed: Instant
+    )
+
+    private val directDlResponseCache: MutableMap<String, CachedResponseEntry> = mutableMapOf()
+    private val debridavConfig: DebridavConfigurationProperties = debridavConfigurationProperties
+
     init {
         require(premiumizeConfiguration.apiKey.isNotEmpty()) {
             "Missing API key for Premiumize"
@@ -49,6 +58,12 @@ class PremiumizeClient(
 
     @Suppress("TooGenericExceptionCaught")
     override suspend fun isCached(magnet: TorrentMagnet): Boolean {
+        val cacheKey = magnet.magnet
+        cleanupExpiredCacheEntries()
+        if (directDlResponseCache.containsKey(cacheKey)) {
+            return true
+        }
+
         val resp = httpClient
             .get(
                 premiumizeConfiguration.baseUrl +
@@ -60,7 +75,6 @@ class PremiumizeClient(
         return resp
             .body<CacheCheckResponse>()
             .response.first()
-
     }
 
     override suspend fun getStreamableLink(magnet: TorrentMagnet, cachedFile: CachedFile): String? {
@@ -80,6 +94,14 @@ class PremiumizeClient(
     }
 
     private suspend fun getDirectDlResponse(magnet: TorrentMagnet): SuccessfulDirectDownloadResponse {
+        cleanupExpiredCacheEntries()
+        val cacheKey = magnet.magnet
+        val now = Instant.now(clock)
+        directDlResponseCache[cacheKey]?.let { entry ->
+            entry.lastAccessed = now
+            return entry.response
+        }
+
         logger.info("getting cached files from premiumize")
         val resp =
             httpClient.post(
@@ -96,7 +118,23 @@ class PremiumizeClient(
         if (resp.status != HttpStatusCode.OK) {
             throwDebridProviderException(resp)
         }
-        return resp.body<SuccessfulDirectDownloadResponse>()
+        val response = resp.body<SuccessfulDirectDownloadResponse>()
+        directDlResponseCache[cacheKey] = CachedResponseEntry(response, now)
+        return response
+    }
+
+    private fun cleanupExpiredCacheEntries() {
+        val now = Instant.now(clock)
+        val expirationDuration = debridavConfig.debridDirectDlResponseCacheExpirationSeconds
+        val expiredKeys = directDlResponseCache.entries
+            .filter { (_, entry) ->
+                Duration.between(entry.lastAccessed, now) >= expirationDuration
+            }
+            .map { it.key }
+        expiredKeys.forEach { directDlResponseCache.remove(it) }
+        if (expiredKeys.isNotEmpty()) {
+            logger.debug("Cleaned up ${expiredKeys.size} expired cache entries")
+        }
     }
 
     private fun getCachedFilesFromResponse(resp: SuccessfulDirectDownloadResponse) =

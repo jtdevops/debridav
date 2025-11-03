@@ -2,15 +2,28 @@ package io.skjaere.debridav.cache
 
 import io.skjaere.debridav.fs.CachedFile
 import org.springframework.stereotype.Component
+import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 
 @Component
-class StreamPlanningService {
+class StreamPlanningService(
+    private val debridavConfigurationProperties: DebridavConfigurationProperties
+) {
 
     fun generatePlan(
         chunks: List<FileChunk>, range: LongRange, cachedFile: CachedFile
     ): StreamPlan {
         val sequence = StreamPlan(mutableListOf())
 
+        // If byte range request chunking is disabled, use the exact user-requested range
+        // without breaking it into chunks for caching optimization
+        if (debridavConfigurationProperties.disableByteRangeRequestChunking == true) {
+            sequence.sources.add(
+                StreamSource.Remote(range, cachedFile)
+            )
+            return sequence
+        }
+
+        // Original chunking logic for when byte range requests are enabled
         while (!sequence.getTotalRange().contains(range)) {
             val lastPlannedByte = sequence.getLastByte() ?: range.start
             chunks.getLargestRangeWithByte(lastPlannedByte + 1)?.let { nextCachedChunk ->

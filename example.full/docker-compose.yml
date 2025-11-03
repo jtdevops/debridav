@@ -1,0 +1,271 @@
+# https://docs.docker.com/compose/compose-file/14-include/
+#include:
+#  - path:
+    # - docker-compose.plex.yml
+    # - docker-compose.jellyfin.yml
+    # - docker-compose.jellyseerr.yml
+
+x-rclone-base: &rclone-base
+  image: peterbuga/rclone-mount:latest
+  restart: unless-stopped
+  environment:
+    TZ: ${TZ}
+    PUID: ${PUID}
+    PGID: ${PGID}
+    RemotePath: "debridav:"
+    MountPoint: "$DEBRIDAV_MOUNT_PATH_CONTAINERS"
+    ConfigName: "rclone.conf"
+    MountCommands: "--allow-other 
+        --allow-non-empty 
+        --vfs-cache-mode off 
+        --rc-enable-metrics
+        --metrics-addr :9002
+        --low-level-retries=1
+        --dir-cache-time=1s
+        -vv
+        "
+  volumes:
+    - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    - ./rclone.conf:/config/rclone.conf
+  cap_add:
+    - SYS_ADMIN
+  security_opt:
+    - apparmor:unconfined
+  devices:
+    - /dev/fuse:/dev/fuse:rwm
+  depends_on:
+    debridav:
+      condition: service_healthy
+
+
+services:
+  debridav:
+    build:
+      context: ..
+    image: ghcr.io/jtdevops/debridav:latest
+    container_name: debridav
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - DEBRIDAV_ROOT_PATH=${DEBRIDAV_ROOT_PATH}
+      - DEBRIDAV_DOWNLOAD_PATH=${DEBRIDAV_DOWNLOAD_PATH}
+      - DEBRIDAV_MOUNT_PATH=${DEBRIDAV_MOUNT_PATH_CONTAINERS}
+      - DEBRIDAV_DEBRID_CLIENTS=${DEBRIDAV_DEBRID_CLIENTS}
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://${DEBRIDAV_DB_HOST}:${DEBRIDAV_DB_PORT}/${DEBRIDAV_DB_DATABASE_NAME}?user=${DEBRIDAV_DB_USERNAME}&password=${DEBRIDAV_DB_PASSWORD}
+      - PREMIUMIZE_API_KEY=${PREMIUMIZE_API_KEY}
+      - REAL_DEBRID_API_KEY=${REAL_DEBRID_API_KEY}
+      - SONARR_INTEGRATION_ENABLED=${SONARR_INTEGRATION_ENABLED}
+      - SONARR_HOST=${SONARR_HOST}
+      - SONARR_PORT=${SONARR_PORT}
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - RADARR_INTEGRATION_ENABLED=${RADARR_INTEGRATION_ENABLED}
+      - RADARR_HOST=${RADARR_HOST}
+      - RADARR_PORT=${RADARR_PORT}
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - EASYNEWS_USERNAME=${EASYNEWS_USERNAME}
+      - EASYNEWS_PASSWORD=${EASYNEWS_PASSWORD}
+      - TORBOX_API_KEY=${TORBOX_API_KEY}
+
+#      - LOGGING_LEVEL_WEB=debug
+#      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV=DEBUG
+
+      # Download details can be accessed: http://<ip address>:8888/actuator/streaming-download-tracking
+      - DEBRIDAV_ENABLE_STREAMING_DOWNLOAD_TRACKING=true
+      # Disable the legacy import of .debridav files fom the /debridav container folder
+      - DEBRIDAV_ENABLE_FILE_IMPORT_ON_STARTUP=false
+
+      ### Buffer configuration options
+      # For Default Behavior (5MB database caching)
+      #- DEBRIDAV_ENABLE_CHUNK_CACHING=true
+      #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
+      ##- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD defaults to 5120000 (5MB)
+
+      # 256KB In-Memory Buffer Only
+      #- DEBRIDAV_ENABLE_CHUNK_CACHING=false
+      #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
+      #- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD=262144 # 256KB buffer
+
+      # Complete Direct Streaming (No buffering)
+      - DEBRIDAV_ENABLE_CHUNK_CACHING=false
+      - DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=false
+      ###
+
+      # Streaming optimization
+      - DEBRIDAV_STREAMING_DELAY_BETWEEN_RETRIES=50ms
+      - DEBRIDAV_STREAMING_RETRIES_ON_PROVIDER_ERROR=2
+      - DEBRIDAV_STREAMING_WAIT_AFTER_NETWORK_ERROR=100ms
+      
+      # Cache durations
+      - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
+      - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
+
+      # Byte range chunking control - set to true to prevent aggressive chunking and caching
+      - DEBRIDAV_DISABLE_BYTE_RANGE_REQUEST_CHUNKING=true
+
+      - DEBRIDAV_RCLONE_ARRS_USER_AGENT_PATTERN=rclone/arrs
+      #- DEBRIDAV_RCLONE_ARRS_HOSTNAME_PATTERN=rclone_arrs.debridav # left unset since we're only using user agent matching
+
+      # Use a locally hosted video file for ARRS projects.
+      - DEBRIDAV_ENABLE_RCLONE_ARRS_LOCAL_VIDEO=true
+      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_PATHS=1080p=/local-video/BigBuckBunny_60fps_1080p.mp4,/local-video/BigBuckBunny_60fps_720p.mp4
+#      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_PATH_REGEX=^/downloads/.*
+      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_MIN_SIZE_KB=1024
+
+      # Enable STRM folders and for media files.
+#      - DEBRIDAV_ENABLE_STRM_FOLDERS=true
+    ports:
+      - ${DEBRIDAV_PORT}:8080
+      - "8000:8000"
+    volumes:
+      - ./BigBuckBunny_60fps_1080p.mp4:/local-video/BigBuckBunny_60fps_1080p.mp4
+      # Legacy storage folder for .debridav files
+      #- ${DEBRIDAV_ROOT_HOST_FS}:${DEBRIDAV_ROOT_PATH}
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/actuator/health/readiness" ]
+      interval: 2s
+      start_period: 2s
+      retries: 1000
+    depends_on:
+      postgres-debridav:
+        condition: service_healthy
+
+  # NOTE: Fails to unmount FUSE folder when being restarted
+  # rclone:
+  #   container_name: rclone
+  #   image: rclone/rclone:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: ${TZ}
+  #     PUID: ${PUID}
+  #     PGID: ${PGID}
+  #   volumes:
+  #     - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+  #     - ./rclone.conf:/config/rclone/rclone.conf
+  #   cap_add:
+  #     - SYS_ADMIN
+  #   security_opt:
+  #     - apparmor:unconfined
+  #   devices:
+  #     - /dev/fuse:/dev/fuse:rwm
+  #   command: "mount debridav: $DEBRIDAV_MOUNT_PATH_CONTAINERS 
+  #             --allow-other 
+  #             --allow-non-empty 
+  #             --vfs-cache-mode off 
+  #             --rc-enable-metrics
+  #             --metrics-addr :9002
+  #             --low-level-retries=1
+  #             --dir-cache-time=1s
+  #             -vv
+  #             "
+  #   ports:
+  #     - "5572:5572"
+  #     - "9002:9002"
+  #   depends_on:
+  #     debridav:
+  #       condition: service_healthy
+
+  # --- First service with ports ---
+  rclone:
+    <<: *rclone-base
+    container_name: rclone
+    # https://github.com/peterbuga/docker-services/tree/master/rclone-mount
+    ports:
+      - "5572:5572"
+      - "9002:9002"
+
+  # --- Second service overriding env var and removing ports ---
+  rclone_arrs:
+    <<: *rclone-base
+    container_name: rclone_arrs
+    # ports: []  # removes inherited ports
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID}
+      PGID: ${PGID}
+      RemotePath: "debridav_arrs:"
+      MountPoint: "${DEBRIDAV_MOUNT_PATH_CONTAINERS}_arrs"
+      ConfigName: "rclone.conf"
+      MountCommands: "--allow-other 
+            --allow-non-empty 
+            --vfs-cache-mode off 
+            --low-level-retries=1
+            --dir-cache-time=1s
+            -vv
+	          --user-agent=rclone/arrs
+            "
+    volumes:
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}_arrs:${DEBRIDAV_MOUNT_PATH_CONTAINERS}_arrs:rshared
+      - ./rclone.conf:/config/rclone.conf
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr-debridav
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./sonarr-config:/config
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}_arrs:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    ports:
+      - 8989:8989
+    depends_on:
+      - rclone_arrs
+    restart: unless-stopped
+    labels:
+      filebeat_enabled:
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr-debridav
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./radarr-config:/config
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}_arrs:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    ports:
+      - "7878:7878"
+    depends_on:
+      - rclone_arrs
+    restart: unless-stopped
+
+  prowlarr-debridav:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr-debridav
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./prowlarr-config:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+
+  postgres-debridav:
+    image: postgres:17
+    container_name: postgres-debridav
+    environment:
+      - POSTGRES_PASSWORD=debridav
+      - POSTGRES_USER=debridav
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - PGUSER=debridav
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready", "-d", "debridav" ]
+      interval: 1s
+      timeout: 60s
+      retries: 10
+      start_period: 2s
+    restart: unless-stopped
+
+networks:
+  default:
+    name: debridav

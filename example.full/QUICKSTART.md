@@ -1,6 +1,6 @@
 # Quickstart for docker compose
 
-This guide will help you get up and running with DebriDav and the *arr ecosystem.
+This guide will help you get up and running with DebriDav and the *arr ecosystem using the optimized streaming configuration.
 
 > [!WARNING]
 > This guide is intended as a reference for how to set up DebriDav in a home environment, and is not suitable for
@@ -8,14 +8,43 @@ This guide will help you get up and running with DebriDav and the *arr ecosystem
 > If you intend to deploy it on a remote server you should be comfortable with configuring firewalls and/or
 > authentication proxies to prevent public access to DebriDav or any of the other services.
 
+## About This Configuration
+
+This `example.full` configuration is optimized for streaming with the following enhancements pre-configured:
+
+- **Direct Streaming**: Byte range chunking disabled and in-memory buffering disabled for optimal streaming performance
+- **Local Video File Serving**: Enabled for ARR projects to dramatically reduce bandwidth during library scans
+- **Streaming Download Tracking**: Enabled for monitoring and analysis via `/actuator/streaming-download-tracking`
+- **Optimized Cache Durations**: Configured for reduced API calls while maintaining performance
+- **Complete Service Stack**: Includes DebriDav, rclone (with separate ARR mount), Sonarr, Radarr, Prowlarr, and PostgreSQL
+
+For a basic setup, see the `example/` folder configuration.
+
 ## Requirements
 
 Docker, docker compose, and a basic understanding of how the *arr ecosystem works.
 
+## Building the Application
+
+Before starting the services, you may need to build the DebriDav application. You can do this in two ways:
+
+**Option 1: Using docker-compose (Recommended)**
+```bash
+cd example.full
+docker-compose build debridav
+```
+
+**Option 2: Using docker build directly**
+```bash
+docker build -t debridav:latest -f ../Dockerfile ..
+```
+
+The build context points to the project root, so the Dockerfile in the root directory will be used.
+
 ## Configuring
 
-Open the .env file for editing.
-Typically you need to change two values:
+Open the `.env` file for editing.
+Typically you need to change a few key values:
 
 - Set `DEBRIDAV_DEBRID_CLIENTS` to a comma separated list of debrid providers you would like to use. eg.
   `premiumize,real_debrid`, or `premiumize`. If you add multiple providers they will be preferred in the order
@@ -26,6 +55,17 @@ Typically you need to change two values:
   `https://real-debrid.com/apitoken`
 - If using EasyNews set `EASYNEWS_USERNAME` and `EASYNEWS_PASSWORD` to your EasyNews username and password respectively.
 - Save when done.
+
+### Local Video File Serving Configuration
+
+This configuration has local video file serving enabled by default to reduce bandwidth usage when ARR projects scan your media files. The docker-compose.yml includes a sample video file (`BigBuckBunny_60fps_1080p.mp4`) that will be served to ARR projects instead of the actual media files.
+
+To customize local video file serving:
+- Modify `DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_PATHS` in docker-compose.yml to point to your own video files
+- Ensure the video file path in the volumes section matches your local video file location
+- See the [README](../README.md#local-video-file-serving-for-arr-projects) for detailed configuration options
+
+If you want to disable this feature, set `DEBRIDAV_ENABLE_RCLONE_ARRS_LOCAL_VIDEO=false` in the docker-compose.yml.
 
 ### Additional configuration options
 
@@ -176,7 +216,24 @@ Your content will be visible in the /debridav directory.
 
 ## Monitoring
 
+### Streaming Download Tracking
+
+With `DEBRIDAV_ENABLE_STREAMING_DOWNLOAD_TRACKING=true` (enabled by default in this configuration), you can access detailed download metrics via:
+
+```bash
+curl http://localhost:8888/actuator/streaming-download-tracking
+```
+
+This endpoint provides insights into:
+- Requested byte ranges and sizes
+- Actual bytes downloaded and sent
+- Download completion status and duration
+- HTTP headers and source information
+- Bandwidth usage metrics
+
+### Additional Monitoring Services
+
 This example comes with a preconfigured Grafana dashboard and Dozzle to allow for easier debugging. If you wish to
 enable these additional services there is a docker compose file under example/monitoring.
-See [MONITORING.md](monitoring/MONITORING.md)
+See [MONITORING.md](../example/monitoring/MONITORING.md)
 

@@ -11,7 +11,10 @@ import io.skjaere.debridav.cache.BytesToCache
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import org.apache.commons.io.FileUtils
+import java.net.InetAddress
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
+import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import kotlinx.coroutines.CancellationException
@@ -27,6 +30,7 @@ import kotlinx.coroutines.channels.produce
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
 import kotlinx.io.EOFException
 import org.apache.catalina.connector.ClientAbortException
 import org.slf4j.LoggerFactory
@@ -36,12 +40,58 @@ import java.io.OutputStream
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 
 
 private const val DEFAULT_BUFFER_SIZE = 65536L //64kb
 private const val STREAMING_METRICS_POLLING_RATE_S = 5L //5 seconds
 private const val BYTE_CHANNEL_CAPACITY = 2000
+private const val MAX_COMPLETED_DOWNLOADS_HISTORY = 1000
+
+
+data class DownloadTrackingContext(
+    val filePath: String,
+    val fileName: String,
+    val requestedRange: Range?,
+    val requestedSize: Long,
+    val downloadStartTime: Instant = Instant.now(),
+    val bytesDownloaded: AtomicLong = AtomicLong(0),
+    // Completion metadata
+    var actualBytesSent: Long? = null,  // Total bytes actually sent
+    var downloadEndTime: Instant? = null,
+    var completionStatus: String = "in_progress",
+    val httpHeaders: Map<String, String> = emptyMap(),
+    val sourceIpAddress: String? = null
+)
+
+data class HttpRequestInfo(
+    val headers: Map<String, String> = emptyMap(),
+    val sourceIpAddress: String? = null,
+    val sourceHostname: String? = null
+) {
+    val sourceInfo: String? get() {
+        val ip = sourceIpAddress ?: return null
+        val hostname = sourceHostname ?: run {
+            try {
+                InetAddress.getByName(ip).hostName
+            } catch (e: Exception) {
+                null
+            }
+        }
+        return if (hostname != null && hostname != ip) "$ip/$hostname" else ip
+    }
+}
+
+/**
+ * Represents a cache fetch request with context needed for downloading
+ */
+private data class CacheFetchRequest(
+    val debridLink: CachedFile,
+    val range: Range,
+    val remotelyCachedEntity: RemotelyCachedEntity
+)
 
 @Service
 class StreamingService(
@@ -49,8 +99,11 @@ class StreamingService(
     private val fileChunkCachingService: FileChunkCachingService,
     private val debridavConfigProperties: DebridavConfigurationProperties,
     private val streamPlanningService: StreamPlanningService,
+    private val debridLinkService: DebridLinkService,
+    private val localVideoService: LocalVideoService,
     prometheusRegistry: PrometheusRegistry
 ) {
+    
     private val logger = LoggerFactory.getLogger(StreamingService::class.java)
     private val outputGauge =
         Gauge.builder().name("debridav.output.stream.bitrate").labelNames("provider", "file").labelNames("file")
@@ -62,50 +115,108 @@ class StreamingService(
             .name("debridav.streaming.time.to.first.byte").labelNames("provider").register(prometheusRegistry)
     private val activeOutputStream = ConcurrentLinkedQueue<OutputStreamingContext>()
     private val activeInputStreams = ConcurrentLinkedQueue<InputStreamingContext>()
+    private val activeDownloads = ConcurrentHashMap<String, DownloadTrackingContext>()
+    private val completedDownloads = ConcurrentLinkedQueue<DownloadTrackingContext>()
 
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    @Suppress("TooGenericExceptionCaught")
+    @Suppress("TooGenericExceptionCaught", "SwallowedException")
     suspend fun streamContents(
         debridLink: CachedFile,
         range: Range?,
         outputStream: OutputStream,
         remotelyCachedEntity: RemotelyCachedEntity,
+        httpRequestInfo: HttpRequestInfo = HttpRequestInfo(),
     ): StreamResult = coroutineScope {
-        val result = try {
-            val appliedRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
-            streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream)
-            StreamResult.OK
-        } catch (_: LinkNotFoundException) {
-            StreamResult.DEAD_LINK
+        val originalRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
+
+        // Check if we should serve local video file for ARR requests
+        if (debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)) {
+            val fileName = remotelyCachedEntity.name ?: "unknown"
+            val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            logger.debug("LOCAL_VIDEO_CHECK: file={}, fullPath={}, shouldServeLocalVideoForArrs=true", fileName, fullPath)
+            
+            // Check if the file path matches the configured regex pattern
+            if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
+                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}, will serve external file", 
+                    fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+            } else {
+                // Only apply local video serving to media files, not subtitles or other files
+                if (isMediaFile(fileName)) {
+                    // Get the external file size to check against the minimum size threshold
+                    val externalFileSize = debridLink.size ?: 0L
+                    
+                    // Check if the file is large enough to use local video serving
+                    if (debridavConfigProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                        logger.debug("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}",
+                            fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo, 
+                            externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                        
+                        val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
+                        return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+                    } else {
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_TOO_SMALL: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}, will serve external file", 
+                            fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex, 
+                            externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                    }
+                } else {
+                    logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_NOT_MEDIA: file={}, fullPath={}, regex={}, isMediaFile=false, will serve external file", 
+                        fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+                }
+            }
+        } else {
+            logger.debug("LOCAL_VIDEO_CHECK: file={}, shouldServeLocalVideoForArrs=false, will serve external file", 
+                remotelyCachedEntity.name ?: "unknown")
+        }
+
+        // Use the original range for normal streaming
+        val appliedRange = originalRange
+        
+        logger.debug("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes, provider={}, source={}", 
+            remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
+            appliedRange.finish - appliedRange.start + 1, debridLink.provider, httpRequestInfo.sourceInfo)
+        
+        val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
+        
+        var result: StreamResult = StreamResult.OK
+        try {
+            // Normal streaming
+            streamBytes(remotelyCachedEntity, appliedRange, debridLink, outputStream, trackingId)
+            result = StreamResult.OK
+        } catch (e: LinkNotFoundException) {
+            result = handleLinkNotFound(debridLink, remotelyCachedEntity, appliedRange, outputStream)
+        } catch (e: EOFException) {
+            result = handleEOFException(debridLink, remotelyCachedEntity, appliedRange, outputStream)
         } catch (_: DebridProviderException) {
-            StreamResult.PROVIDER_ERROR
+            result = StreamResult.PROVIDER_ERROR
         } catch (_: StreamToClientException) {
-            StreamResult.IO_ERROR
+            result = StreamResult.IO_ERROR
         } catch (_: ReadFromHttpStreamException) {
-            StreamResult.IO_ERROR
+            result = StreamResult.IO_ERROR
         } catch (_: ClientErrorException) {
-            StreamResult.CLIENT_ERROR
+            result = StreamResult.CLIENT_ERROR
         } catch (_: ClientAbortException) {
-            StreamResult.OK
+            result = StreamResult.OK
         } catch (e: kotlinx.io.IOException) {
             logger.error("IOError occurred during streaming", e)
-            StreamResult.IO_ERROR
+            result = StreamResult.IO_ERROR
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
+        } catch (e: RuntimeException) {
             logger.error("An error occurred during streaming ${debridLink.path}", e)
-            StreamResult.UNKNOWN_ERROR
+            result = StreamResult.UNKNOWN_ERROR
         } finally {
             this.coroutineContext.cancelChildren()
+            trackingId?.let { id -> completeDownloadTracking(id, result) }
         }
         logger.info("done streaming ${debridLink.path}: $result")
         result
     }
-
+    
 
     private suspend fun streamBytes(
-        remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream
+        remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream, trackingId: String?
     ) = coroutineScope {
         launch {
             val streamingPlan = streamPlanningService.generatePlan(
@@ -115,7 +226,7 @@ class StreamingService(
             )
             val sources = getSources(streamingPlan)
             val byteArrays = getByteArrays(sources)
-            sendContent(byteArrays, outputStream, remotelyCachedEntity)
+            sendContent(byteArrays, outputStream, remotelyCachedEntity, trackingId)
         }
     }
 
@@ -191,73 +302,13 @@ class StreamingService(
         }
     }
 
-    /*@OptIn(ExperimentalCoroutinesApi::class)
-    @Suppress("TooGenericExceptionCaught")
-    private fun ProducerScope<ByteArrayContext>.sendBytesFromHttpStreamWithApache(
-        source: StreamPlanningService.StreamSource.Remote
-    ) {
-        val debridClient = debridClients.first { it.getProvider() == source.cachedFile.provider }
-        val range = Range(source.range.start, source.range.last)
-        val byteRangeInfo = fileChunkCachingService.getByteRange(
-            range, source.cachedFile.size!!
-        )
-        val httpStreamingParams: StreamHttpParams = debridClient.getStreamParams(source.cachedFile, range)
-        val request = generateRequestFromSource(source, httpStreamingParams)
-
-        val started = Instant.now()
-        HttpClients.createDefault().let { httpClient ->
-            httpClient.executeOpen(null, request, null).entity.content.let { inputStream ->
-                val streamingContext = InputStreamingContext(
-                    ResettableCountingInputStream(inputStream),
-                    source.cachedFile.provider!!,
-                    source.cachedFile.path!!
-                )
-                activeInputStreams.add(streamingContext)
-                try {
-                    runBlocking(Dispatchers.IO) {
-                        try {
-                            pipeHttpInputStreamToOutputChannel(
-                                streamingContext, byteRangeInfo, source, started
-                            )
-                        } finally {
-                            httpClient.close()
-                        }
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    logger.error("An error occurred during reading from stream", e)
-                    throw ReadFromHttpStreamException("An error occurred during reading from stream", e)
-                } finally {
-                    activeInputStreams.removeStream(streamingContext)
-                }
-            }
-        }
-    }*/
-
-    /*private fun generateRequestFromSource(
-        source: StreamPlanningService.StreamSource.Remote, httpStreamingParams: StreamHttpParams
-    ): HttpGet {
-        val request = HttpGet(source.cachedFile.link)
-        request.config = RequestConfig.custom()
-            .setConnectionRequestTimeout(
-                Timeout.ofMilliseconds(httpStreamingParams.timeouts.connectTimeoutMillis)
-            )
-            .setResponseTimeout(
-                Timeout.ofMilliseconds(httpStreamingParams.timeouts.requestTimeoutMillis)
-            )
-            .build()
-        httpStreamingParams.headers.forEach { (key, value) -> request.addHeader(key, value) }
-        return request
-    }*/
-
     private suspend fun ProducerScope<ByteArrayContext>.pipeHttpInputStreamToOutputChannel(
         streamingContext: InputStreamingContext,
         byteRangeInfo: FileChunkCachingService.ByteRangeInfo?,
         source: StreamPlanningService.StreamSource.Remote,
         started: Instant
     ) {
-        var hasReadFirstByte = false;
+        var hasReadFirstByte = false
         var timeToFirstByte: Double
         var remaining = byteRangeInfo!!.length()
         var firstByte = source.range.start
@@ -306,10 +357,14 @@ class StreamingService(
     suspend fun CoroutineScope.sendContent(
         byteArrayChannel: ReceiveChannel<ByteArrayContext>,
         outputStream: OutputStream,
-        remotelyCachedEntity: RemotelyCachedEntity
+        remotelyCachedEntity: RemotelyCachedEntity,
+        trackingId: String?
     ) {
-        var shouldCache = true
-        var bytesToCache = mutableListOf<BytesToCache>()
+        val shouldBufferInMemory = debridavConfigProperties.enableInMemoryBuffering
+        val shouldCacheToDatabase = debridavConfigProperties.enableChunkCaching
+        
+        // Only initialize cache variables if both buffering and caching are enabled
+        var bytesToCache = if (shouldBufferInMemory && shouldCacheToDatabase) mutableListOf<BytesToCache>() else null
         var bytesToCacheSize = 0L
         var bytesSent = 0L
         val gaugeContext = OutputStreamingContext(
@@ -318,13 +373,13 @@ class StreamingService(
         activeOutputStream.add(gaugeContext)
         try {
             byteArrayChannel.consumeEach { context ->
-                if (context.source == ByteArraySource.REMOTE) {
-                    if (shouldCache) {
-                        bytesToCacheSize += context.byteArray.size
-                        if (bytesToCacheSize > debridavConfigProperties.chunkCachingSizeThreshold) {
-                            shouldCache = false
-                            bytesToCache = mutableListOf()
-                        } else bytesToCache.add(
+                if (shouldBufferInMemory && bytesToCache != null && context.source == ByteArraySource.REMOTE) {
+                    bytesToCacheSize += context.byteArray.size
+                    if (bytesToCacheSize > debridavConfigProperties.chunkCachingSizeThreshold) {
+                        // Stop buffering if over threshold, but keep streaming
+                        bytesToCache = null
+                    } else {
+                        bytesToCache?.add(
                             BytesToCache(
                                 context.byteArray, context.range.start, context.range.finish
                             )
@@ -335,6 +390,11 @@ class StreamingService(
                     gaugeContext.outputStream.write(context.byteArray)
                 }
                 bytesSent += context.byteArray.size
+                
+                // Update download tracking with bytes sent
+                trackingId?.let { id ->
+                    activeDownloads[id]?.bytesDownloaded?.addAndGet(context.byteArray.size.toLong())
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -346,7 +406,9 @@ class StreamingService(
         } finally {
             gaugeContext.outputStream.close()
             activeOutputStream.removeStream(gaugeContext)
-            if (bytesToCache.isNotEmpty()) {
+            
+            // Only save to database if we have bytes to cache
+            if (bytesToCache != null && bytesToCache.isNotEmpty()) {
                 fileChunkCachingService.cacheBytes(remotelyCachedEntity, bytesToCache)
             }
         }
@@ -362,5 +424,111 @@ class StreamingService(
             inputGauge.labelValues(it.provider.toString(), it.file)
                 .set(it.inputStream.countAndReset().toDouble().div(STREAMING_METRICS_POLLING_RATE_S))
         }
+    }
+
+    fun handleLinkNotFound(debridLink: CachedFile, remotelyCachedEntity: RemotelyCachedEntity, range: Range, outputStream: OutputStream): StreamResult {
+        logger.warn("Link not found for ${debridLink.path}")
+        return StreamResult.DEAD_LINK
+    }
+
+    fun handleEOFException(debridLink: CachedFile, remotelyCachedEntity: RemotelyCachedEntity, range: Range, outputStream: OutputStream): StreamResult {
+        logger.info("EOF reached while streaming ${debridLink.path}")
+        return StreamResult.OK
+    }
+
+    fun getCompletedDownloads(): List<DownloadTrackingContext> {
+        return completedDownloads.toList()
+    }
+
+    fun initializeDownloadTracking(debridLink: CachedFile, range: Range?, remotelyCachedEntity: RemotelyCachedEntity, httpRequestInfo: HttpRequestInfo): String? {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return null
+        
+        cleanupExpiredDownloadTracking()
+        
+        val trackingId = "${System.currentTimeMillis()}-${debridLink.path.hashCode()}"
+        val requestedSize = (range?.finish ?: debridLink.size!! - 1) - (range?.start ?: 0) + 1
+        val fileName = remotelyCachedEntity.name ?: "unknown"
+
+        val context = DownloadTrackingContext(
+            filePath = debridLink.path ?: "unknown_path",
+            fileName = fileName,
+            requestedRange = range,
+            requestedSize = requestedSize,
+            httpHeaders = httpRequestInfo.headers,
+            sourceIpAddress = httpRequestInfo.sourceIpAddress
+        )
+        
+        activeDownloads[trackingId] = context
+        
+        logger.info("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
+            fileName, requestedSize, trackingId)
+        
+        return trackingId
+    }
+
+    fun completeDownloadTracking(trackingId: String, result: StreamResult) {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return
+        
+        val context = activeDownloads.remove(trackingId) ?: return
+        context.downloadEndTime = Instant.now()
+        context.completionStatus = when (result) {
+            StreamResult.OK -> "completed"
+            StreamResult.IO_ERROR -> "io_error"
+            StreamResult.PROVIDER_ERROR -> "provider_error"
+            StreamResult.CLIENT_ERROR -> "client_error"
+            else -> "unknown_error"
+        }
+        
+        // Set actual bytes sent to the final downloaded count
+        context.actualBytesSent = context.bytesDownloaded.get()
+        
+        logger.info("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
+            context.fileName, context.bytesDownloaded.get(), context.actualBytesSent)
+        
+        completedDownloads.add(context)
+        while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
+            completedDownloads.poll()
+        }
+    }
+
+    private fun cleanupExpiredDownloadTracking() {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return
+        
+        val now = Instant.now()
+        val expirationDuration = debridavConfigProperties.streamingDownloadTrackingCacheExpirationHours
+        
+        val iterator = completedDownloads.iterator()
+        var removedCount = 0
+        
+        while (iterator.hasNext()) {
+            val context = iterator.next()
+            val downloadEndTime = context.downloadEndTime
+            
+            if (downloadEndTime != null) {
+                val age = Duration.between(downloadEndTime, now)
+                if (age >= expirationDuration) {
+                    iterator.remove()
+                    removedCount++
+                }
+            }
+        }
+        
+        if (removedCount > 0) {
+            logger.debug("Cleaned up $removedCount expired download tracking entries")
+        }
+    }
+    
+    /**
+     * Checks if the given filename is a media file based on its extension.
+     * Only media files should use local video serving, not subtitles or other files.
+     */
+    private fun isMediaFile(fileName: String): Boolean {
+        val knownVideoExtensions = listOf(
+            ".mp4", ".mkv", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m4v", 
+            ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".asf", ".rm", ".rmvb"
+        )
+        
+        val lowerFileName = fileName.lowercase()
+        return knownVideoExtensions.any { lowerFileName.endsWith(it) }
     }
 }
