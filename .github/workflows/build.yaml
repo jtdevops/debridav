@@ -18,17 +18,8 @@ jobs:
           fetch-depth: 0
           token: ${{secrets.PERSONAL_ACCESS_TOKEN}}
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v3
-        with:
-          java-version: '21'
-          distribution: 'adopt'
-
-      - name: Setup Gradle
-        uses: gradle/gradle-build-action@v2
-
-      - name: Build with Gradle
-        run: ./gradlew build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Get next version
         id: get_next_version
@@ -65,24 +56,22 @@ jobs:
         if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' || github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push docker image
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run:
-          ./gradlew jib -Djib.to.tags=v${{ steps.get_next_version.outputs.version }},v${{ steps.semver_parser.outputs.major }},v${{ steps.semver_parser.outputs.major }}.${{ steps.semver_parser.outputs.minor }},latest
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/jtdevops/debridav:v${{ steps.get_next_version.outputs.version }}
+            ghcr.io/jtdevops/debridav:v${{ steps.semver_parser.outputs.major }}
+            ghcr.io/jtdevops/debridav:v${{ steps.semver_parser.outputs.major }}.${{ steps.semver_parser.outputs.minor }}
+            ghcr.io/jtdevops/debridav:latest
         if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
 
       - name: Build and push docker image (manual trigger)
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run:
-          ./gradlew jib -Djib.to.tags=latest
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: docker/build-push-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          slug: jtdevops/debridav
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
-
+          context: .
+          push: true
+          tags: ghcr.io/jtdevops/debridav:latest
+        if: ${{ github.event_name == 'workflow_dispatch' && steps.get_next_version.outputs.hasNextVersion != 'true' }}
 
