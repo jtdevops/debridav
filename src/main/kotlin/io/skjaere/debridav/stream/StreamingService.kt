@@ -17,6 +17,7 @@ import io.skjaere.debridav.debrid.client.DebridCachedContentClient
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.util.VideoFileExtensions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -523,12 +524,6 @@ class StreamingService(
      * Only media files should use local video serving, not subtitles or other files.
      */
     private fun isMediaFile(fileName: String): Boolean {
-        val knownVideoExtensions = listOf(
-            ".mp4", ".mkv", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m4v", 
-            ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".asf", ".rm", ".rmvb"
-        )
-        
-        val lowerFileName = fileName.lowercase()
-        return knownVideoExtensions.any { lowerFileName.endsWith(it) }
+        return VideoFileExtensions.isVideoFile(fileName)
     }
 }

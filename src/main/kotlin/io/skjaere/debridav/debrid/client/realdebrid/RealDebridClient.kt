@@ -37,6 +37,7 @@ import io.skjaere.debridav.debrid.client.realdebrid.support.RealDebridDownloadSe
 import io.skjaere.debridav.debrid.client.realdebrid.support.RealDebridTorrentService
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.torrent.TorrentService
+import io.skjaere.debridav.util.VideoFileExtensions
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -74,7 +75,6 @@ class RealDebridClient(
     realDebridRateLimiter
 ) {
     private val logger = LoggerFactory.getLogger(RealDebridClient::class.java)
-    private val knownVideoExtensions = listOf(".mp4", ".mkv", ".avi", ".ts")
 
     private data class CachedTorrentInfoEntry(
         val torrentInfo: TorrentsInfo,
@@ -205,8 +205,7 @@ class RealDebridClient(
         //if (files.size == 1) return listOf(files.first().fileId)
         return files
             .filter { file ->
-                knownVideoExtensions
-                    .any { extension -> file.fileName.endsWith(extension) }
+                VideoFileExtensions.isVideoFile(file.fileName)
             }.filter { !it.selected }
             .map { it.fileId }
     }

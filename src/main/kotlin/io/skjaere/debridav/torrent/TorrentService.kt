@@ -8,6 +8,7 @@ import io.skjaere.debridav.debrid.TorrentMagnet
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridFileContents
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.util.VideoFileExtensions
 import jakarta.transaction.Transactional
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -133,7 +134,6 @@ class TorrentService(
 
 
     companion object {
-        val knownVideoExtensions = listOf(".mp4", ".mkv", ".avi", ".ts")
         fun getNameFromMagnet(magnet: TorrentMagnet): String? {
             return getParamsFromMagnet(magnet)["dn"]
                 ?.let {
@@ -145,8 +145,8 @@ class TorrentService(
             getNameFromMagnet(magnet)?.withoutVideoContainerExtension()
 
         private fun String.withoutVideoContainerExtension(): String {
-            knownVideoExtensions.forEach { extension ->
-                if (this.endsWith(extension)) return this.substringBeforeLast(extension)
+            VideoFileExtensions.KNOWN_VIDEO_EXTENSIONS.forEach { extension ->
+                if (this.endsWith(extension, ignoreCase = true)) return this.substringBeforeLast(extension)
             }
             return this
         }
