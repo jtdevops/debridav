@@ -93,7 +93,7 @@ class LocalVideoService(
                     } catch (e: IOException) {
                         if (e.message?.contains("Connection reset") == true || 
                             e.message?.contains("Broken pipe") == true) {
-                            logger.info("LOCAL_VIDEO_CONNECTION_RESET: client connection lost during streaming, position={}, remaining={}", 
+                            logger.debug("LOCAL_VIDEO_CONNECTION_RESET: client connection lost during streaming, position={}, remaining={}", 
                                 position, remaining)
                             return@withContext true // Connection reset, but this is normal behavior
                         }
@@ -109,7 +109,7 @@ class LocalVideoService(
                 } catch (e: IOException) {
                     if (e.message?.contains("Connection reset") == true || 
                         e.message?.contains("Broken pipe") == true) {
-                        logger.info("LOCAL_VIDEO_CONNECTION_RESET_FLUSH: client connection lost during flush")
+                        logger.debug("LOCAL_VIDEO_CONNECTION_RESET_FLUSH: client connection lost during flush")
                         return@withContext true
                     }
                     throw e
@@ -127,7 +127,7 @@ class LocalVideoService(
         } catch (e: IOException) {
             if (e.message?.contains("Connection reset") == true || 
                 e.message?.contains("Broken pipe") == true) {
-                logger.info("LOCAL_VIDEO_CONNECTION_RESET: client connection lost, path={}", 
+                logger.debug("LOCAL_VIDEO_CONNECTION_RESET: client connection lost, path={}", 
                     debridavConfigProperties.parseLocalVideoFilePaths().values.firstOrNull())
                 true // Connection reset, but this is normal behavior
             } else {

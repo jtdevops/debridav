@@ -461,7 +461,7 @@ class StreamingService(
         
         activeDownloads[trackingId] = context
         
-        logger.info("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
+        logger.debug("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
             fileName, requestedSize, trackingId)
         
         return trackingId
@@ -483,7 +483,7 @@ class StreamingService(
         // Set actual bytes sent to the final downloaded count
         context.actualBytesSent = context.bytesDownloaded.get()
         
-        logger.info("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
+        logger.debug("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
             context.fileName, context.bytesDownloaded.get(), context.actualBytesSent)
         
         completedDownloads.add(context)

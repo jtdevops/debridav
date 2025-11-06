@@ -16,7 +16,7 @@ COPY src src
 RUN ./gradlew bootJar
 
 # Runtime stage
-FROM openjdk:21-jdk-slim
+FROM openjdk:26-ea-21-jdk-slim
 
 WORKDIR /app
 

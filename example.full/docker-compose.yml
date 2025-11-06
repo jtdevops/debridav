@@ -104,12 +104,12 @@ services:
       # Byte range chunking control - set to true to prevent aggressive chunking and caching
       - DEBRIDAV_DISABLE_BYTE_RANGE_REQUEST_CHUNKING=true
 
-      - DEBRIDAV_RCLONE_ARRS_USER_AGENT_PATTERN=rclone/arrs
-      #- DEBRIDAV_RCLONE_ARRS_HOSTNAME_PATTERN=rclone_arrs.debridav # left unset since we're only using user agent matching
+      #- DEBRIDAV_RCLONE_ARRS_USER_AGENT_PATTERN=rclone/arrs
+      - DEBRIDAV_RCLONE_ARRS_HOSTNAME_PATTERN=rclone_arrs
 
       # Use a locally hosted video file for ARRS projects.
       - DEBRIDAV_ENABLE_RCLONE_ARRS_LOCAL_VIDEO=true
-      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_PATHS=1080p=/local-video/BigBuckBunny_60fps_1080p.mp4,/local-video/BigBuckBunny_60fps_720p.mp4
+      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_PATHS=1080p=/local-video/BigBuckBunny_60fps_1080p.mp4,720|=/local-video/BigBuckBunny_60fps_720p.mp4
 #      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_PATH_REGEX=^/downloads/.*
       - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_MIN_SIZE_KB=1024
 
@@ -120,6 +120,7 @@ services:
       - "8000:8000"
     volumes:
       - ./BigBuckBunny_60fps_1080p.mp4:/local-video/BigBuckBunny_60fps_1080p.mp4
+      - ./BigBuckBunny_60fps_720p.mp4:/local-video/BigBuckBunny_60fps_720p.mp4
       # Legacy storage folder for .debridav files
       #- ${DEBRIDAV_ROOT_HOST_FS}:${DEBRIDAV_ROOT_PATH}
     healthcheck:
@@ -130,41 +131,6 @@ services:
     depends_on:
       postgres-debridav:
         condition: service_healthy
-
-  # NOTE: Fails to unmount FUSE folder when being restarted
-  # rclone:
-  #   container_name: rclone
-  #   image: rclone/rclone:latest
-  #   restart: unless-stopped
-  #   environment:
-  #     TZ: ${TZ}
-  #     PUID: ${PUID}
-  #     PGID: ${PGID}
-  #   volumes:
-  #     - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
-  #     - ./rclone.conf:/config/rclone/rclone.conf
-  #   cap_add:
-  #     - SYS_ADMIN
-  #   security_opt:
-  #     - apparmor:unconfined
-  #   devices:
-  #     - /dev/fuse:/dev/fuse:rwm
-  #   command: "mount debridav: $DEBRIDAV_MOUNT_PATH_CONTAINERS 
-  #             --allow-other 
-  #             --allow-non-empty 
-  #             --vfs-cache-mode off 
-  #             --rc-enable-metrics
-  #             --metrics-addr :9002
-  #             --low-level-retries=1
-  #             --dir-cache-time=1s
-  #             -vv
-  #             "
-  #   ports:
-  #     - "5572:5572"
-  #     - "9002:9002"
-  #   depends_on:
-  #     debridav:
-  #       condition: service_healthy
 
   # --- First service with ports ---
   rclone:
@@ -188,13 +154,12 @@ services:
       MountPoint: "${DEBRIDAV_MOUNT_PATH_CONTAINERS}_arrs"
       ConfigName: "rclone.conf"
       MountCommands: "--allow-other 
-            --allow-non-empty 
-            --vfs-cache-mode off 
-            --low-level-retries=1
-            --dir-cache-time=1s
-            -vv
-	          --user-agent=rclone/arrs
-            "
+          --allow-non-empty 
+          --vfs-cache-mode off 
+          --low-level-retries=1
+          --dir-cache-time=1s
+          -vv
+          "
     volumes:
       - ${DEBRIDAV_MOUNT_PATH_HOST_FS}_arrs:${DEBRIDAV_MOUNT_PATH_CONTAINERS}_arrs:rshared
       - ./rclone.conf:/config/rclone.conf
@@ -214,8 +179,6 @@ services:
     depends_on:
       - rclone_arrs
     restart: unless-stopped
-    labels:
-      filebeat_enabled:
 
   radarr:
     image: lscr.io/linuxserver/radarr:latest

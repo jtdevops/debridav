@@ -142,7 +142,7 @@ class DebridLinkService(
                         "result was ${debridLink.javaClass.simpleName} " +
                                 "for ${file.name} from ${debridLink.provider}"
                     )
-                    logger.info("DEBRID_LINK_ERROR: file={}, provider={}, errorType={}", 
+                    logger.debug("DEBRID_LINK_ERROR: file={}, provider={}, errorType={}", 
                         file.name, debridLink.provider, debridLink.javaClass.simpleName)
                 }
                 debridLink !is CachedFile
