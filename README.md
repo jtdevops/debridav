@@ -1,8 +1,18 @@
 # DebriDav
 
+[![build](https://github.com/jtdevops/debridav/actions/workflows/build.yaml/badge.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-6DB33F?logo=springboot&logoColor=fff)](#)
+[![Kotlin](https://img.shields.io/badge/Kotlin-%237F52FF.svg?logo=kotlin&logoColor=white)](#)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=fff)](#)
+
 > [!NOTE]
 > This is a fork of the original [DebriDav project](https://github.com/skjaere/debridav) with enhanced features and improved configuration options. All original features remain as default options, with new capabilities available as opt-in enhancements.
->
+
+> [!TIP]
+> **TLDR**: All new settings are preconfigured in the `example.full` folder's `docker-compose.yml` file. For a quick start with optimized streaming configuration, see the [Example Configurations](#example-configurations) section below.
+
 > **Quick links to new features:**
 > - [Fork Enhancements Overview](#fork-enhancements)
 > - [Enhanced Caching & Performance Options](#enhanced-caching--performance-options)
@@ -13,14 +23,7 @@
 > - [Example Configurations (including optimized streaming setup)](#example-configurations)
 > - [Building the Application](#building-the-application)
 
-[![build](https://github.com/jtdevops/debridav/actions/workflows/build.yaml/badge.svg)](#)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-6DB33F?logo=springboot&logoColor=fff)](#)
-[![Kotlin](https://img.shields.io/badge/Kotlin-%237F52FF.svg?logo=kotlin&logoColor=white)](#)
-[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=fff)](#)
-
-[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/rivenmedia)
+<br/>
 
 ## What is it?
 

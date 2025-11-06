@@ -10,7 +10,31 @@ permissions:
   packages: write
 
 jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      should-build: ${{ steps.filter.outputs.should-build }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+      
+      - name: Check for code changes
+        id: filter
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            should-build:
+              - 'src/**'
+              - 'build.gradle.kts'
+              - 'settings.gradle.kts'
+              - 'gradle/**'
+              - 'Dockerfile'
+              - '.github/workflows/build.yaml'
+
   build:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.should-build == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -27,18 +51,6 @@ jobs:
 
       - name: Has next version?
         run: echo 'hasNextVersion ${{ steps.get_next_version.outputs.hasNextVersion }}'
-
-      - name: Create release
-        id: create-release
-        uses: actions/create-release@latest
-        env:
-          GITHUB_TOKEN: ${{secrets.PERSONAL_ACCESS_TOKEN}}
-        with:
-          tag_name: v${{ steps.get_next_version.outputs.version }}
-          release_name: v${{ steps.get_next_version.outputs.version }}
-          draft: false
-          prerelease: false
-        if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true'}}
 
       - name: Parse semver string
         id: semver_parser
