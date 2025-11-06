@@ -14,7 +14,6 @@
 > - [Building the Application](#building-the-application)
 
 [![build](https://github.com/jtdevops/debridav/actions/workflows/build.yaml/badge.svg)](#)
-[![codecov](https://codecov.io/gh/jtdevops/debridav/graph/badge.svg?token=LIE8M1XE4H)](https://codecov.io/gh/jtdevops/debridav)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-6DB33F?logo=springboot&logoColor=fff)](#)

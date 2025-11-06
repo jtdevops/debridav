@@ -17,6 +17,7 @@ import io.skjaere.debridav.debrid.client.DebridCachedContentClient
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.util.VideoFileExtensions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -460,7 +461,7 @@ class StreamingService(
         
         activeDownloads[trackingId] = context
         
-        logger.info("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
+        logger.debug("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
             fileName, requestedSize, trackingId)
         
         return trackingId
@@ -482,7 +483,7 @@ class StreamingService(
         // Set actual bytes sent to the final downloaded count
         context.actualBytesSent = context.bytesDownloaded.get()
         
-        logger.info("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
+        logger.debug("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
             context.fileName, context.bytesDownloaded.get(), context.actualBytesSent)
         
         completedDownloads.add(context)
@@ -523,12 +524,6 @@ class StreamingService(
      * Only media files should use local video serving, not subtitles or other files.
      */
     private fun isMediaFile(fileName: String): Boolean {
-        val knownVideoExtensions = listOf(
-            ".mp4", ".mkv", ".avi", ".ts", ".mov", ".wmv", ".flv", ".webm", ".m4v", 
-            ".m2ts", ".mts", ".vob", ".ogv", ".3gp", ".asf", ".rm", ".rmvb"
-        )
-        
-        val lowerFileName = fileName.lowercase()
-        return knownVideoExtensions.any { lowerFileName.endsWith(it) }
+        return VideoFileExtensions.isVideoFile(fileName)
     }
 }

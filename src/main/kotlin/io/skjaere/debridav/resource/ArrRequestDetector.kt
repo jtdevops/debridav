@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
 import jakarta.servlet.http.HttpServletRequest
+import java.net.InetAddress
 
 /**
  * Helper component to detect ARR requests from HTTP context.
@@ -54,11 +55,18 @@ class ArrRequestDetector(
 
         // Get source IP address
         sourceIpAddress = httpRequest.remoteAddr
-        
-        // Try to get hostname from X-Forwarded-For or similar headers
-        sourceHostname = httpRequest.getHeader("X-Forwarded-For")?.split(",")?.firstOrNull()?.trim()
+            ?: httpRequest.getHeader("X-Forwarded-For")?.split(",")?.firstOrNull()?.trim()
             ?: httpRequest.getHeader("X-Real-IP")
-            ?: httpRequest.remoteAddr
+        
+        // Try to resolve hostname from IP address
+        if (sourceIpAddress != null && sourceIpAddress != "unknown") {
+            try {
+                sourceHostname = InetAddress.getByName(sourceIpAddress).hostName
+            } catch (e: Exception) {
+                // If hostname resolution fails, leave it null
+                // The HttpRequestInfo.sourceInfo getter will try to resolve it again
+            }
+        }
 
         return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)
     }

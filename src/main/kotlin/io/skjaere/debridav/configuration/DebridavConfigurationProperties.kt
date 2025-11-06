@@ -72,6 +72,14 @@ data class DebridavConfigurationProperties(
             require(!rcloneArrsLocalVideoFilePaths.isNullOrBlank()) {
                 "rcloneArrsLocalVideoFilePaths must be specified when enableRcloneArrsLocalVideo is true"
             }
+            // Log configuration for debugging
+            val logger = org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
+            logger.debug("ARR_LOCAL_VIDEO_CONFIG: enabled=true, userAgentPattern={}, hostnamePattern={}, filePaths={}, pathRegex={}, minSizeKb={}",
+                rcloneArrsUserAgentPattern ?: "null (not configured)",
+                rcloneArrsHostnamePattern ?: "null (not configured)",
+                rcloneArrsLocalVideoFilePaths,
+                rcloneArrsLocalVideoPathRegex ?: "null (matches all paths)",
+                rcloneArrsLocalVideoMinSizeKb ?: "null (no minimum size)")
         }
     }
 
@@ -89,16 +97,44 @@ data class DebridavConfigurationProperties(
             return false
         }
         
-        // Check user agent
+        // Check user agent - use case-insensitive matching for flexibility
+        // This handles cases where:
+        // - Pattern "rclone" matches "rclone/", "rclone/arrs", "rclone/v1.2.3"
+        // - Pattern "rclone/arrs" matches "rclone/arrs", "rclone/arrs/v1.2.3"
+        // - Pattern "rclone/arrs" also matches "rclone/" (user-agent is prefix of pattern)
         val userAgent = httpRequestInfo.headers["user-agent"]
-        if (userAgent != null && rcloneArrsUserAgentPattern != null && userAgent.contains(rcloneArrsUserAgentPattern)) {
-            return true
+        if (userAgent != null && rcloneArrsUserAgentPattern != null) {
+            val lowerUserAgent = userAgent.lowercase()
+            val lowerPattern = rcloneArrsUserAgentPattern.lowercase()
+            // Check if user-agent starts with pattern OR pattern starts with user-agent
+            // This handles both "rclone" matching "rclone/arrs" and "rclone/arrs" matching "rclone/"
+            val matches = lowerUserAgent.startsWith(lowerPattern) || lowerPattern.startsWith(lowerUserAgent)
+            if (matches) {
+                return true
+            }
+        } else if (userAgent != null) {
+            // Log when pattern is null to help debug configuration issues
+            org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
+                .debug("ARR_LOCAL_VIDEO: user-agent={}, but rcloneArrsUserAgentPattern is null (not configured)", userAgent)
         }
 
         // Check hostname
         val sourceInfo = httpRequestInfo.sourceInfo
-        if (sourceInfo != null && rcloneArrsHostnamePattern != null && sourceInfo.contains(rcloneArrsHostnamePattern)) {
-            return true
+        if (sourceInfo != null && rcloneArrsHostnamePattern != null) {
+            val matches = sourceInfo.contains(rcloneArrsHostnamePattern)
+            if (matches) {
+                return true
+            } else {
+                // Log when hostname pattern doesn't match for debugging
+                val logger = org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
+                logger.debug("ARR_LOCAL_VIDEO: sourceInfo={}, hostnamePattern={}, does not match", 
+                    sourceInfo, rcloneArrsHostnamePattern)
+            }
+        } else if (rcloneArrsHostnamePattern != null) {
+            // Log when sourceInfo is null but pattern is configured
+            val logger = org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
+            logger.debug("ARR_LOCAL_VIDEO: sourceInfo is null, cannot match hostnamePattern={}", 
+                rcloneArrsHostnamePattern)
         }
 
         return false
