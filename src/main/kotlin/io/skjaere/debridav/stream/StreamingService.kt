@@ -14,8 +14,12 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import org.apache.commons.io.FileUtils
 import java.net.InetAddress
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
+import io.skjaere.debridav.debrid.client.DefaultStreamableLinkPreparer
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.CachedFile
+import io.github.resilience4j.ratelimiter.RateLimiter
+import io.github.resilience4j.ratelimiter.RateLimiterConfig
+import io.ktor.client.HttpClient
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.util.VideoFileExtensions
 import kotlinx.coroutines.CancellationException
@@ -102,6 +106,7 @@ class StreamingService(
     private val streamPlanningService: StreamPlanningService,
     private val debridLinkService: DebridLinkService,
     private val localVideoService: LocalVideoService,
+    private val httpClient: HttpClient,
     prometheusRegistry: PrometheusRegistry
 ) {
     
@@ -237,7 +242,8 @@ class StreamingService(
     }
 
     fun ConcurrentLinkedQueue<InputStreamingContext>.removeStream(ctx: InputStreamingContext) {
-        inputGauge.remove(ctx.provider.toString(), ctx.file)
+        val providerLabel = ctx.provider?.toString() ?: "IPTV"
+        inputGauge.remove(providerLabel, ctx.file)
         if (this.contains(ctx)) {
             this.remove(ctx)
         } else {
@@ -271,16 +277,58 @@ class StreamingService(
     private suspend fun ProducerScope<ByteArrayContext>.sendBytesFromHttpStreamWithKtor(
         source: StreamPlanningService.StreamSource.Remote
     ) {
-        val debridClient = debridClients.first { it.getProvider() == source.cachedFile.provider }
         val range = Range(source.range.start, source.range.last)
         val byteRangeInfo = fileChunkCachingService.getByteRange(
             range, source.cachedFile.size!!
         )
         val started = Instant.now()
-        debridClient.prepareStreamUrl(source.cachedFile, range).execute { response ->
+        
+        // Handle IPTV files - check if we can find a matching debrid client
+        // If not found, it's likely an IPTV file (using dummy provider)
+        val httpStatement = try {
+            val debridClient = debridClients.firstOrNull { it.getProvider() == source.cachedFile.provider }
+            if (debridClient != null) {
+                // Debrid file - use debrid client
+                debridClient.prepareStreamUrl(source.cachedFile, range)
+            } else {
+                // IPTV file or unknown - use direct streaming
+                val rateLimiter = RateLimiter.of("iptv", RateLimiterConfig.custom()
+                    .limitForPeriod(100)
+                    .limitRefreshPeriod(java.time.Duration.ofSeconds(1))
+                    .build())
+                val linkPreparer = DefaultStreamableLinkPreparer(
+                    httpClient,
+                    debridavConfigProperties,
+                    rateLimiter
+                )
+                linkPreparer.prepareStreamUrl(source.cachedFile, range)
+            }
+        } catch (e: NoSuchElementException) {
+            // No matching debrid client - treat as IPTV
+            val rateLimiter = RateLimiter.of("iptv", RateLimiterConfig.custom()
+                .limitForPeriod(100)
+                .limitRefreshPeriod(java.time.Duration.ofSeconds(1))
+                .build())
+            val linkPreparer = DefaultStreamableLinkPreparer(
+                httpClient,
+                debridavConfigProperties,
+                rateLimiter
+            )
+            linkPreparer.prepareStreamUrl(source.cachedFile, range)
+        }
+        
+        httpStatement.execute { response ->
             response.body<ByteReadChannel>().toInputStream().use { inputStream ->
+                // For IPTV files, provider might be a dummy value - set to null for metrics
+                val actualProvider = if (debridClients.none { it.getProvider() == source.cachedFile.provider }) {
+                    null
+                } else {
+                    source.cachedFile.provider
+                }
                 val streamingContext = InputStreamingContext(
-                    ResettableCountingInputStream(inputStream), source.cachedFile.provider!!, source.cachedFile.path!!
+                    ResettableCountingInputStream(inputStream), 
+                    actualProvider, 
+                    source.cachedFile.path!!
                 )
                 activeInputStreams.add(streamingContext)
                 try {
@@ -322,7 +370,12 @@ class StreamingService(
             if (!hasReadFirstByte) {
                 hasReadFirstByte = true
                 timeToFirstByte = Duration.between(started, Instant.now()).toMillis().toDouble()
-                timeToFirstByteHistogram.labelValues(source.cachedFile.provider.toString()).observe(timeToFirstByte)
+                val providerLabel = if (debridClients.none { it.getProvider() == source.cachedFile.provider }) {
+                    "IPTV"
+                } else {
+                    source.cachedFile.provider.toString()
+                }
+                timeToFirstByteHistogram.labelValues(providerLabel).observe(timeToFirstByte)
             }
             if (bytes.isNotEmpty()) {
                 send(

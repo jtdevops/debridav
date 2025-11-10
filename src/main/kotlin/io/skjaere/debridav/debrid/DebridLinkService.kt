@@ -22,8 +22,10 @@ import io.skjaere.debridav.fs.ClientError
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridCachedTorrentContent
 import io.skjaere.debridav.fs.DebridCachedUsenetReleaseContent
+import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.DebridFile
 import io.skjaere.debridav.fs.DebridFileContents
+import io.skjaere.debridav.fs.IptvFile
 import io.skjaere.debridav.fs.MissingFile
 import io.skjaere.debridav.fs.NetworkError
 import io.skjaere.debridav.fs.ProviderError
@@ -114,7 +116,31 @@ class DebridLinkService(
 
     suspend fun getCachedFileCached(file: RemotelyCachedEntity): CachedFile? = cachedFileCache.get(file)
 
-    suspend fun getCachedFile(file: RemotelyCachedEntity): CachedFile? = getCheckedLinks(file).firstOrNull()
+    suspend fun getCachedFile(file: RemotelyCachedEntity): CachedFile? {
+        val debridFileContents = file.contents!!
+        
+        // Handle IPTV content - convert IptvFile to CachedFile
+        if (debridFileContents is DebridIptvContent) {
+            val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
+            val link = iptvFile?.link
+            if (iptvFile != null && link != null) {
+                // Create a fs.CachedFile with a dummy provider for compatibility
+                return io.skjaere.debridav.fs.CachedFile(
+                    path = iptvFile.path ?: file.name ?: "",
+                    size = iptvFile.size ?: 0L,
+                    mimeType = iptvFile.mimeType ?: "video/mp4",
+                    link = link,
+                    params = iptvFile.params ?: emptyMap(),
+                    lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
+                    provider = io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID // Dummy
+                )
+            }
+            return null
+        }
+        
+        return getCheckedLinks(file).firstOrNull()
+    }
+    
     suspend fun getCheckedLinks(file: RemotelyCachedEntity): Flow<CachedFile> {
         val debridFileContents = file.contents!!
         val started = Instant.now()
@@ -161,6 +187,26 @@ class DebridLinkService(
     }
 
     private suspend fun getFlowOfDebridLinks(debridFileContents: DebridFileContents): Flow<DebridFile> = flow {
+        // Handle IPTV content - IPTV files don't use debrid clients
+        if (debridFileContents is DebridIptvContent) {
+            val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
+            val link = iptvFile?.link
+            if (iptvFile != null && link != null) {
+                // Convert IptvFile to CachedFile for streaming
+                // Use dummy provider - will be handled specially in StreamingService
+                emit(io.skjaere.debridav.fs.CachedFile(
+                    path = iptvFile.path ?: debridFileContents.originalPath ?: "",
+                    size = iptvFile.size ?: 0L,
+                    mimeType = iptvFile.mimeType ?: "video/mp4",
+                    link = link,
+                    params = iptvFile.params ?: emptyMap(),
+                    lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
+                    provider = io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID // Dummy
+                ))
+            }
+            return@flow
+        }
+        
         debridavConfigurationProperties.debridClients
             .map { debridClients.getClient(it) }
             .map { debridClient ->
@@ -180,6 +226,24 @@ class DebridLinkService(
         debridFileContents: DebridFileContents,
         debridClient: DebridCachedContentClient
     ): DebridFile {
+        // IPTV content doesn't need fresh links - it's already resolved
+        if (debridFileContents is DebridIptvContent) {
+            val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
+            val link = iptvFile?.link
+            if (iptvFile != null && link != null) {
+                return io.skjaere.debridav.fs.CachedFile(
+                    path = iptvFile.path ?: debridFileContents.originalPath ?: "",
+                    size = iptvFile.size ?: 0L,
+                    mimeType = iptvFile.mimeType ?: "video/mp4",
+                    link = link,
+                    params = iptvFile.params ?: emptyMap(),
+                    lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
+                    provider = io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID // Dummy
+                )
+            }
+            return MissingFile(io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID, clock.instant().toEpochMilli())
+        }
+        
         val key = when (debridFileContents) {
             is DebridCachedTorrentContent -> TorrentMagnet(debridFileContents.magnet!!)
             is DebridCachedUsenetReleaseContent -> UsenetRelease(debridFileContents.releaseName!!)

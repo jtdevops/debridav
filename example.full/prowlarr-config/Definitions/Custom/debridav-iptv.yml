@@ -1,0 +1,87 @@
+---
+id: debridav-iptv
+name: DebriDav IPTV
+description: "DebriDav IPTV Indexer - Search IPTV providers for Movies and TV Shows"
+language: en-US
+type: public
+encoding: UTF-8
+followredirect: false
+testlinktorrent: false
+requestDelay: 1
+links:
+  - http://debridav:8080
+caps:
+  categories:
+    Movies: Movies
+    TV: TV
+  modes:
+    search: [q]
+    movie-search: [q, imdbid]
+    tv-search: [q, imdbid, season, ep]
+  allowrawsearch: false
+
+settings:
+  - name: validation_label
+    type: info
+    label: Validation settings (optional)
+  - name: validate_imdb_movie_label
+    type: info
+    label: The following help to validate an indexer in Radarr by confirming that the movie returns results
+  - name: validate_imdb_movie
+    type: text
+    label: IMDB ID of Movie to use for Radarr validation (must exist in IPTV provider)
+  - name: validate_imdb_tv_label
+    type: info
+    label: The following help to validate an indexer in Sonarr by confirming that the show returns results
+  - name: validate_imdb_tv
+    type: text
+    label: IMDB ID TV show to use for Sonarr validation (must exist in IPTV provider)
+
+search:
+  headers:
+    User-Agent: ["DebriDav-Prowlarr/1.0"]
+    Accept: ["application/json"]
+  paths:
+    - path: "/api/iptv/search?query={{ if .Query.IMDBID }}{{ .Query.IMDBID }}{{ else }}{{ .Query.Q }}{{ end }}&type={{ if .Query.Season }}SERIES{{ else }}MOVIE{{ end }}"
+      method: post
+      response:
+        type: json
+        noResultsMessage: "[]"
+      categories: [Movies, TV]
+
+  rows:
+    selector: "$"
+    missingAttributeEqualsNoResults: true
+
+  fields:
+    title:
+      selector: title
+    category:
+      text: "{{ if eq .Result.contentType \"MOVIE\" }}Movies{{ else }}TV{{ end }}"
+    category_is_tv_show:
+      text: "{{ if eq .Result.contentType \"SERIES\" }}true{{ else }}false{{ end }}"
+    size:
+      text: "0"
+    seeders:
+      text: "1"
+    details:
+      text: "/api/iptv"
+    magnet:
+      text: "iptv://{{ .Result.providerName }}/{{ .Result.contentId }}"
+    guid:
+      text: "iptv://{{ .Result.providerName }}/{{ .Result.contentId }}"
+    downloadurl:
+      text: "iptv://{{ .Result.providerName }}/{{ .Result.contentId }}"
+    year:
+      selector: title
+      filters:
+        - name: regexp
+          args: "(\\b(19|20)\\d\\d\\b)"
+    date:
+      text: "now"
+      filters:
+        - name: dateparse
+          args: ["2006-01-02"]
+        - name: dateformat
+          args: ["2006-01-02 15:04:05"]
+

@@ -47,6 +47,13 @@ class DatabaseFileService(
     }
 
     @Transactional
+    fun createIptvFile(
+        path: String, hash: String, debridIptvContent: io.skjaere.debridav.fs.DebridIptvContent
+    ): RemotelyCachedEntity = runBlocking {
+        createDebridFile(path, hash, debridIptvContent)
+    }
+
+    @Transactional
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents
     ): RemotelyCachedEntity = runBlocking {
@@ -59,6 +66,9 @@ class DatabaseFileService(
             when (it.contents) {
                 is DebridCachedTorrentContent -> debridFileRepository.unlinkFileFromTorrents(it)
                 is DebridCachedUsenetReleaseContent -> debridFileRepository.unlinkFileFromUsenet(it)
+                is io.skjaere.debridav.fs.DebridIptvContent -> {
+                    // IPTV content cleanup - no special unlinking needed
+                }
             }
             fileChunkCachingService.deleteChunksForFile(it)
             debridFileRepository.deleteDbEntityByHash(it.hash!!) // TODO: why doesn't debridFileRepository.delete() work?

@@ -105,6 +105,38 @@ open class DebridUsenetContents : DebridFileContents() {
     //open var mimeType: String? = null
 }
 
+@Entity
+open class DebridIptvContent() : DebridFileContents() {
+    @Column(name = "iptv_url", length = 2048)
+    open var iptvUrl: String? = null // resolved URL with actual credentials
+    
+    @Column(name = "iptv_provider_name", length = 255)
+    open var iptvProviderName: String? = null
+    
+    @Column(name = "iptv_content_id", length = 512)
+    open var iptvContentId: String? = null
+
+    constructor(
+        originalPath: String?,
+        size: Long?,
+        modified: Long?,
+        iptvUrl: String?,
+        iptvProviderName: String?,
+        iptvContentId: String?,
+        mimeType: String?,
+        debridLinks: MutableList<DebridFile>
+    ) : this() {
+        this.originalPath = originalPath
+        this.size = size
+        this.modified = modified
+        this.iptvUrl = iptvUrl
+        this.iptvProviderName = iptvProviderName
+        this.iptvContentId = iptvContentId
+        this.debridLinks = debridLinks
+        this.mimeType = mimeType
+    }
+}
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 @JsonTypeInfo(
     use = JsonTypeInfo.Id.NAME,
@@ -118,6 +150,7 @@ open class DebridUsenetContents : DebridFileContents() {
         JsonSubTypes.Type(ClientError::class, name = "ClientError"),
         JsonSubTypes.Type(NetworkError::class, name = "NetworkError"),
         JsonSubTypes.Type(UnknownDebridLinkError::class, name = "UnknownError"),
+        JsonSubTypes.Type(IptvFile::class, name = "IptvFile"),
     ]
 )
 
@@ -239,5 +272,35 @@ open class UnknownDebridLinkError() : DebridFile() {
     constructor(debridProvider: DebridProvider, lastChecked: Long) : this() {
         this.provider = debridProvider
         this.lastChecked = lastChecked
+    }
+}
+
+@JsonTypeName("IptvFile")
+open class IptvFile() : DebridFile() {
+    @JsonProperty("@type")
+    open var type: String = "IptvFile"
+    open var path: String? = null
+    open var size: Long? = null
+    open var mimeType: String? = null
+    open var link: String? = null
+    open var params: Map<String, String>? = mutableMapOf()
+
+    @Suppress("LongParameterList")
+    constructor(
+        path: String,
+        size: Long,
+        mimeType: String,
+        link: String,
+        params: Map<String, String>?,
+        lastChecked: Long
+    ) : this() {
+        this.path = path
+        this.size = size
+        this.mimeType = mimeType
+        this.link = link
+        this.params = params
+        this.lastChecked = lastChecked
+        // IPTV files don't have a debrid provider
+        this.provider = null
     }
 }

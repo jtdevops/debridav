@@ -8,6 +8,9 @@ import io.skjaere.debridav.debrid.TorrentMagnet
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridFileContents
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.iptv.IptvContentRepository
+import io.skjaere.debridav.iptv.IptvRequestService
+import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.util.VideoFileExtensions
 import jakarta.transaction.Transactional
 import kotlinx.coroutines.runBlocking
@@ -28,7 +31,10 @@ class TorrentService(
     private val torrentRepository: TorrentRepository,
     private val categoryService: CategoryService,
     private val arrService: ArrService,
-    private val torrentToMagnetConverter: TorrentToMagnetConverter
+    private val torrentToMagnetConverter: TorrentToMagnetConverter,
+    private val iptvRequestService: IptvRequestService,
+    private val debridFileRepository: DebridFileContentsRepository,
+    private val iptvContentRepository: IptvContentRepository
 ) {
     private val logger = LoggerFactory.getLogger(TorrentService::class.java)
 
@@ -41,6 +47,12 @@ class TorrentService(
 
     @Transactional
     fun addMagnet(category: String, magnet: TorrentMagnet): Boolean = runBlocking {
+        // Check if this is an IPTV link
+        if (magnet.magnet.startsWith("iptv://")) {
+            return@runBlocking handleIptvLink(magnet.magnet, category)
+        }
+        
+        // Existing debrid handling
         val debridFileContents = runBlocking { debridService.addContent(magnet) }
 
         if (debridFileContents.isEmpty()) {
@@ -54,6 +66,81 @@ class TorrentService(
             createTorrent(debridFileContents, category, magnet)
             true
         }
+    }
+    
+    private fun handleIptvLink(iptvLink: String, category: String): Boolean {
+        logger.info("Processing IPTV link: $iptvLink")
+        
+        // Parse: iptv://{providerName}/{contentId}
+        val linkWithoutProtocol = iptvLink.removePrefix("iptv://")
+        val parts = linkWithoutProtocol.split("/", limit = 2)
+        
+        if (parts.size != 2) {
+            logger.error("Invalid IPTV link format: $iptvLink. Expected format: iptv://{providerName}/{contentId}")
+            return false
+        }
+        
+        val providerName = parts[0]
+        val contentId = parts[1]
+        
+        // Get IPTV content entity to retrieve title
+        val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
+        if (iptvContent == null) {
+            logger.error("IPTV content not found: provider=$providerName, contentId=$contentId")
+            return false
+        }
+        
+        // Add IPTV content (creates the virtual file)
+        val success = runBlocking {
+            iptvRequestService.addIptvContent(contentId, providerName, category)
+        }
+        
+        if (!success) {
+            logger.error("Failed to add IPTV content: provider=$providerName, contentId=$contentId")
+            return false
+        }
+        
+        // Generate hash (same as in IptvRequestService)
+        val hash = "${providerName}_${contentId}".hashCode().toString()
+        
+        // Retrieve the created file and create a Torrent entity for it
+        val createdFiles = debridFileRepository.getByHash(hash)
+            .filterIsInstance<RemotelyCachedEntity>()
+        
+        if (createdFiles.isEmpty()) {
+            logger.error("IPTV file not found after creation: hash=$hash")
+            return false
+        }
+        
+        val file = createdFiles.first()
+        
+        // Create or update Torrent entity
+        val torrent = torrentRepository.getByHashIgnoreCase(hash) ?: Torrent()
+        
+        // If reusing an existing torrent, clean up old files first
+        if (torrent.id != null) {
+            torrent.files.forEach { oldFile ->
+                fileService.deleteFile(oldFile)
+            }
+            torrent.files.clear()
+        }
+        
+        torrent.category = categoryService.findByName(category)
+            ?: run { categoryService.createCategory(category) }
+        // Use IPTV content title for torrent name, removing file extension if present
+        torrent.name = iptvContent.title.substringBeforeLast(".").takeIf { it != iptvContent.title }
+            ?: iptvContent.title
+        torrent.created = Instant.now()
+        torrent.hash = hash
+        torrent.status = Status.LIVE
+        torrent.savePath = file.directory?.path?.let { "$it/${file.name}" }
+            ?: "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
+        torrent.files = mutableListOf(file)
+        
+        torrentRepository.save(torrent)
+        logger.info("Successfully created Torrent entity for IPTV content: ${torrent.name}")
+        
+        return true
     }
 
     fun createTorrent(
