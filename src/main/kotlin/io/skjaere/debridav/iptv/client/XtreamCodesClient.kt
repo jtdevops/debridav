@@ -11,8 +11,19 @@ import io.skjaere.debridav.iptv.model.ContentType
 import io.skjaere.debridav.iptv.model.EpisodeInfo
 import io.skjaere.debridav.iptv.model.IptvContentItem
 import io.skjaere.debridav.iptv.util.IptvResponseFileService
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.descriptors.element
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
 import java.net.URLEncoder
 
@@ -225,6 +236,57 @@ class XtreamCodesClient(
         return tokenized
     }
     
+    /**
+     * Custom serializer for fields that accept both String and Number in JSON
+     * Converts numbers to their string representation
+     */
+    private object StringOrNumberSerializer : KSerializer<String?> {
+        override val descriptor: SerialDescriptor = buildClassSerialDescriptor("StringOrNumber") {
+            element<String?>("value", isOptional = true)
+        }
+
+        override fun serialize(encoder: Encoder, value: String?) {
+            val jsonEncoder = encoder as JsonEncoder
+            jsonEncoder.encodeJsonElement(JsonPrimitive(value ?: ""))
+        }
+
+        override fun deserialize(decoder: Decoder): String? {
+            val jsonDecoder = decoder as JsonDecoder
+            val element = jsonDecoder.decodeJsonElement()
+            val primitive = element.jsonPrimitive
+            // JsonPrimitive.content returns string representation for both strings and numbers
+            return primitive.content
+        }
+    }
+    
+    /**
+     * Custom serializer for integer fields that accept both String and Number in JSON
+     * Converts strings to integers, or numbers directly
+     */
+    private object IntOrStringSerializer : KSerializer<Int?> {
+        override val descriptor: SerialDescriptor = buildClassSerialDescriptor("IntOrString") {
+            element<Int?>("value", isOptional = true)
+        }
+
+        override fun serialize(encoder: Encoder, value: Int?) {
+            val jsonEncoder = encoder as JsonEncoder
+            jsonEncoder.encodeJsonElement(JsonPrimitive(value ?: 0))
+        }
+
+        override fun deserialize(decoder: Decoder): Int? {
+            val jsonDecoder = decoder as JsonDecoder
+            val element = jsonDecoder.decodeJsonElement()
+            val primitive = element.jsonPrimitive
+            return when {
+                primitive.isString -> primitive.content.toIntOrNull()
+                else -> {
+                    // For numbers, parse the content as double and convert to int
+                    primitive.content.toDoubleOrNull()?.toInt()
+                }
+            }
+        }
+    }
+    
     @Serializable
     private data class XtreamVodStream(
         val num: Int? = null,
@@ -232,10 +294,14 @@ class XtreamCodesClient(
         val stream_type: String? = null,
         val stream_id: Int,
         val stream_icon: String? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
         val rating: String? = null,
         val rating_5based: Double? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
         val added: String? = null,
+        @Serializable(with = IntOrStringSerializer::class)
         val is_adult: Int? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
         val category_id: String? = null,
         val container_extension: String? = null,
         val custom_sid: String? = null,
