@@ -107,7 +107,12 @@ class XtreamCodesClient(
         }
     }
 
-    suspend fun getVodContent(providerConfig: IptvProviderConfiguration): List<IptvContentItem> {
+    /**
+     * Gets VOD streams from the Xtream Codes provider
+     * Returns a list of XtreamVodStream objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    private suspend fun getVodStreams(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamVodStream> {
         require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
             "Provider ${providerConfig.name} is not an Xtream Codes provider"
         }
@@ -117,7 +122,14 @@ class XtreamCodesClient(
         val password = providerConfig.xtreamPassword ?: return emptyList()
         
         try {
-            // Get VOD streams
+            // If pre-fetched body is provided, use it directly
+            if (preFetchedBody != null) {
+                logger.debug("Using pre-fetched VOD streams response (length: ${preFetchedBody.length} characters)")
+                val vodStreams: List<XtreamVodStream> = json.decodeFromString(preFetchedBody)
+                logger.debug("Successfully parsed ${vodStreams.size} VOD streams")
+                return vodStreams
+            }
+            
             val vodStreamsUrl = "$baseUrl/player_api.php"
             val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
             
@@ -163,7 +175,39 @@ class XtreamCodesClient(
             val vodStreams: List<XtreamVodStream> = json.decodeFromString(finalVodStreamsBody)
             logger.debug("Successfully parsed ${vodStreams.size} VOD streams")
             
-            // Get VOD categories for categorization
+            return vodStreams
+        } catch (e: Exception) {
+            logger.error("Error fetching VOD streams from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    /**
+     * Gets VOD categories from the Xtream Codes provider
+     * Returns a list of XtreamCategory objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    private suspend fun getVodCategoriesInternal(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamCategory> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // If pre-fetched body is provided, use it directly
+            if (preFetchedBody != null) {
+                logger.debug("Using pre-fetched VOD categories response (length: ${preFetchedBody.length} characters)")
+                val parsedCategories = json.decodeFromString<List<XtreamCategory>>(preFetchedBody)
+                logger.debug("Successfully parsed ${parsedCategories.size} VOD categories")
+                return parsedCategories
+            }
+            
+            val apiUrl = "$baseUrl/player_api.php"
+            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+            
             val categoriesBody = if (useLocal) {
                 logger.info("Using local response file for VOD categories from provider ${providerConfig.name}")
                 responseFileService.loadResponse(providerConfig, "vod_categories")
@@ -181,10 +225,10 @@ class XtreamCodesClient(
                 logger.debug("Successfully parsed ${parsedCategories.size} VOD categories")
                 parsedCategories
             } else {
-                val categoriesRequestUrl = "$vodStreamsUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_vod_categories"
+                val categoriesRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_vod_categories"
                 logger.debug("Fetching VOD categories from Xtream Codes provider ${providerConfig.name}: $categoriesRequestUrl")
                 
-                val categoriesResponse: HttpResponse = httpClient.get(vodStreamsUrl) {
+                val categoriesResponse: HttpResponse = httpClient.get(apiUrl) {
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_vod_categories")
@@ -210,8 +254,31 @@ class XtreamCodesClient(
                 }
             }
             
+            return categories
+        } catch (e: Exception) {
+            logger.error("Error fetching VOD categories from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    suspend fun getVodContent(providerConfig: IptvProviderConfiguration, categories: List<XtreamCategory>? = null, preFetchedStreamsBody: String? = null): List<IptvContentItem> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // Get VOD streams (use pre-fetched body if available)
+            val vodStreams = getVodStreams(providerConfig, preFetchedStreamsBody)
+            
+            // Get VOD categories (use provided categories or fetch them)
+            val vodCategories = categories ?: getVodCategoriesInternal(providerConfig)
+            
             // Convert category_id from Int to String for matching (API returns category_id as String in some cases)
-            val categoryMap = categories.associateBy { it.category_id.toString() }
+            val categoryMap = vodCategories.associateBy { it.category_id.toString() }
             
             return vodStreams.mapNotNull { stream ->
                 // Handle category_id - it may be a String in the JSON response
@@ -268,7 +335,12 @@ class XtreamCodesClient(
         }
     }
 
-    suspend fun getSeriesContent(providerConfig: IptvProviderConfiguration): List<IptvContentItem> {
+    /**
+     * Gets series streams from the Xtream Codes provider
+     * Returns a list of XtreamSeriesStream objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    private suspend fun getSeriesStreams(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamSeriesStream> {
         require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
             "Provider ${providerConfig.name} is not an Xtream Codes provider"
         }
@@ -278,7 +350,14 @@ class XtreamCodesClient(
         val password = providerConfig.xtreamPassword ?: return emptyList()
         
         try {
-            // Get series streams
+            // If pre-fetched body is provided, use it directly
+            if (preFetchedBody != null) {
+                logger.debug("Using pre-fetched series streams response (length: ${preFetchedBody.length} characters)")
+                val seriesStreams: List<XtreamSeriesStream> = json.decodeFromString(preFetchedBody)
+                logger.debug("Successfully parsed ${seriesStreams.size} series streams")
+                return seriesStreams
+            }
+            
             val seriesStreamsUrl = "$baseUrl/player_api.php"
             val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
             
@@ -324,7 +403,39 @@ class XtreamCodesClient(
             val seriesStreams: List<XtreamSeriesStream> = json.decodeFromString(finalSeriesStreamsBody)
             logger.debug("Successfully parsed ${seriesStreams.size} series streams")
             
-            // Get series categories for categorization
+            return seriesStreams
+        } catch (e: Exception) {
+            logger.error("Error fetching series streams from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    /**
+     * Gets series categories from the Xtream Codes provider
+     * Returns a list of XtreamCategory objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    private suspend fun getSeriesCategoriesInternal(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamCategory> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // If pre-fetched body is provided, use it directly
+            if (preFetchedBody != null) {
+                logger.debug("Using pre-fetched series categories response (length: ${preFetchedBody.length} characters)")
+                val parsedCategories = json.decodeFromString<List<XtreamCategory>>(preFetchedBody)
+                logger.debug("Successfully parsed ${parsedCategories.size} series categories")
+                return parsedCategories
+            }
+            
+            val apiUrl = "$baseUrl/player_api.php"
+            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+            
             val categoriesBody = if (useLocal) {
                 logger.info("Using local response file for series categories from provider ${providerConfig.name}")
                 responseFileService.loadResponse(providerConfig, "series_categories")
@@ -342,10 +453,10 @@ class XtreamCodesClient(
                 logger.debug("Successfully parsed ${parsedCategories.size} series categories")
                 parsedCategories
             } else {
-                val categoriesRequestUrl = "$seriesStreamsUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_series_categories"
+                val categoriesRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_series_categories"
                 logger.debug("Fetching series categories from Xtream Codes provider ${providerConfig.name}: $categoriesRequestUrl")
                 
-                val categoriesResponse: HttpResponse = httpClient.get(seriesStreamsUrl) {
+                val categoriesResponse: HttpResponse = httpClient.get(apiUrl) {
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_series_categories")
@@ -371,8 +482,31 @@ class XtreamCodesClient(
                 }
             }
             
+            return categories
+        } catch (e: Exception) {
+            logger.error("Error fetching series categories from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    suspend fun getSeriesContent(providerConfig: IptvProviderConfiguration, categories: List<XtreamCategory>? = null, preFetchedStreamsBody: String? = null): List<IptvContentItem> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // Get series streams (use pre-fetched body if available)
+            val seriesStreams = getSeriesStreams(providerConfig, preFetchedStreamsBody)
+            
+            // Get series categories (use provided categories or fetch them)
+            val seriesCategories = categories ?: getSeriesCategoriesInternal(providerConfig)
+            
             // Convert category_id from Int to String for matching (API returns category_id as String in some cases)
-            val categoryMap = categories.associateBy { it.category_id.toString() }
+            val categoryMap = seriesCategories.associateBy { it.category_id.toString() }
             
             return seriesStreams.mapNotNull { stream ->
                 // Handle category_id - it may be a String in the JSON response
@@ -422,42 +556,16 @@ class XtreamCodesClient(
      * Returns a list of category ID to category name mappings
      */
     suspend fun getVodCategories(providerConfig: IptvProviderConfiguration): List<Pair<String, String>> {
-        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
-            "Provider ${providerConfig.name} is not an Xtream Codes provider"
-        }
-        
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
-        val username = providerConfig.xtreamUsername ?: return emptyList()
-        val password = providerConfig.xtreamPassword ?: return emptyList()
-        
-        try {
-            val apiUrl = "$baseUrl/player_api.php"
-            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
-            
-            val categoriesBody = if (useLocal) {
-                responseFileService.loadResponse(providerConfig, "vod_categories")
-            } else {
-                null
-            } ?: run {
-                val response: HttpResponse = httpClient.get(apiUrl) {
-                    parameter("username", username)
-                    parameter("password", password)
-                    parameter("action", "get_vod_categories")
-                }
-                if (response.status == HttpStatusCode.OK) {
-                    response.body<String>()
-                } else {
-                    logger.warn("Failed to fetch VOD categories: ${response.status}")
-                    return emptyList()
-                }
-            }
-            
-            val categories: List<XtreamCategory> = json.decodeFromString(categoriesBody)
-            return categories.map { it.category_id.toString() to it.category_name }
-        } catch (e: Exception) {
-            logger.error("Error fetching VOD categories from Xtream Codes provider ${providerConfig.name}", e)
-            return emptyList()
-        }
+        val categories = getVodCategoriesInternal(providerConfig)
+        return categories.map { it.category_id.toString() to it.category_name }
+    }
+
+    /**
+     * Gets VOD categories as XtreamCategory objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    suspend fun getVodCategoriesAsObjects(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamCategory> {
+        return getVodCategoriesInternal(providerConfig, preFetchedBody)
     }
 
     /**
@@ -465,42 +573,93 @@ class XtreamCodesClient(
      * Returns a list of category ID to category name mappings
      */
     suspend fun getSeriesCategories(providerConfig: IptvProviderConfiguration): List<Pair<String, String>> {
+        val categories = getSeriesCategoriesInternal(providerConfig)
+        return categories.map { it.category_id.toString() to it.category_name }
+    }
+
+    /**
+     * Gets series categories as XtreamCategory objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    suspend fun getSeriesCategoriesAsObjects(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamCategory> {
+        return getSeriesCategoriesInternal(providerConfig, preFetchedBody)
+    }
+
+    /**
+     * Gets a single endpoint response body for hash checking
+     * Returns the response body string, or null if fetch failed
+     */
+    suspend fun getSingleEndpointResponse(providerConfig: IptvProviderConfiguration, endpointType: String): String? {
         require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
             "Provider ${providerConfig.name} is not an Xtream Codes provider"
         }
         
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
-        val username = providerConfig.xtreamUsername ?: return emptyList()
-        val password = providerConfig.xtreamPassword ?: return emptyList()
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
+        val username = providerConfig.xtreamUsername ?: return null
+        val password = providerConfig.xtreamPassword ?: return null
+        
+        val apiUrl = "$baseUrl/player_api.php"
+        val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+        
+        // Map endpoint type to action parameter
+        val action = when (endpointType) {
+            "vod_categories" -> "get_vod_categories"
+            "vod_streams" -> "get_vod_streams"
+            "series_categories" -> "get_series_categories"
+            "series_streams" -> "get_series"
+            else -> return null
+        }
         
         try {
-            val apiUrl = "$baseUrl/player_api.php"
-            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
-            
-            val categoriesBody = if (useLocal) {
-                responseFileService.loadResponse(providerConfig, "series_categories")
+            // Try local file first if configured
+            val responseBody = if (useLocal) {
+                responseFileService.loadResponse(providerConfig, endpointType, logNotFound = false)
             } else {
                 null
-            } ?: run {
-                val response: HttpResponse = httpClient.get(apiUrl) {
-                    parameter("username", username)
-                    parameter("password", password)
-                    parameter("action", "get_series_categories")
-                }
-                if (response.status == HttpStatusCode.OK) {
-                    response.body<String>()
-                } else {
-                    logger.warn("Failed to fetch series categories: ${response.status}")
-                    return emptyList()
-                }
             }
             
-            val categories: List<XtreamCategory> = json.decodeFromString(categoriesBody)
-            return categories.map { it.category_id.toString() to it.category_name }
+            if (responseBody != null) {
+                return responseBody
+            }
+            
+            // Fetch from API
+            val response: HttpResponse = httpClient.get(apiUrl) {
+                parameter("username", username)
+                parameter("password", password)
+                parameter("action", action)
+            }
+            
+            if (response.status == HttpStatusCode.OK) {
+                val body = response.body<String>()
+                
+                // Save response if configured
+                if (responseFileService.shouldSaveResponses()) {
+                    responseFileService.saveResponse(providerConfig, endpointType, body)
+                }
+                
+                return body
+            } else {
+                logger.warn("Failed to fetch $endpointType: ${response.status}")
+                return null
+            }
         } catch (e: Exception) {
-            logger.error("Error fetching series categories from Xtream Codes provider ${providerConfig.name}", e)
-            return emptyList()
+            logger.error("Error fetching $endpointType for provider ${providerConfig.name}", e)
+            return null
         }
+    }
+
+    /**
+     * Parses VOD categories from a response body string
+     */
+    fun parseVodCategoriesFromBody(body: String): List<XtreamCategory> {
+        return json.decodeFromString<List<XtreamCategory>>(body)
+    }
+
+    /**
+     * Parses series categories from a response body string
+     */
+    fun parseSeriesCategoriesFromBody(body: String): List<XtreamCategory> {
+        return json.decodeFromString<List<XtreamCategory>>(body)
     }
 
     /**
@@ -522,8 +681,9 @@ class XtreamCodesClient(
         
         try {
             // Get VOD streams
+            // Suppress "not found" logging during hash check to avoid duplicate logs
             val vodStreamsBody = if (useLocal) {
-                responseFileService.loadResponse(providerConfig, "vod_streams")
+                responseFileService.loadResponse(providerConfig, "vod_streams", logNotFound = false)
             } else {
                 null
             } ?: run {
@@ -542,8 +702,9 @@ class XtreamCodesClient(
             result["vod_streams"] = vodStreamsBody
             
             // Get series streams
+            // Suppress "not found" logging during hash check to avoid duplicate logs
             val seriesStreamsBody = if (useLocal) {
-                responseFileService.loadResponse(providerConfig, "series_streams")
+                responseFileService.loadResponse(providerConfig, "series_streams", logNotFound = false)
             } else {
                 null
             } ?: run {
@@ -562,8 +723,9 @@ class XtreamCodesClient(
             result["series_streams"] = seriesStreamsBody
             
             // Get VOD categories
+            // Suppress "not found" logging during hash check to avoid duplicate logs
             val vodCategoriesBody = if (useLocal) {
-                responseFileService.loadResponse(providerConfig, "vod_categories")
+                responseFileService.loadResponse(providerConfig, "vod_categories", logNotFound = false)
             } else {
                 null
             } ?: run {
@@ -582,8 +744,9 @@ class XtreamCodesClient(
             result["vod_categories"] = vodCategoriesBody
             
             // Get series categories
+            // Suppress "not found" logging during hash check to avoid duplicate logs
             val seriesCategoriesBody = if (useLocal) {
-                responseFileService.loadResponse(providerConfig, "series_categories")
+                responseFileService.loadResponse(providerConfig, "series_categories", logNotFound = false)
             } else {
                 null
             } ?: run {
@@ -720,7 +883,7 @@ class XtreamCodesClient(
     )
     
     @Serializable
-    private data class XtreamCategory(
+    data class XtreamCategory(
         val category_id: Int,
         val category_name: String
     )

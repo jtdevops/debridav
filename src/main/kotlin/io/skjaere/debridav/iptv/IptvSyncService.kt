@@ -82,29 +82,20 @@ class IptvSyncService(
             }
         }
 
-        // Check if content has changed by comparing hashes
-        val hashCheckResult = when (providerConfig.type) {
-            io.skjaere.debridav.iptv.IptvProvider.M3U -> {
-                checkM3uHashChanged(providerConfig)
-            }
-            io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> {
-                checkXtreamCodesHashChanged(providerConfig)
-            }
-        }
-
-        if (!hashCheckResult.shouldSync) {
-            logger.info("Content hash unchanged for provider ${providerConfig.name}, skipping sync")
-            return
-        }
-
         try {
             val contentItems = when (providerConfig.type) {
                 io.skjaere.debridav.iptv.IptvProvider.M3U -> {
+                    // Check hash first for M3U
+                    val hashCheckResult = checkM3uHashChanged(providerConfig)
+                    if (!hashCheckResult.shouldSync) {
+                        logger.info("Content hash unchanged for provider ${providerConfig.name}, skipping sync")
+                        return
+                    }
                     fetchM3uContent(providerConfig)
                 }
                 io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> {
-                    // For Xtream Codes, sync only changed endpoints
-                    syncXtreamCodesContent(providerConfig, hashCheckResult.changedEndpoints)
+                    // For Xtream Codes, process one group at a time to limit memory usage
+                    syncXtreamCodesContent(providerConfig)
                 }
             }
 
@@ -132,13 +123,15 @@ class IptvSyncService(
                 syncContentToDatabase(providerConfig.name, contentItems)
             }
 
-            // Update hashes for all changed endpoints after successful sync
-            hashCheckResult.changedEndpoints.forEach { (endpointType, hash) ->
-                updateSyncHash(providerConfig.name, endpointType, hash)
-            }
-            
-            if (hashCheckResult.changedEndpoints.isNotEmpty()) {
-                logger.info("Successfully synced and updated hashes for provider ${providerConfig.name}: ${hashCheckResult.changedEndpoints.keys}")
+            // Hashes are updated during sync for Xtream Codes, or here for M3U
+            if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.M3U) {
+                val hashCheckResult = checkM3uHashChanged(providerConfig)
+                hashCheckResult.changedEndpoints.forEach { (endpointType, hash) ->
+                    updateSyncHash(providerConfig.name, endpointType, hash)
+                }
+                if (hashCheckResult.changedEndpoints.isNotEmpty()) {
+                    logger.info("Successfully synced and updated hashes for provider ${providerConfig.name}: ${hashCheckResult.changedEndpoints.keys}")
+                }
             }
         } catch (e: Exception) {
             logger.error("Sync failed for provider ${providerConfig.name}, hash not updated. Will retry on next sync.", e)
@@ -259,74 +252,118 @@ class IptvSyncService(
         }
     }
 
-    private suspend fun checkXtreamCodesHashChanged(
-        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
-    ): HashCheckResult {
-        val responseBodies = xtreamCodesClient.getRawResponseBodies(providerConfig)
+    /**
+     * Checks if a single endpoint has changed by fetching it and comparing hash
+     * Returns the response body if changed, null if unchanged
+     */
+    private suspend fun checkSingleEndpointHash(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        endpointType: String
+    ): Pair<String?, String?> { // responseBody, hash
+        val responseBody = xtreamCodesClient.getSingleEndpointResponse(providerConfig, endpointType)
         
-        if (responseBodies.isEmpty()) {
-            logger.warn("No response bodies received for hash check, proceeding with sync")
-            return HashCheckResult(shouldSync = true, changedEndpoints = emptyMap())
-        }
-
-        // Check each endpoint hash separately
-        val changedEndpoints = mutableMapOf<String, String>()
-        val endpointTypes = listOf("vod_streams", "series_streams", "vod_categories", "series_categories")
-        
-        endpointTypes.forEach { endpointType ->
-            val responseBody = responseBodies[endpointType] ?: ""
-            val currentHash = IptvHashUtil.computeHash(responseBody)
-            val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, endpointType)
-            
-            if (storedHash?.contentHash != currentHash) {
-                // Hash changed or doesn't exist
-                changedEndpoints[endpointType] = currentHash
-                logger.debug("Endpoint $endpointType changed for provider ${providerConfig.name}")
-            } else {
-                // Hash unchanged, just update last checked timestamp
-                storedHash.lastChecked = Instant.now()
-                iptvSyncHashRepository.save(storedHash)
-            }
+        if (responseBody == null) {
+            logger.warn("No response body received for endpoint $endpointType, treating as changed")
+            return null to null
         }
         
-        return HashCheckResult(
-            shouldSync = changedEndpoints.isNotEmpty(),
-            changedEndpoints = changedEndpoints
-        )
+        val currentHash = IptvHashUtil.computeHash(responseBody)
+        val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, endpointType)
+        
+        if (storedHash?.contentHash != currentHash) {
+            // Hash changed or doesn't exist
+            logger.debug("Endpoint $endpointType changed for provider ${providerConfig.name}")
+            return responseBody to currentHash
+        } else {
+            // Hash unchanged, just update last checked timestamp
+            storedHash.lastChecked = Instant.now()
+            iptvSyncHashRepository.save(storedHash)
+            return null to null
+        }
     }
 
+    /**
+     * Syncs Xtream Codes content, processing one group at a time to limit memory usage.
+     * Process order: vod_categories + vod_streams, then series_categories + series_streams
+     */
     private suspend fun syncXtreamCodesContent(
-        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
-        changedEndpoints: Map<String, String>
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
     ): List<io.skjaere.debridav.iptv.model.IptvContentItem> {
-        // Sync categories first if they changed
-        if (changedEndpoints.containsKey("vod_categories")) {
-            logger.debug("Syncing VOD categories for provider ${providerConfig.name}")
-            syncCategories(providerConfig.name, "vod", xtreamCodesClient.getVodCategories(providerConfig))
-        }
-        
-        if (changedEndpoints.containsKey("series_categories")) {
-            logger.debug("Syncing series categories for provider ${providerConfig.name}")
-            syncCategories(providerConfig.name, "series", xtreamCodesClient.getSeriesCategories(providerConfig))
-        }
-        
         val allContent = mutableListOf<io.skjaere.debridav.iptv.model.IptvContentItem>()
         
-        // Only sync content from endpoints that changed
-        // Note: We need to sync both streams if either streams or their categories changed
-        val needVodContent = changedEndpoints.containsKey("vod_streams") || changedEndpoints.containsKey("vod_categories")
-        val needSeriesContent = changedEndpoints.containsKey("series_streams") || changedEndpoints.containsKey("series_categories")
+        // Process VOD group: categories + streams
+        // Step 1: Fetch and check VOD categories hash
+        logger.debug("Checking VOD categories for provider ${providerConfig.name}")
+        val (vodCategoriesBody, vodCategoriesHash) = checkSingleEndpointHash(providerConfig, "vod_categories")
         
-        if (needVodContent) {
+        // Step 2: Always check VOD streams hash (streams can change independently)
+        logger.debug("Checking VOD streams for provider ${providerConfig.name}")
+        val (vodStreamsBody, vodStreamsHash) = checkSingleEndpointHash(providerConfig, "vod_streams")
+        
+        // Step 3: Process VOD group if either changed
+        if (vodCategoriesBody != null || vodStreamsBody != null) {
             logger.debug("Syncing VOD content for provider ${providerConfig.name}")
-            val vodContent = xtreamCodesClient.getVodContent(providerConfig)
+            
+            // Parse categories from in-memory body
+            val vodCategories = if (vodCategoriesBody != null) {
+                val categoriesList = xtreamCodesClient.parseVodCategoriesFromBody(vodCategoriesBody)
+                syncCategories(providerConfig.name, "vod", categoriesList.map { it.category_id.toString() to it.category_name })
+                categoriesList
+            } else {
+                // Categories unchanged, fetch them normally
+                xtreamCodesClient.getVodCategoriesAsObjects(providerConfig)
+            }
+            
+            // Process streams using in-memory body if available
+            val vodContent = xtreamCodesClient.getVodContent(providerConfig, vodCategories, vodStreamsBody)
             allContent.addAll(vodContent)
+            
+            // Update hashes after successful processing
+            if (vodCategoriesHash != null) {
+                updateSyncHash(providerConfig.name, "vod_categories", vodCategoriesHash)
+            }
+            if (vodStreamsHash != null) {
+                updateSyncHash(providerConfig.name, "vod_streams", vodStreamsHash)
+            }
+            
+            // Clear memory for VOD group
+            // (Kotlin GC will handle this, but we're done with these variables)
         }
         
-        if (needSeriesContent) {
+        // Process Series group: categories + streams
+        // Step 4: Fetch and check series categories hash
+        logger.debug("Checking series categories for provider ${providerConfig.name}")
+        val (seriesCategoriesBody, seriesCategoriesHash) = checkSingleEndpointHash(providerConfig, "series_categories")
+        
+        // Step 5: Always check series streams hash (streams can change independently)
+        logger.debug("Checking series streams for provider ${providerConfig.name}")
+        val (seriesStreamsBody, seriesStreamsHash) = checkSingleEndpointHash(providerConfig, "series_streams")
+        
+        // Step 6: Process series group if either changed
+        if (seriesCategoriesBody != null || seriesStreamsBody != null) {
             logger.debug("Syncing series content for provider ${providerConfig.name}")
-            val seriesContent = xtreamCodesClient.getSeriesContent(providerConfig)
+            
+            // Parse categories from in-memory body
+            val seriesCategories = if (seriesCategoriesBody != null) {
+                val categoriesList = xtreamCodesClient.parseSeriesCategoriesFromBody(seriesCategoriesBody)
+                syncCategories(providerConfig.name, "series", categoriesList.map { it.category_id.toString() to it.category_name })
+                categoriesList
+            } else {
+                // Categories unchanged, fetch them normally
+                xtreamCodesClient.getSeriesCategoriesAsObjects(providerConfig)
+            }
+            
+            // Process streams using in-memory body if available
+            val seriesContent = xtreamCodesClient.getSeriesContent(providerConfig, seriesCategories, seriesStreamsBody)
             allContent.addAll(seriesContent)
+            
+            // Update hashes after successful processing
+            if (seriesCategoriesHash != null) {
+                updateSyncHash(providerConfig.name, "series_categories", seriesCategoriesHash)
+            }
+            if (seriesStreamsHash != null) {
+                updateSyncHash(providerConfig.name, "series_streams", seriesStreamsHash)
+            }
         }
         
         return allContent

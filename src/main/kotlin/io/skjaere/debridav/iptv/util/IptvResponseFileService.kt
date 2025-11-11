@@ -58,6 +58,7 @@ class IptvResponseFileService(
      * @param providerConfig The provider configuration
      * @param responseType The type of response (e.g., "vod_streams", "vod_categories", "m3u")
      * @param extension File extension (default: "json" for Xtream Codes, "m3u" for M3U)
+     * @param logNotFound Whether to log when file is not found (default: true). Set to false for hash checking to avoid duplicate logs.
      * @return The file content, or null if file doesn't exist or can't be read
      */
     fun loadResponse(
@@ -66,7 +67,8 @@ class IptvResponseFileService(
         extension: String = when (providerConfig.type) {
             IptvProvider.M3U -> "m3u"
             IptvProvider.XTREAM_CODES -> "json"
-        }
+        },
+        logNotFound: Boolean = true
     ): String? {
         val saveFolder = iptvConfigurationProperties.responseSaveFolder ?: return null
         
@@ -77,7 +79,9 @@ class IptvResponseFileService(
             val file = File(saveFolder, filename)
             
             if (!file.exists()) {
-                logger.debug("Local response file not found for provider ${providerConfig.name}: ${file.absolutePath}")
+                if (logNotFound) {
+                    logger.debug("Local response file not found for provider ${providerConfig.name}: ${file.absolutePath}")
+                }
                 return null
             }
             
