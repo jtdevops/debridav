@@ -52,9 +52,10 @@ CREATE INDEX idx_iptv_content_type_active ON iptv_content (content_type, is_acti
 ALTER TABLE iptv_content
     ADD CONSTRAINT uk_iptv_content_provider_id UNIQUE (provider_name, content_id);
 
--- Foreign key constraint for category
+-- Foreign key constraint for category with ON DELETE CASCADE
+-- If a category is deleted, all content items referencing it will be deleted
 ALTER TABLE iptv_content
-    ADD CONSTRAINT fk_iptv_content_category FOREIGN KEY (category_id) REFERENCES iptv_category(id);
+    ADD CONSTRAINT fk_iptv_content_category FOREIGN KEY (category_id) REFERENCES iptv_category(id) ON DELETE CASCADE;
 
 -- IPTV content virtual file table (extends debrid_file_contents)
 CREATE TABLE debrid_iptv_content

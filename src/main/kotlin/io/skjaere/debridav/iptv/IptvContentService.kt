@@ -9,6 +9,8 @@ import java.net.URI
 @Service
 class IptvContentService(
     private val iptvContentRepository: IptvContentRepository,
+    private val iptvCategoryRepository: IptvCategoryRepository,
+    private val iptvSyncHashRepository: IptvSyncHashRepository,
     private val iptvConfigurationService: IptvConfigurationService
 ) {
     private val logger = LoggerFactory.getLogger(IptvContentService::class.java)
@@ -57,17 +59,35 @@ class IptvContentService(
     }
 
     fun deleteProviderContent(providerName: String): Int {
+        // Delete content items (streams)
         val contentToDelete = iptvContentRepository.findByProviderName(providerName)
-        val count = contentToDelete.size
+        val contentCount = contentToDelete.size
         
-        if (count > 0) {
-            logger.info("Deleting $count items for provider: $providerName")
+        if (contentCount > 0) {
+            logger.info("Deleting $contentCount content items for provider: $providerName")
             iptvContentRepository.deleteAll(contentToDelete)
         } else {
             logger.info("No content found for provider: $providerName")
         }
         
-        return count
+        // Delete categories
+        val categoriesToDelete = iptvCategoryRepository.findByProviderName(providerName)
+        val categoryCount = categoriesToDelete.size
+        if (categoryCount > 0) {
+            logger.info("Deleting $categoryCount categories for provider: $providerName")
+            iptvCategoryRepository.deleteByProviderName(providerName)
+        }
+        
+        // Delete sync hashes
+        val hashesToDelete = iptvSyncHashRepository.findByProviderName(providerName)
+        val hashCount = hashesToDelete.size
+        if (hashCount > 0) {
+            logger.info("Deleting $hashCount sync hashes for provider: $providerName")
+            iptvSyncHashRepository.deleteByProviderName(providerName)
+        }
+        
+        logger.info("Deleted all data for provider: $providerName (content: $contentCount, categories: $categoryCount, hashes: $hashCount)")
+        return contentCount
     }
 
     fun normalizeTitle(title: String): String {
