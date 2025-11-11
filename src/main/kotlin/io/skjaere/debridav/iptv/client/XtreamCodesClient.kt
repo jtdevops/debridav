@@ -551,6 +551,7 @@ class XtreamCodesClient(
     /**
      * Gets series episodes from the Xtream Codes provider using get_series_info API
      * Returns a list of episodes for the given series_id
+     * Uses local file caching if configured (files named: {provider}_series_info_{seriesId}.json)
      */
     suspend fun getSeriesEpisodes(providerConfig: IptvProviderConfiguration, seriesId: String): List<XtreamSeriesEpisode> {
         require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
@@ -563,29 +564,54 @@ class XtreamCodesClient(
         
         try {
             val apiUrl = "$baseUrl/player_api.php"
-            val seriesStreamsRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_series_info&series_id=$seriesId"
-            logger.debug("Fetching series episodes from Xtream Codes provider ${providerConfig.name}: $seriesStreamsRequestUrl")
+            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
             
-            val response: HttpResponse = httpClient.get(apiUrl) {
-                parameter("username", username)
-                parameter("password", password)
-                parameter("action", "get_series_info")
-                parameter("series_id", seriesId)
+            // Try to load from local file cache first (if configured)
+            val responseType = "series_info_$seriesId"
+            val responseBody = if (useLocal) {
+                logger.debug("Checking for local cached file for series $seriesId from provider ${providerConfig.name}")
+                responseFileService.loadResponse(providerConfig, responseType, logNotFound = false)
+                    ?: run {
+                        logger.debug("Local response file not found for series $seriesId, will fetch from API")
+                        null
+                    }
+            } else {
+                null
             }
             
-            logger.debug("Received response status ${response.status} for series episodes request")
-            
-            if (response.status != HttpStatusCode.OK) {
-                logger.error("Failed to fetch series episodes from Xtream Codes: ${response.status}")
-                return emptyList()
+            val finalResponseBody = responseBody ?: run {
+                val seriesStreamsRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_series_info&series_id=$seriesId"
+                logger.debug("Fetching series episodes from Xtream Codes provider ${providerConfig.name}: $seriesStreamsRequestUrl")
+                
+                val response: HttpResponse = httpClient.get(apiUrl) {
+                    parameter("username", username)
+                    parameter("password", password)
+                    parameter("action", "get_series_info")
+                    parameter("series_id", seriesId)
+                }
+                
+                logger.debug("Received response status ${response.status} for series episodes request")
+                
+                if (response.status != HttpStatusCode.OK) {
+                    logger.error("Failed to fetch series episodes from Xtream Codes: ${response.status}")
+                    return emptyList()
+                }
+                
+                val body = response.body<String>()
+                
+                // Save response to local file if configured
+                if (responseFileService.shouldSaveResponses()) {
+                    responseFileService.saveResponse(providerConfig, responseType, body)
+                }
+                
+                body
             }
             
-            val body = response.body<String>()
-            logger.debug("Parsing series episodes response (length: ${body.length} characters)")
+            logger.debug("Parsing series episodes response (length: ${finalResponseBody.length} characters)")
             
             // The response is a nested map: season number (string) -> episode number (string) -> episode data
             // Example: { "1": { "1": { "id": "401553456", "title": "...", ... }, "2": {...} }, "2": {...} }
-            val seriesInfo: Map<String, Map<String, XtreamSeriesEpisode>> = json.decodeFromString(body)
+            val seriesInfo: Map<String, Map<String, XtreamSeriesEpisode>> = json.decodeFromString(finalResponseBody)
             
             // Flatten the nested map into a single list of episodes
             val allEpisodes = seriesInfo.flatMap { (seasonStr, episodesMap) ->
