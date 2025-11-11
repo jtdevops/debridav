@@ -99,6 +99,13 @@ class IptvSyncService(
                 }
             }
 
+            // Skip database sync if no content items to sync
+            if (contentItems.isEmpty()) {
+                // For Xtream Codes, this means all endpoints were unchanged (already logged)
+                // For M3U, this shouldn't happen as we check hash before fetching
+                return
+            }
+            
             // For M3U, sync categories from group-titles
             if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.M3U) {
                 syncM3uCategories(providerConfig.name, contentItems)
@@ -118,7 +125,9 @@ class IptvSyncService(
                         true // Xtream Codes items are already filtered
                     }
                 }
-                syncContentToDatabase(providerConfig.name, filtered)
+                if (filtered.isNotEmpty()) {
+                    syncContentToDatabase(providerConfig.name, filtered)
+                }
             } else {
                 syncContentToDatabase(providerConfig.name, contentItems)
             }
@@ -132,6 +141,10 @@ class IptvSyncService(
                 if (hashCheckResult.changedEndpoints.isNotEmpty()) {
                     logger.info("Successfully synced and updated hashes for provider ${providerConfig.name}: ${hashCheckResult.changedEndpoints.keys}")
                 }
+            } else if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+                // For Xtream Codes, hashes are updated during sync
+                // Completion is logged in syncXtreamCodesContent if changes were made
+                // If no changes, it's already logged there
             }
         } catch (e: Exception) {
             logger.error("Sync failed for provider ${providerConfig.name}, hash not updated. Will retry on next sync.", e)
@@ -272,10 +285,11 @@ class IptvSyncService(
         
         if (storedHash?.contentHash != currentHash) {
             // Hash changed or doesn't exist
-            logger.debug("Endpoint $endpointType changed for provider ${providerConfig.name}")
+            logger.info("Endpoint $endpointType changed for provider ${providerConfig.name}, will sync")
             return responseBody to currentHash
         } else {
             // Hash unchanged, just update last checked timestamp
+            logger.info("Endpoint $endpointType unchanged for provider ${providerConfig.name}, skipping sync")
             storedHash.lastChecked = Instant.now()
             iptvSyncHashRepository.save(storedHash)
             return null to null
@@ -290,18 +304,18 @@ class IptvSyncService(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
     ): List<io.skjaere.debridav.iptv.model.IptvContentItem> {
         val allContent = mutableListOf<io.skjaere.debridav.iptv.model.IptvContentItem>()
+        var hasChanges = false
         
         // Process VOD group: categories + streams
         // Step 1: Fetch and check VOD categories hash
-        logger.debug("Checking VOD categories for provider ${providerConfig.name}")
         val (vodCategoriesBody, vodCategoriesHash) = checkSingleEndpointHash(providerConfig, "vod_categories")
         
         // Step 2: Always check VOD streams hash (streams can change independently)
-        logger.debug("Checking VOD streams for provider ${providerConfig.name}")
         val (vodStreamsBody, vodStreamsHash) = checkSingleEndpointHash(providerConfig, "vod_streams")
         
         // Step 3: Process VOD group if either changed
         if (vodCategoriesBody != null || vodStreamsBody != null) {
+            hasChanges = true
             logger.debug("Syncing VOD content for provider ${providerConfig.name}")
             
             // Parse categories from in-memory body
@@ -332,15 +346,14 @@ class IptvSyncService(
         
         // Process Series group: categories + streams
         // Step 4: Fetch and check series categories hash
-        logger.debug("Checking series categories for provider ${providerConfig.name}")
         val (seriesCategoriesBody, seriesCategoriesHash) = checkSingleEndpointHash(providerConfig, "series_categories")
         
         // Step 5: Always check series streams hash (streams can change independently)
-        logger.debug("Checking series streams for provider ${providerConfig.name}")
         val (seriesStreamsBody, seriesStreamsHash) = checkSingleEndpointHash(providerConfig, "series_streams")
         
         // Step 6: Process series group if either changed
         if (seriesCategoriesBody != null || seriesStreamsBody != null) {
+            hasChanges = true
             logger.debug("Syncing series content for provider ${providerConfig.name}")
             
             // Parse categories from in-memory body
@@ -364,6 +377,12 @@ class IptvSyncService(
             if (seriesStreamsHash != null) {
                 updateSyncHash(providerConfig.name, "series_streams", seriesStreamsHash)
             }
+        }
+        
+        if (!hasChanges) {
+            logger.info("Content hash unchanged for provider ${providerConfig.name}, skipping sync")
+        } else {
+            logger.info("Successfully synced provider ${providerConfig.name} (${allContent.size} items)")
         }
         
         return allContent
@@ -439,15 +458,14 @@ class IptvSyncService(
         contentItems: List<io.skjaere.debridav.iptv.model.IptvContentItem>
     ) {
         val now = Instant.now()
-        val existingContent = iptvContentRepository.findByContentTypeAndIsActive(
-            ContentType.MOVIE, true
-        ) + iptvContentRepository.findByContentTypeAndIsActive(ContentType.SERIES, true)
+        // Query all content for this provider (including inactive) to avoid duplicate key violations
+        val existingContent = iptvContentRepository.findByProviderName(providerName)
         
-        val existingMap = existingContent
-            .filter { it.providerName == providerName }
-            .associateBy { it.contentId }
+        val existingMap = existingContent.associateBy { it.contentId }.toMutableMap()
         
-        val incomingIds = contentItems.map { it.id }.toSet()
+        // Deduplicate contentItems by id to avoid processing the same item twice
+        val uniqueContentItems = contentItems.distinctBy { it.id }
+        val incomingIds = uniqueContentItems.map { it.id }.toSet()
         
         // Mark content as inactive if it's no longer available in the provider's source
         // This only affects providers that are currently being synced (in iptv.providers list)
@@ -462,25 +480,21 @@ class IptvSyncService(
         
         // Get category map for linking
         val categoryMap = mutableMapOf<String, IptvCategoryEntity>()
-        if (contentItems.any { it.categoryId != null && it.categoryType != null }) {
+        if (uniqueContentItems.any { it.categoryId != null && it.categoryType != null }) {
             val allCategories = iptvCategoryRepository.findByProviderName(providerName)
             categoryMap.putAll(allCategories.map { "${it.categoryType}:${it.categoryId}" to it })
         }
         
         // Insert or update content
-        contentItems.forEach { item ->
-            val normalizedTitle = iptvContentService.normalizeTitle(item.title)
-            val seriesInfo = item.episodeInfo?.let {
-                SeriesInfo(
-                    seriesName = it.seriesName,
-                    season = it.season,
-                    episode = it.episode
-                )
-            }
-            
-            val entity = existingMap[item.id] ?: IptvContentEntity().apply {
-                this.providerName = providerName
-                this.contentId = item.id
+        uniqueContentItems.forEach { item ->
+            // Check if entity already exists in database or was already processed in this batch
+            val entity = existingMap[item.id] ?: run {
+                // Try to find in database one more time (in case it was just created)
+                iptvContentRepository.findByProviderNameAndContentId(providerName, item.id)
+                    ?: IptvContentEntity().apply {
+                        this.providerName = providerName
+                        this.contentId = item.id
+                    }
             }
             
             // Link category if available
@@ -492,18 +506,26 @@ class IptvSyncService(
             
             // Update entity properties
             entity.title = item.title
-            entity.normalizedTitle = normalizedTitle
+            entity.normalizedTitle = iptvContentService.normalizeTitle(item.title)
             entity.url = item.url
             entity.contentType = item.type
             entity.category = category
-            entity.seriesInfo = seriesInfo
+            entity.seriesInfo = item.episodeInfo?.let {
+                SeriesInfo(
+                    seriesName = it.seriesName,
+                    season = it.season,
+                    episode = it.episode
+                )
+            }
             entity.lastSynced = now
             entity.isActive = true
             
-            iptvContentRepository.save(entity)
+            val savedEntity = iptvContentRepository.save(entity)
+            // Update the map so subsequent items with the same id will use this entity
+            existingMap[item.id] = savedEntity
         }
         
-        logger.info("Synced ${contentItems.size} items for provider $providerName")
+        logger.info("Synced ${uniqueContentItems.size} items for provider $providerName")
     }
 }
 
