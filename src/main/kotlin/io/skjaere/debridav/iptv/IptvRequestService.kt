@@ -55,6 +55,8 @@ class IptvRequestService(
             mimeType = determineMimeType(iptvContent.title),
             debridLinks = mutableListOf()
         )
+        // Set foreign key reference for cascading deletes
+        debridIptvContent.iptvContentRefId = iptvContent.id
         
         // Create IptvFile link
         val iptvFile = IptvFile(

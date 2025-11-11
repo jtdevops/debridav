@@ -69,6 +69,13 @@ CREATE TABLE debrid_iptv_content
     iptv_url           VARCHAR(2048),
     iptv_provider_name VARCHAR(255),
     iptv_content_id    VARCHAR(512),
+    iptv_content_ref_id BIGINT,
     CONSTRAINT pk_debrid_iptv_content PRIMARY KEY (id)
 );
+
+-- Foreign key constraint from debrid_iptv_content to iptv_content with ON DELETE CASCADE
+-- If an iptv_content record is deleted, all related debrid_iptv_content records will be deleted
+-- Note: iptv_content_ref_id is nullable to allow existing records without the reference
+ALTER TABLE debrid_iptv_content
+    ADD CONSTRAINT fk_debrid_iptv_content_ref FOREIGN KEY (iptv_content_ref_id) REFERENCES iptv_content(id) ON DELETE CASCADE;
 

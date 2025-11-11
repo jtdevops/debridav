@@ -115,6 +115,9 @@ open class DebridIptvContent() : DebridFileContents() {
     
     @Column(name = "iptv_content_id", length = 512)
     open var iptvContentId: String? = null
+    
+    @Column(name = "iptv_content_ref_id")
+    open var iptvContentRefId: Long? = null // Foreign key reference to iptv_content.id for cascading deletes
 
     constructor(
         originalPath: String?,
