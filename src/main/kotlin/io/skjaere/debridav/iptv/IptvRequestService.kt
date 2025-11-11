@@ -95,7 +95,7 @@ class IptvRequestService(
                 providerName = entity.providerName,
                 title = entity.title,
                 contentType = entity.contentType,
-                category = entity.category
+                category = entity.category?.categoryName
             )
         }
     }

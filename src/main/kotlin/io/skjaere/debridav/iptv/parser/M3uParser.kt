@@ -106,11 +106,14 @@ class M3uParser {
         // Generate content ID from URL or title
         val contentId = generateContentId(urlLine, title)
         
+        // For M3U, use group-title as category name, but no category ID
+        // The category will be created/looked up by name during sync
         return IptvContentItem(
             id = contentId,
             title = title,
             url = tokenizedUrl,
-            category = groupTitle,
+            categoryId = groupTitle.takeIf { it.isNotEmpty() }, // Use group-title as category ID for M3U
+            categoryType = "m3u",
             type = contentType,
             episodeInfo = episodeInfo
         )

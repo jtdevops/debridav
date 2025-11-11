@@ -26,6 +26,7 @@ class IptvSyncService(
     private val iptvConfigurationService: IptvConfigurationService,
     private val iptvContentRepository: IptvContentRepository,
     private val iptvContentService: IptvContentService,
+    private val iptvCategoryRepository: IptvCategoryRepository,
     private val iptvSyncHashRepository: IptvSyncHashRepository,
     private val httpClient: HttpClient,
     private val responseFileService: IptvResponseFileService
@@ -107,13 +108,24 @@ class IptvSyncService(
                 }
             }
 
+            // For M3U, sync categories from group-titles
+            if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.M3U) {
+                syncM3uCategories(providerConfig.name, contentItems)
+            }
+            
             if (iptvConfigurationProperties.filterVodOnly) {
                 // Filter is already applied in parsers, but double-check here
+                // For M3U, check category name; for Xtream Codes, all items are already VOD
                 val filtered = contentItems.filter { item ->
-                    item.category.contains("VOD", ignoreCase = true) ||
-                    item.category.contains("Movies", ignoreCase = true) ||
-                    item.category.contains("Series", ignoreCase = true) ||
-                    item.category.contains("TV Shows", ignoreCase = true)
+                    if (item.categoryType == "m3u" && item.categoryId != null) {
+                        val categoryName = item.categoryId // For M3U, categoryId is the group-title
+                        categoryName.contains("VOD", ignoreCase = true) ||
+                        categoryName.contains("Movies", ignoreCase = true) ||
+                        categoryName.contains("Series", ignoreCase = true) ||
+                        categoryName.contains("TV Shows", ignoreCase = true)
+                    } else {
+                        true // Xtream Codes items are already filtered
+                    }
                 }
                 syncContentToDatabase(providerConfig.name, filtered)
             } else {
@@ -287,6 +299,17 @@ class IptvSyncService(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
         changedEndpoints: Map<String, String>
     ): List<io.skjaere.debridav.iptv.model.IptvContentItem> {
+        // Sync categories first if they changed
+        if (changedEndpoints.containsKey("vod_categories")) {
+            logger.debug("Syncing VOD categories for provider ${providerConfig.name}")
+            syncCategories(providerConfig.name, "vod", xtreamCodesClient.getVodCategories(providerConfig))
+        }
+        
+        if (changedEndpoints.containsKey("series_categories")) {
+            logger.debug("Syncing series categories for provider ${providerConfig.name}")
+            syncCategories(providerConfig.name, "series", xtreamCodesClient.getSeriesCategories(providerConfig))
+        }
+        
         val allContent = mutableListOf<io.skjaere.debridav.iptv.model.IptvContentItem>()
         
         // Only sync content from endpoints that changed
@@ -307,6 +330,59 @@ class IptvSyncService(
         }
         
         return allContent
+    }
+
+    private fun syncM3uCategories(
+        providerName: String,
+        contentItems: List<io.skjaere.debridav.iptv.model.IptvContentItem>
+    ) {
+        // Extract unique category names (group-titles) from M3U content
+        val categories = contentItems
+            .filter { it.categoryType == "m3u" && it.categoryId != null }
+            .map { it.categoryId!! to it.categoryId!! } // For M3U, categoryId is the name
+            .distinct()
+        
+        if (categories.isNotEmpty()) {
+            syncCategories(providerName, "m3u", categories)
+        }
+    }
+
+    private fun syncCategories(
+        providerName: String,
+        categoryType: String,
+        categories: List<Pair<String, String>> // categoryId to categoryName
+    ) {
+        val now = Instant.now()
+        val existingCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, categoryType)
+        val existingMap = existingCategories.associateBy { it.categoryId }
+        
+        val incomingIds = categories.map { it.first }.toSet()
+        
+        // Mark categories as inactive if they're no longer available
+        existingMap.values.forEach { existing ->
+            if (!incomingIds.contains(existing.categoryId)) {
+                existing.isActive = false
+                existing.lastSynced = now
+                iptvCategoryRepository.save(existing)
+            }
+        }
+        
+        // Insert or update categories
+        categories.forEach { (categoryId, categoryName) ->
+            val entity = existingMap[categoryId] ?: IptvCategoryEntity().apply {
+                this.providerName = providerName
+                this.categoryId = categoryId
+                this.categoryType = categoryType
+            }
+            
+            entity.categoryName = categoryName
+            entity.lastSynced = now
+            entity.isActive = true
+            
+            iptvCategoryRepository.save(entity)
+        }
+        
+        logger.debug("Synced ${categories.size} $categoryType categories for provider $providerName")
     }
 
     private fun updateSyncHash(providerName: String, endpointType: String, newHash: String) {
@@ -347,6 +423,13 @@ class IptvSyncService(
             }
         }
         
+        // Get category map for linking
+        val categoryMap = mutableMapOf<String, IptvCategoryEntity>()
+        if (contentItems.any { it.categoryId != null && it.categoryType != null }) {
+            val allCategories = iptvCategoryRepository.findByProviderName(providerName)
+            categoryMap.putAll(allCategories.map { "${it.categoryType}:${it.categoryId}" to it })
+        }
+        
         // Insert or update content
         contentItems.forEach { item ->
             val normalizedTitle = iptvContentService.normalizeTitle(item.title)
@@ -363,12 +446,19 @@ class IptvSyncService(
                 this.contentId = item.id
             }
             
+            // Link category if available
+            val category = if (item.categoryId != null && item.categoryType != null) {
+                categoryMap["${item.categoryType}:${item.categoryId}"]
+            } else {
+                null
+            }
+            
             // Update entity properties
             entity.title = item.title
             entity.normalizedTitle = normalizedTitle
             entity.url = item.url
             entity.contentType = item.type
-            entity.category = item.category
+            entity.category = category
             entity.seriesInfo = seriesInfo
             entity.lastSynced = now
             entity.isActive = true

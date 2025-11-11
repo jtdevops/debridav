@@ -1,6 +1,29 @@
+CREATE SEQUENCE IF NOT EXISTS iptv_category_seq START WITH 1 INCREMENT BY 50;
+
 CREATE SEQUENCE IF NOT EXISTS iptv_content_seq START WITH 1 INCREMENT BY 50;
 
 CREATE SEQUENCE IF NOT EXISTS debrid_iptv_content_seq START WITH 1 INCREMENT BY 50;
+
+-- IPTV categories table
+CREATE TABLE iptv_category
+(
+    id            BIGINT NOT NULL,
+    provider_name VARCHAR(255) NOT NULL,
+    category_id   VARCHAR(50) NOT NULL,
+    category_name VARCHAR(255) NOT NULL,
+    category_type VARCHAR(50) NOT NULL,
+    last_synced   TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+    is_active     BOOLEAN NOT NULL DEFAULT true,
+    CONSTRAINT pk_iptv_category PRIMARY KEY (id)
+);
+
+-- Indexes for categories
+CREATE INDEX idx_iptv_category_provider_type ON iptv_category (provider_name, category_type);
+CREATE INDEX idx_iptv_category_provider_id ON iptv_category (provider_name, category_id);
+
+-- Unique constraint on provider_name + category_id + category_type
+ALTER TABLE iptv_category
+    ADD CONSTRAINT uk_iptv_category_provider_id UNIQUE (provider_name, category_id, category_type);
 
 -- IPTV content index table for searchable content
 CREATE TABLE iptv_content
@@ -12,7 +35,7 @@ CREATE TABLE iptv_content
     normalized_title VARCHAR(1024) NOT NULL,
     url              VARCHAR(2048) NOT NULL,
     content_type     VARCHAR(50) NOT NULL,
-    category         VARCHAR(255),
+    category_id      BIGINT,
     series_info      JSONB,
     metadata         JSONB,
     last_synced      TIMESTAMP WITHOUT TIME ZONE NOT NULL,
@@ -28,6 +51,10 @@ CREATE INDEX idx_iptv_content_type_active ON iptv_content (content_type, is_acti
 -- Unique constraint on provider_name + content_id
 ALTER TABLE iptv_content
     ADD CONSTRAINT uk_iptv_content_provider_id UNIQUE (provider_name, content_id);
+
+-- Foreign key constraint for category
+ALTER TABLE iptv_content
+    ADD CONSTRAINT fk_iptv_content_category FOREIGN KEY (category_id) REFERENCES iptv_category(id);
 
 -- IPTV content virtual file table (extends debrid_file_contents)
 CREATE TABLE debrid_iptv_content
