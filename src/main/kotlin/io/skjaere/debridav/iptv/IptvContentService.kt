@@ -99,6 +99,11 @@ class IptvContentService(
     }
 
     fun resolveIptvUrl(tokenizedUrl: String, providerName: String): String {
+        // Check if this is a series placeholder URL (should not be resolved)
+        if (tokenizedUrl.startsWith("SERIES_PLACEHOLDER:")) {
+            throw IllegalArgumentException("Cannot resolve series placeholder URL. Episodes must be fetched on-demand.")
+        }
+        
         val providerConfigs = iptvConfigurationService.getProviderConfigurations()
         val providerConfig = providerConfigs.find { it.name == providerName }
             ?: throw IllegalArgumentException("IPTV provider $providerName not found")

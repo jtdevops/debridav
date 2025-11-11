@@ -1,11 +1,16 @@
 package io.skjaere.debridav.iptv
 
+import io.ktor.client.HttpClient
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.IptvFile
+import io.skjaere.debridav.iptv.client.XtreamCodesClient
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.model.ContentType
+import io.skjaere.debridav.iptv.util.IptvResponseFileService
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -17,9 +22,13 @@ class IptvRequestService(
     private val iptvContentService: IptvContentService,
     private val databaseFileService: DatabaseFileService,
     private val categoryService: CategoryService,
-    private val debridavConfigurationProperties: DebridavConfigurationProperties
+    private val debridavConfigurationProperties: DebridavConfigurationProperties,
+    private val iptvConfigurationService: IptvConfigurationService,
+    private val httpClient: HttpClient,
+    private val responseFileService: IptvResponseFileService
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
+    private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService)
 
     @Transactional
     fun addIptvContent(contentId: String, providerName: String, category: String): Boolean {
@@ -36,7 +45,12 @@ class IptvRequestService(
             return false
         }
         
-        // Resolve tokenized URL to actual URL
+        // Check if this is a series that needs episode lookup
+        if (iptvContent.contentType == ContentType.SERIES && iptvContent.url.startsWith("SERIES_PLACEHOLDER:")) {
+            return handleSeriesContent(iptvContent, providerName, category, contentId)
+        }
+        
+        // For movies or series with direct URLs, resolve tokenized URL to actual URL
         val resolvedUrl = try {
             iptvContentService.resolveIptvUrl(iptvContent.url, providerName)
         } catch (e: Exception) {
@@ -86,6 +100,135 @@ class IptvRequestService(
         } catch (e: Exception) {
             logger.error("Failed to create IPTV virtual file: $filePath", e)
             return false
+        }
+    }
+    
+    /**
+     * Handles series content by fetching episodes on-demand and creating virtual files
+     */
+    private fun handleSeriesContent(
+        iptvContent: IptvContentEntity,
+        providerName: String,
+        category: String,
+        seriesId: String
+    ): Boolean {
+        logger.info("Handling series content: seriesId=$seriesId, title=${iptvContent.title}")
+        
+        // Get provider configuration
+        val providerConfig = iptvConfigurationService.getProviderConfigurations()
+            .find { it.name == providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+            ?: run {
+                logger.error("Provider $providerName not found or not an Xtream Codes provider")
+                return false
+            }
+        
+        // Fetch episodes on-demand
+        val episodes = runBlocking {
+            xtreamCodesClient.getSeriesEpisodes(providerConfig, seriesId)
+        }
+        
+        if (episodes.isEmpty()) {
+            logger.warn("No episodes found for series $seriesId")
+            return false
+        }
+        
+        logger.info("Found ${episodes.size} episodes for series $seriesId")
+        
+        // Try to parse season/episode from title to find specific episode
+        val episodeInfo = parseSeriesInfo(iptvContent.title)
+        val targetEpisode = if (episodeInfo?.season != null && episodeInfo.episode != null) {
+            episodes.find { ep ->
+                ep.season == episodeInfo.season && ep.episode == episodeInfo.episode
+            }
+        } else {
+            null
+        }
+        
+        // If we found a specific episode, create file for that episode only
+        // Otherwise, create files for all episodes (for now, we'll create the first one as a fallback)
+        val episodesToCreate = if (targetEpisode != null) {
+            listOf(targetEpisode)
+        } else {
+            // If no specific episode found, log warning and create first episode as fallback
+            logger.warn("Could not determine specific episode from title '${iptvContent.title}'. Creating file for first episode.")
+            listOf(episodes.first())
+        }
+        
+        val categoryPath = categoryService.findByName(category)?.downloadPath 
+            ?: debridavConfigurationProperties.downloadPath
+        
+        var successCount = 0
+        for (episode in episodesToCreate) {
+            // Construct episode URL: {baseUrl}/series/{username}/{password}/{episode_id}.{extension}
+            val baseUrl = providerConfig.xtreamBaseUrl ?: continue
+            val username = providerConfig.xtreamUsername ?: continue
+            val password = providerConfig.xtreamPassword ?: continue
+            val extension = episode.container_extension ?: "mp4"
+            val episodeUrl = "$baseUrl/series/$username/$password/${episode.id}.$extension"
+            
+            // Create episode title
+            val episodeTitle = if (episode.season != null && episode.episode != null) {
+                "${iptvContent.title} - S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)} - ${episode.title}"
+            } else {
+                "${iptvContent.title} - ${episode.title}"
+            }
+            
+            // Create DebridIptvContent entity for episode
+            val debridIptvContent = DebridIptvContent(
+                originalPath = episodeTitle,
+                size = null,
+                modified = Instant.now().toEpochMilli(),
+                iptvUrl = episodeUrl,
+                iptvProviderName = providerName,
+                iptvContentId = "${seriesId}_${episode.id}", // Use series_id_episode_id as content ID
+                mimeType = determineMimeType(episodeTitle),
+                debridLinks = mutableListOf()
+            )
+            debridIptvContent.iptvContentRefId = iptvContent.id
+            
+            // Create IptvFile link
+            val iptvFile = IptvFile(
+                path = episodeTitle,
+                size = 0L,
+                mimeType = debridIptvContent.mimeType ?: "video/mp4",
+                link = episodeUrl,
+                params = emptyMap(),
+                lastChecked = Instant.now().toEpochMilli()
+            )
+            
+            debridIptvContent.debridLinks.add(iptvFile)
+            
+            // Determine file path
+            val filePath = "$categoryPath/${sanitizeFileName(episodeTitle)}"
+            
+            // Generate hash from episode content ID
+            val hash = "${providerName}_${seriesId}_${episode.id}".hashCode().toString()
+            
+            // Create virtual file
+            try {
+                databaseFileService.createDebridFile(filePath, hash, debridIptvContent)
+                logger.info("Successfully created IPTV virtual file for episode: $filePath")
+                successCount++
+            } catch (e: Exception) {
+                logger.error("Failed to create IPTV virtual file for episode: $filePath", e)
+            }
+        }
+        
+        return successCount > 0
+    }
+    
+    private fun parseSeriesInfo(title: String): io.skjaere.debridav.iptv.model.EpisodeInfo? {
+        // Try to parse series info from title
+        // Pattern: Series Name S01E01 or Series Name - S01E01
+        val pattern = Regex("""(.+?)\s*[-]?\s*[Ss](\d+)[Ee](\d+)""", RegexOption.IGNORE_CASE)
+        val match = pattern.find(title)
+        
+        return match?.let {
+            io.skjaere.debridav.iptv.model.EpisodeInfo(
+                seriesName = it.groupValues[1].trim(),
+                season = it.groupValues[2].toIntOrNull(),
+                episode = it.groupValues[3].toIntOrNull()
+            )
         }
     }
     
