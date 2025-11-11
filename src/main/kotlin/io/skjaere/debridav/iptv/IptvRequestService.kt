@@ -24,6 +24,8 @@ class IptvRequestService(
     private val categoryService: CategoryService,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val iptvConfigurationService: IptvConfigurationService,
+    private val iptvConfigurationProperties: io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties,
+    private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
     private val httpClient: HttpClient,
     private val responseFileService: IptvResponseFileService
 ) {
@@ -122,9 +124,26 @@ class IptvRequestService(
                 return false
             }
         
-        // Fetch episodes on-demand
-        val episodes = runBlocking {
-            xtreamCodesClient.getSeriesEpisodes(providerConfig, seriesId)
+        // Try to get episodes from cache first
+        val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
+        val episodes = if (cachedMetadata != null) {
+            // Check if cache is still valid (not expired)
+            val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
+            if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
+                logger.debug("Using cached episodes for series $seriesId (cache age: ${cacheAge.toHours()} hours)")
+                // Update last accessed time
+                cachedMetadata.lastAccessed = java.time.Instant.now()
+                iptvSeriesMetadataRepository.save(cachedMetadata)
+                cachedMetadata.getEpisodesAsXtreamSeriesEpisode()
+            } else {
+                logger.debug("Cache expired for series $seriesId (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
+                // Cache expired, fetch fresh data
+                fetchAndCacheEpisodes(providerConfig, providerName, seriesId)
+            }
+        } else {
+            // No cache, fetch and store
+            logger.debug("No cache found for series $seriesId, fetching from API")
+            fetchAndCacheEpisodes(providerConfig, providerName, seriesId)
         }
         
         if (episodes.isEmpty()) {
@@ -215,6 +234,36 @@ class IptvRequestService(
         }
         
         return successCount > 0
+    }
+    
+    /**
+     * Fetches episodes from API and caches them in the database
+     */
+    private fun fetchAndCacheEpisodes(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        providerName: String,
+        seriesId: String
+    ): List<XtreamCodesClient.XtreamSeriesEpisode> {
+        val episodes = runBlocking {
+            xtreamCodesClient.getSeriesEpisodes(providerConfig, seriesId)
+        }
+        
+        if (episodes.isNotEmpty()) {
+            // Save or update cache
+            val metadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
+                ?: IptvSeriesMetadataEntity().apply {
+                    this.providerName = providerName
+                    this.seriesId = seriesId
+                    this.createdAt = java.time.Instant.now()
+                }
+            
+            metadata.setEpisodesFromXtreamSeriesEpisode(episodes)
+            metadata.lastAccessed = java.time.Instant.now()
+            iptvSeriesMetadataRepository.save(metadata)
+            logger.debug("Cached ${episodes.size} episodes for series $seriesId")
+        }
+        
+        return episodes
     }
     
     private fun parseSeriesInfo(title: String): io.skjaere.debridav.iptv.model.EpisodeInfo? {

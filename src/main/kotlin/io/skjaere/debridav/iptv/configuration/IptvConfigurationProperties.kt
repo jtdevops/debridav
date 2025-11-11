@@ -12,7 +12,9 @@ data class IptvConfigurationProperties(
     val filterVodOnly: Boolean = true,
     val searchFuzziness: Double = 0.8,
     val responseSaveFolder: String? = null,
-    val useLocalResponses: Boolean = false
+    val useLocalResponses: Boolean = false,
+    val seriesMetadataCacheTtl: Duration = Duration.ofDays(7), // Default: 7 days
+    val seriesMetadataPurgeInterval: Duration = Duration.ofHours(24) // Default: purge check every 24 hours
 ) {
     init {
         // Validate searchFuzziness regardless of enabled state

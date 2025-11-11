@@ -1,7 +1,7 @@
 package io.skjaere.debridav.iptv
 
 import io.hypersistence.utils.hibernate.type.json.JsonBinaryType
-import io.skjaere.debridav.iptv.client.XtreamSeriesEpisode
+import io.skjaere.debridav.iptv.client.XtreamCodesClient
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
@@ -23,8 +23,8 @@ data class EpisodeStorageDto(
     val season: Int? = null,
     val episode: Int? = null
 ) {
-    fun toXtreamSeriesEpisode(): XtreamSeriesEpisode {
-        return XtreamSeriesEpisode(
+    fun toXtreamSeriesEpisode(): XtreamCodesClient.XtreamSeriesEpisode {
+        return XtreamCodesClient.XtreamSeriesEpisode(
             id = id,
             title = title,
             container_extension = containerExtension,
@@ -35,7 +35,7 @@ data class EpisodeStorageDto(
     }
     
     companion object {
-        fun fromXtreamSeriesEpisode(ep: XtreamSeriesEpisode): EpisodeStorageDto {
+        fun fromXtreamSeriesEpisode(ep: XtreamCodesClient.XtreamSeriesEpisode): EpisodeStorageDto {
             return EpisodeStorageDto(
                 id = ep.id,
                 title = ep.title,
@@ -82,14 +82,14 @@ open class IptvSeriesMetadataEntity {
     /**
      * Helper method to get episodes as XtreamSeriesEpisode list
      */
-    fun getEpisodesAsXtreamSeriesEpisode(): List<XtreamSeriesEpisode> {
+    fun getEpisodesAsXtreamSeriesEpisode(): List<XtreamCodesClient.XtreamSeriesEpisode> {
         return episodes.map { it.toXtreamSeriesEpisode() }
     }
     
     /**
      * Helper method to set episodes from XtreamSeriesEpisode list
      */
-    fun setEpisodesFromXtreamSeriesEpisode(episodesList: List<XtreamSeriesEpisode>) {
+    fun setEpisodesFromXtreamSeriesEpisode(episodesList: List<XtreamCodesClient.XtreamSeriesEpisode>) {
         episodes = episodesList.map { EpisodeStorageDto.fromXtreamSeriesEpisode(it) }
     }
 }
