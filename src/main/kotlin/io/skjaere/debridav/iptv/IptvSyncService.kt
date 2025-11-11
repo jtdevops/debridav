@@ -273,7 +273,70 @@ class IptvSyncService(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
         endpointType: String
     ): Pair<String?, String?> { // responseBody, hash
-        val responseBody = xtreamCodesClient.getSingleEndpointResponse(providerConfig, endpointType)
+        // Construct URL for logging (needed regardless of cache check)
+        val baseUrl = providerConfig.xtreamBaseUrl
+        val username = providerConfig.xtreamUsername
+        val password = providerConfig.xtreamPassword
+        
+        if (baseUrl == null || username == null || password == null) {
+            logger.warn("Missing required configuration for endpoint $endpointType from provider ${providerConfig.name}")
+            return null to null
+        }
+        
+        val apiUrl = "$baseUrl/player_api.php"
+        val action = when (endpointType) {
+            "vod_categories" -> "get_vod_categories"
+            "vod_streams" -> "get_vod_streams"
+            "series_categories" -> "get_series_categories"
+            "series_streams" -> "get_series"
+            else -> {
+                logger.warn("Unknown endpoint type: $endpointType")
+                return null to null
+            }
+        }
+        val fullUrl = "$apiUrl?username=$username&password=***&action=$action"
+        
+        // Check for local cached file first
+        val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+        val cachedFilePath = if (useLocal) {
+            val saveFolder = iptvConfigurationProperties.responseSaveFolder
+            if (saveFolder != null) {
+                val sanitizedProviderName = providerConfig.name.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+                val extension = when (providerConfig.type) {
+                    io.skjaere.debridav.iptv.IptvProvider.M3U -> "m3u"
+                    io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> "json"
+                }
+                val filename = "${sanitizedProviderName}_${endpointType}.$extension"
+                File(saveFolder, filename).absolutePath
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+        
+        val cachedResponse = if (useLocal) {
+            if (cachedFilePath != null) {
+                logger.info("Checking for local cached file at: $cachedFilePath")
+            }
+            responseFileService.loadResponse(providerConfig, endpointType, logNotFound = false)
+        } else {
+            null
+        }
+        
+        val responseBody = if (cachedResponse != null) {
+            logger.info("Using local cached file for endpoint $endpointType from provider ${providerConfig.name} at: $cachedFilePath")
+            cachedResponse
+        } else {
+            if (useLocal && cachedFilePath != null) {
+                logger.info("Local cached file not found at: $cachedFilePath, fetching from: $fullUrl")
+            } else {
+                logger.info("Fetching endpoint $endpointType from: $fullUrl")
+            }
+            
+            // Fetch from API
+            xtreamCodesClient.getSingleEndpointResponse(providerConfig, endpointType)
+        }
         
         if (responseBody == null) {
             logger.warn("No response body received for endpoint $endpointType, treating as changed")
