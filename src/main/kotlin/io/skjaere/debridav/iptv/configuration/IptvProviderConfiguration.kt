@@ -11,7 +11,8 @@ data class IptvProviderConfiguration(
     val xtreamUsername: String? = null,
     val xtreamPassword: String? = null,
     val priority: Int = 1,
-    val syncEnabled: Boolean = true
+    val syncEnabled: Boolean = true,
+    val useLocalResponses: Boolean? = null
 ) {
     init {
         when (type) {

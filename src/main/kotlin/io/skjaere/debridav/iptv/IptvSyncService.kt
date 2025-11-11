@@ -11,6 +11,7 @@ import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.model.ContentType
 import io.skjaere.debridav.iptv.model.SeriesInfo
 import io.skjaere.debridav.iptv.parser.M3uParser
+import io.skjaere.debridav.iptv.util.IptvResponseFileService
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
@@ -24,11 +25,12 @@ class IptvSyncService(
     private val iptvConfigurationService: IptvConfigurationService,
     private val iptvContentRepository: IptvContentRepository,
     private val iptvContentService: IptvContentService,
-    private val httpClient: HttpClient
+    private val httpClient: HttpClient,
+    private val responseFileService: IptvResponseFileService
 ) {
     private val logger = LoggerFactory.getLogger(IptvSyncService::class.java)
     private val m3uParser = M3uParser()
-    private val xtreamCodesClient = XtreamCodesClient(httpClient)
+    private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService)
 
     @Scheduled(
         initialDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('iptv.initial-sync-delay', 'PT30S')).toMillis()}",
@@ -94,20 +96,49 @@ class IptvSyncService(
     private suspend fun fetchM3uContent(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
     ): List<io.skjaere.debridav.iptv.model.IptvContentItem> {
-        val content = when {
+        val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+        
+        val content = if (useLocal) {
+            logger.info("Using local response file for M3U playlist from provider ${providerConfig.name}")
+            responseFileService.loadResponse(providerConfig, "m3u")
+                ?: run {
+                    logger.warn("Local response file not found for M3U playlist, falling back to configured source")
+                    null
+                }
+        } else {
+            null
+        }
+        
+        val finalContent = content ?: when {
             providerConfig.m3uUrl != null -> {
+                logger.debug("Fetching M3U playlist from URL for provider ${providerConfig.name}: ${providerConfig.m3uUrl}")
                 val response: HttpResponse = httpClient.get(providerConfig.m3uUrl)
                 if (response.status == HttpStatusCode.OK) {
-                    response.body()
+                    val body = response.body<String>()
+                    
+                    // Save response if configured
+                    if (responseFileService.shouldSaveResponses()) {
+                        responseFileService.saveResponse(providerConfig, "m3u", body)
+                    }
+                    
+                    body
                 } else {
                     logger.error("Failed to fetch M3U playlist from ${providerConfig.m3uUrl}: ${response.status}")
                     return emptyList()
                 }
             }
             providerConfig.m3uFilePath != null -> {
+                logger.debug("Reading M3U playlist from file for provider ${providerConfig.name}: ${providerConfig.m3uFilePath}")
                 val file = File(providerConfig.m3uFilePath)
                 if (file.exists()) {
-                    file.readText()
+                    val fileContent = file.readText()
+                    
+                    // Save response if configured (copy to response folder)
+                    if (responseFileService.shouldSaveResponses()) {
+                        responseFileService.saveResponse(providerConfig, "m3u", fileContent)
+                    }
+                    
+                    fileContent
                 } else {
                     logger.error("M3U file not found: ${providerConfig.m3uFilePath}")
                     return emptyList()
@@ -119,7 +150,7 @@ class IptvSyncService(
             }
         }
 
-        return m3uParser.parseM3u(content, providerConfig)
+        return m3uParser.parseM3u(finalContent, providerConfig)
     }
 
     private fun syncContentToDatabase(

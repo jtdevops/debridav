@@ -10,7 +10,9 @@ data class IptvConfigurationProperties(
     val initialSyncDelay: Duration = Duration.ofSeconds(30),
     val providers: List<String> = emptyList(),
     val filterVodOnly: Boolean = true,
-    val searchFuzziness: Double = 0.8
+    val searchFuzziness: Double = 0.8,
+    val responseSaveFolder: String? = null,
+    val useLocalResponses: Boolean = false
 ) {
     init {
         // Validate searchFuzziness regardless of enabled state

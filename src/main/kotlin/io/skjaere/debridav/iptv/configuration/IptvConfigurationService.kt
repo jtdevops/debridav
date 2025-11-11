@@ -24,6 +24,7 @@ class IptvConfigurationService(
 
             val priority = environment.getProperty("iptv.provider.$providerName.priority", Int::class.java, 1)
             val syncEnabled = environment.getProperty("iptv.provider.$providerName.sync-enabled", Boolean::class.java, true)
+            val useLocalResponses = environment.getProperty("iptv.provider.$providerName.use-local-responses", Boolean::class.java)
 
             when (type) {
                 IptvProvider.M3U -> {
@@ -38,7 +39,8 @@ class IptvConfigurationService(
                         m3uUrl = m3uUrl,
                         m3uFilePath = m3uFilePath,
                         priority = priority,
-                        syncEnabled = syncEnabled
+                        syncEnabled = syncEnabled,
+                        useLocalResponses = useLocalResponses
                     )
                 }
                 IptvProvider.XTREAM_CODES -> {
@@ -55,7 +57,8 @@ class IptvConfigurationService(
                         xtreamUsername = username,
                         xtreamPassword = password,
                         priority = priority,
-                        syncEnabled = syncEnabled
+                        syncEnabled = syncEnabled,
+                        useLocalResponses = useLocalResponses
                     )
                 }
             }
