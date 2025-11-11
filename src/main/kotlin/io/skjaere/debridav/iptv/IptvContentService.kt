@@ -11,6 +11,7 @@ class IptvContentService(
     private val iptvContentRepository: IptvContentRepository,
     private val iptvCategoryRepository: IptvCategoryRepository,
     private val iptvSyncHashRepository: IptvSyncHashRepository,
+    private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
     private val iptvConfigurationService: IptvConfigurationService
 ) {
     private val logger = LoggerFactory.getLogger(IptvContentService::class.java)
@@ -86,7 +87,14 @@ class IptvContentService(
             iptvSyncHashRepository.deleteByProviderName(providerName)
         }
         
-        logger.info("Deleted all data for provider: $providerName (content: $contentCount, categories: $categoryCount, hashes: $hashCount)")
+        // Delete series metadata cache
+        val metadataCount = iptvSeriesMetadataRepository.countByProviderName(providerName)
+        if (metadataCount > 0) {
+            logger.info("Deleting $metadataCount series metadata cache entries for provider: $providerName")
+            iptvSeriesMetadataRepository.deleteByProviderName(providerName)
+        }
+        
+        logger.info("Deleted all data for provider: $providerName (content: $contentCount, categories: $categoryCount, hashes: $hashCount, metadata: $metadataCount)")
         return contentCount
     }
 
