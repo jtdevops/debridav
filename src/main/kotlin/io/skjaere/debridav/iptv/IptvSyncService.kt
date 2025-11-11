@@ -533,12 +533,14 @@ class IptvSyncService(
         // Mark content as inactive if it's no longer available in the provider's source
         // This only affects providers that are currently being synced (in iptv.providers list)
         // Providers removed from the config are not synced, so their content remains unchanged
-        existingMap.values.forEach { existing ->
-            if (!incomingIds.contains(existing.contentId)) {
+        val inactiveEntities = existingMap.values.filter { !incomingIds.contains(it.contentId) }
+        if (inactiveEntities.isNotEmpty()) {
+            inactiveEntities.forEach { existing ->
                 existing.isActive = false
                 existing.lastSynced = now
-                iptvContentRepository.save(existing)
             }
+            iptvContentRepository.saveAll(inactiveEntities)
+            logger.debug("Marked ${inactiveEntities.size} items as inactive for provider $providerName")
         }
         
         // Get category map for linking
@@ -548,16 +550,13 @@ class IptvSyncService(
             categoryMap.putAll(allCategories.map { "${it.categoryType}:${it.categoryId}" to it })
         }
         
-        // Insert or update content
+        // Prepare all entities for batch save
+        val entitiesToSave = mutableListOf<IptvContentEntity>()
         uniqueContentItems.forEach { item ->
             // Check if entity already exists in database or was already processed in this batch
-            val entity = existingMap[item.id] ?: run {
-                // Try to find in database one more time (in case it was just created)
-                iptvContentRepository.findByProviderNameAndContentId(providerName, item.id)
-                    ?: IptvContentEntity().apply {
-                        this.providerName = providerName
-                        this.contentId = item.id
-                    }
+            val entity = existingMap[item.id] ?: IptvContentEntity().apply {
+                this.providerName = providerName
+                this.contentId = item.id
             }
             
             // Link category if available
@@ -583,12 +582,18 @@ class IptvSyncService(
             entity.lastSynced = now
             entity.isActive = true
             
-            val savedEntity = iptvContentRepository.save(entity)
-            // Update the map so subsequent items with the same id will use this entity
-            existingMap[item.id] = savedEntity
+            entitiesToSave.add(entity)
         }
         
-        logger.info("Synced ${uniqueContentItems.size} items for provider $providerName")
+        // Batch save all entities at once
+        if (entitiesToSave.isNotEmpty()) {
+            val savedEntities = iptvContentRepository.saveAll(entitiesToSave)
+            // Update the map with saved entities
+            savedEntities.forEach { saved ->
+                existingMap[saved.contentId] = saved
+            }
+            logger.info("Synced ${entitiesToSave.size} items for provider $providerName")
+        }
     }
 }
 
