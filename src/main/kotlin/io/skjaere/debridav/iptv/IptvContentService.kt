@@ -1,7 +1,9 @@
 package io.skjaere.debridav.iptv
 
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.iptv.model.ContentType
+import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.net.URI
@@ -12,9 +14,24 @@ class IptvContentService(
     private val iptvCategoryRepository: IptvCategoryRepository,
     private val iptvSyncHashRepository: IptvSyncHashRepository,
     private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
-    private val iptvConfigurationService: IptvConfigurationService
+    private val iptvConfigurationService: IptvConfigurationService,
+    private val iptvConfigurationProperties: IptvConfigurationProperties
 ) {
     private val logger = LoggerFactory.getLogger(IptvContentService::class.java)
+
+    @PostConstruct
+    fun logLanguagePrefixes() {
+        val prefixes = iptvConfigurationProperties.languagePrefixes
+        if (prefixes.isNotEmpty()) {
+            logger.info("IPTV language prefixes configured: $prefixes (count: ${prefixes.size})")
+            prefixes.forEachIndexed { index, prefix ->
+                val cleaned = stripQuotes(prefix)
+                logger.info("  [$index] Original: '$prefix' -> Cleaned: '$cleaned'")
+            }
+        } else {
+            logger.debug("No IPTV language prefixes configured")
+        }
+    }
 
     fun searchContent(query: String, contentType: ContentType?): List<IptvContentEntity> {
         val normalizedQuery = normalizeTitle(query)
@@ -24,6 +41,37 @@ class IptvContentService(
             .map { it.name }
             .toSet()
         
+        // Try language prefixes first if configured
+        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        logger.debug("Configured language prefixes: $languagePrefixes (count: ${languagePrefixes.size})")
+        
+        if (languagePrefixes.isNotEmpty()) {
+            for (prefix in languagePrefixes) {
+                val cleanedPrefix = stripQuotes(prefix)
+                val prefixedQuery = normalizeTitle("$cleanedPrefix$query")
+                logger.debug("Trying prefix '$cleanedPrefix' (original: '$prefix') with query '$query' -> normalized: '$prefixedQuery'")
+                
+                val prefixedResults = if (contentType != null) {
+                    iptvContentRepository.findByNormalizedTitleContainingAndContentType(prefixedQuery, contentType)
+                } else {
+                    iptvContentRepository.findByNormalizedTitleContaining(prefixedQuery)
+                }
+                
+                val filteredPrefixedResults = prefixedResults.filter { it.providerName in configuredProviderNames }
+                
+                logger.debug("Prefix '$cleanedPrefix' returned ${filteredPrefixedResults.size} results (before filtering: ${prefixedResults.size})")
+                
+                if (filteredPrefixedResults.isNotEmpty()) {
+                    logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for query '$query', returning early")
+                    return filteredPrefixedResults
+                }
+            }
+            logger.debug("No results found with any language prefix, falling back to search without prefix")
+        } else {
+            logger.debug("No language prefixes configured, searching without prefix")
+        }
+        
+        // Fallback to search without prefix
         val results = if (contentType != null) {
             iptvContentRepository.findByNormalizedTitleContainingAndContentType(normalizedQuery, contentType)
         } else {
@@ -104,6 +152,24 @@ class IptvContentService(
             .replace(Regex("[^a-z0-9\\s]"), "") // Remove special characters
             .replace(Regex("\\s+"), " ") // Normalize whitespace
             .trim()
+    }
+
+    /**
+     * Strips surrounding single or double quotes from a string if present.
+     * This helps preserve trailing spaces when configuring prefixes in properties files.
+     * Examples:
+     *   "EN - " -> EN - 
+     *   'EN| ' -> EN| 
+     *   EN |  -> EN |  (no quotes, unchanged)
+     */
+    private fun stripQuotes(value: String): String {
+        return when {
+            (value.startsWith("\"") && value.endsWith("\"")) || 
+            (value.startsWith("'") && value.endsWith("'")) -> {
+                value.substring(1, value.length - 1)
+            }
+            else -> value
+        }
     }
 
     fun resolveIptvUrl(tokenizedUrl: String, providerName: String): String {

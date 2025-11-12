@@ -14,7 +14,8 @@ data class IptvConfigurationProperties(
     val responseSaveFolder: String? = null,
     val useLocalResponses: Boolean = false,
     val seriesMetadataCacheTtl: Duration = Duration.ofDays(7), // Default: 7 days
-    val seriesMetadataPurgeInterval: Duration = Duration.ofHours(24) // Default: purge check every 24 hours
+    val seriesMetadataPurgeInterval: Duration = Duration.ofHours(24), // Default: purge check every 24 hours
+    val languagePrefixes: List<String> = emptyList() // Language prefixes to try when searching (e.g., "EN - ", "EN| ", "EN | ")
 ) {
     init {
         // Validate searchFuzziness regardless of enabled state
