@@ -24,8 +24,11 @@ class IptvApiController(
         @RequestParam(required = false) type: String?,
         @RequestParam(required = false) category: String?
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
+        logger.debug("IPTV search request received - query='{}', type='{}', category='{}'", query, type, category)
+        
         // Handle empty or missing query (e.g., from Prowlarr connection tests)
         if (query.isNullOrBlank()) {
+            logger.debug("Query is null or blank, returning empty list")
             return ResponseEntity.ok(emptyList())
         }
         
@@ -33,11 +36,14 @@ class IptvApiController(
             try {
                 ContentType.valueOf(it.uppercase())
             } catch (e: IllegalArgumentException) {
+                logger.warn("Invalid content type '{}', ignoring", it)
                 null
             }
         }
         
+        logger.debug("Searching IPTV content with query='{}', contentType={}", query, contentType)
         val results = iptvRequestService.searchIptvContent(query, contentType)
+        logger.debug("Search returned {} results", results.size)
         return ResponseEntity.ok(results)
     }
 

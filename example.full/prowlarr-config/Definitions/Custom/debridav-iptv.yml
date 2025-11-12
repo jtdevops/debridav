@@ -24,30 +24,36 @@ settings:
   - name: validation_label
     type: info
     label: Validation settings (optional)
-  - name: validate_imdb_movie_label
+  - name: validate_movie_title_label
     type: info
     label: The following help to validate an indexer in Radarr by confirming that the movie returns results
-  - name: validate_imdb_movie
+  - name: validate_movie_title
     type: text
-    label: IMDB ID of Movie to use for Radarr validation (must exist in IPTV provider)
-  - name: validate_imdb_tv_label
+    label: Title of Movie to use for Radarr validation (must exist in IPTV provider)
+  - name: validate_tv_title_label
     type: info
     label: The following help to validate an indexer in Sonarr by confirming that the show returns results
-  - name: validate_imdb_tv
+  - name: validate_tv_title
     type: text
-    label: IMDB ID TV show to use for Sonarr validation (must exist in IPTV provider)
+    label: Title of TV show to use for Sonarr validation (must exist in IPTV provider)
 
 search:
   headers:
     User-Agent: ["DebriDav-Prowlarr/1.0"]
     Accept: ["application/json"]
   paths:
-    - path: "/api/iptv/search?query={{ if .Query.IMDBID }}{{ .Query.IMDBID }}{{ else }}{{ .Query.Q }}{{ end }}&type={{ if .Query.Season }}SERIES{{ else }}MOVIE{{ end }}"
+    - path: "/api/iptv/search?query={{ if .Query.Q }}{{ .Query.Q }}{{ else }}{{ .Config.validate_movie_title }}{{ end }}&type=MOVIE"
       method: post
       response:
         type: json
         noResultsMessage: "[]"
-      categories: [Movies, TV]
+      categories: [Movies]
+    - path: "/api/iptv/search?query={{ if .Query.Q }}{{ .Query.Q }}{{ else }}{{ .Config.validate_tv_title }}{{ end }}&type=SERIES"
+      method: post
+      response:
+        type: json
+        noResultsMessage: "[]"
+      categories: [TV]
 
   rows:
     selector: "$"
