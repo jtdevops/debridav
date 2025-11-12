@@ -1,5 +1,6 @@
 package io.skjaere.debridav.iptv
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import io.ktor.client.HttpClient
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
@@ -289,7 +290,8 @@ class IptvRequestService(
                 providerName = entity.providerName,
                 title = entity.title,
                 contentType = entity.contentType,
-                category = entity.category?.categoryName
+                category = entity.category?.categoryName,
+                guid = "iptv://${entity.providerName}/${entity.contentId}"
             )
         }
     }
@@ -313,11 +315,18 @@ class IptvRequestService(
     }
     
     data class IptvSearchResult(
+        @JsonProperty("contentId")
         val contentId: String,
+        @JsonProperty("providerName")
         val providerName: String,
+        @JsonProperty("title")
         val title: String,
+        @JsonProperty("contentType")
         val contentType: ContentType,
-        val category: String?
+        @JsonProperty("category")
+        val category: String?,
+        @JsonProperty("guid")
+        val guid: String
     )
 }
 

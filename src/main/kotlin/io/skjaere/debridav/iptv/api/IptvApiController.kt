@@ -44,6 +44,9 @@ class IptvApiController(
         logger.debug("Searching IPTV content with query='{}', contentType={}", query, contentType)
         val results = iptvRequestService.searchIptvContent(query, contentType)
         logger.debug("Search returned {} results", results.size)
+        if (results.isNotEmpty()) {
+            logger.debug("First result sample: {}", results.first())
+        }
         return ResponseEntity.ok(results)
     }
 

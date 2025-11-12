@@ -63,9 +63,19 @@ search:
     title:
       selector: title
     category:
-      text: "{{ if eq .Result.contentType \"MOVIE\" }}Movies{{ else }}TV{{ end }}"
+      selector: contentType
+      filters:
+        - name: replace
+          args: ["MOVIE", "Movies"]
+        - name: replace
+          args: ["SERIES", "TV"]
     category_is_tv_show:
-      text: "{{ if eq .Result.contentType \"SERIES\" }}true{{ else }}false{{ end }}"
+      selector: contentType
+      filters:
+        - name: replace
+          args: ["SERIES", "true"]
+        - name: replace
+          args: ["MOVIE", "false"]
     size:
       text: "0"
     seeders:
@@ -73,21 +83,18 @@ search:
     details:
       text: "/api/iptv"
     magnet:
-      text: "iptv://{{ .Result.providerName }}/{{ .Result.contentId }}"
+      selector: guid
     guid:
-      text: "iptv://{{ .Result.providerName }}/{{ .Result.contentId }}"
+      selector: guid
     downloadurl:
-      text: "iptv://{{ .Result.providerName }}/{{ .Result.contentId }}"
+      selector: guid
     year:
       selector: title
       filters:
         - name: regexp
           args: "(\\b(19|20)\\d\\d\\b)"
     date:
-      text: "now"
+      text: "0 days"
       filters:
-        - name: dateparse
-          args: ["2006-01-02"]
-        - name: dateformat
-          args: ["2006-01-02 15:04:05"]
+        - name: timeago
 
