@@ -208,6 +208,38 @@ POST /api/iptv/sync
 3. Ensure category matches between DebriDav and Sonarr/Radarr
 4. Check file appears in `/downloads/{category}/` via WebDAV
 
+### Prowlarr Sending Wrong Query (Validation Title Instead of Actual Search)
+
+If you're seeing the validation title (e.g., "Spider-Man") being sent instead of the actual search query (e.g., "Spaceballs") when searching from Radarr:
+
+1. **Check Prowlarr Indexer Configuration**:
+   - In Prowlarr, go to Settings → Indexers → Your DebriDav IPTV Indexer
+   - Verify the "Validation Movie Title" and "Validation TV Title" fields
+   - These should only be used for testing, not for actual searches
+
+2. **Re-sync Indexer with Radarr**:
+   - In Prowlarr, go to Settings → Apps → Radarr
+   - Click "Sync" or "Full Sync" to ensure Radarr has the latest indexer configuration
+   - Restart Radarr after syncing
+
+3. **Restart Prowlarr**:
+   - After making configuration changes, restart Prowlarr to ensure the new template is loaded
+
+4. **Check Logs**:
+   - Check DebriDav logs for the actual query being received
+   - Check Prowlarr logs for query extraction issues
+   - The updated configuration now logs the full query string for debugging
+
+5. **Clear Validation Titles** (Optional):
+   - After successful setup and testing, you can clear the validation title fields in Prowlarr
+   - This ensures they're not accidentally used as fallback queries
+   - The indexer will still work - it will just return empty results for connection tests
+
+6. **Verify Template Syntax**:
+   - Ensure you're using the latest `debridav-iptv.yml` configuration file
+   - The template should prioritize `.Query.Q` over validation titles
+   - Check that Prowlarr has reloaded the custom indexer definition
+
 ## Example Workflow
 
 1. **Configure IPTV provider** in `application.properties`

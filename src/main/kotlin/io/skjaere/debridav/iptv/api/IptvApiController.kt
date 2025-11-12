@@ -2,6 +2,7 @@ package io.skjaere.debridav.iptv.api
 
 import io.skjaere.debridav.iptv.IptvRequestService
 import io.skjaere.debridav.iptv.model.ContentType
+import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
@@ -22,13 +23,31 @@ class IptvApiController(
     fun search(
         @RequestParam(required = false) query: String?,
         @RequestParam(required = false) type: String?,
-        @RequestParam(required = false) category: String?
+        @RequestParam(required = false) category: String?,
+        request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
-        logger.debug("IPTV search request received - query='{}', type='{}', category='{}'", query, type, category)
+        logger.info("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
+            query, type, category, request.queryString)
+        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, request.remoteAddr)
+        
+        // Log all request parameters for debugging
+        request.parameterMap.forEach { (key, values) ->
+            logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
+        }
         
         // Handle empty or missing query (e.g., from Prowlarr connection tests)
         if (query.isNullOrBlank()) {
-            logger.debug("Query is null or blank, returning empty list")
+            logger.warn("Query is null or blank - this might indicate Prowlarr is not sending the search query correctly")
+            return ResponseEntity.ok(emptyList())
+        }
+        
+        // Check if query looks like an IMDB ID (starts with "tt" followed by digits)
+        val isImdbId = query.matches(Regex("^tt\\d+$", RegexOption.IGNORE_CASE))
+        if (isImdbId) {
+            logger.warn("Received IMDB ID query '{}' but IPTV API only supports title-based searches. " +
+                    "This suggests Prowlarr is sending IMDB ID instead of title. " +
+                    "Consider checking Prowlarr indexer configuration.", query)
+            // Return empty results for IMDB ID queries since we can't search by IMDB ID
             return ResponseEntity.ok(emptyList())
         }
         
@@ -41,9 +60,9 @@ class IptvApiController(
             }
         }
         
-        logger.debug("Searching IPTV content with query='{}', contentType={}", query, contentType)
+        logger.info("Searching IPTV content with query='{}', contentType={}", query, contentType)
         val results = iptvRequestService.searchIptvContent(query, contentType)
-        logger.debug("Search returned {} results", results.size)
+        logger.info("Search returned {} results", results.size)
         if (results.isNotEmpty()) {
             logger.debug("First result sample: {}", results.first())
         }
