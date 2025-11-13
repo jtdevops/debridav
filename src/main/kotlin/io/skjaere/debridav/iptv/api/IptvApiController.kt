@@ -19,7 +19,7 @@ class IptvApiController(
 ) {
     private val logger = LoggerFactory.getLogger(IptvApiController::class.java)
 
-    @PostMapping("/search")
+    @GetMapping("/search")
     fun search(
         @RequestParam(required = false) query: String?,
         @RequestParam(required = false) type: String?,
