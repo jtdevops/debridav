@@ -92,8 +92,8 @@ class IptvRequestService(
             ?: debridavConfigurationProperties.downloadPath
         val filePath = "$categoryPath/${sanitizeFileName(iptvContent.title)}"
         
-        // Generate hash from content ID
-        val hash = "${providerName}_${contentId}".hashCode().toString()
+        // Generate hash from content ID using consistent method
+        val hash = generateIptvHash(providerName, contentId)
         
         // Create virtual file
         try {
@@ -221,8 +221,9 @@ class IptvRequestService(
             // Determine file path
             val filePath = "$categoryPath/${sanitizeFileName(episodeTitle)}"
             
-            // Generate hash from episode content ID
-            val hash = "${providerName}_${seriesId}_${episode.id}".hashCode().toString()
+            // Generate hash from episode content ID (series episodes use seriesId_episodeId format)
+            val episodeContentId = "${seriesId}_${episode.id}"
+            val hash = generateIptvHash(providerName, episodeContentId)
             
             // Create virtual file
             try {
@@ -282,16 +283,83 @@ class IptvRequestService(
         }
     }
     
+    /**
+     * Generates a consistent hash from provider name and content ID.
+     * This hash is used as the infohash in search results and matches the hash
+     * used when creating Torrent entities from IPTV content.
+     * 
+     * Reverse lookup: The hash can be used to find the IPTV content via:
+     * 1. Look up Torrent by hash: torrentRepository.getByHashIgnoreCase(hash)
+     * 2. Get files from Torrent: torrent.files
+     * 3. Extract IPTV info: (file.contents as DebridIptvContent).iptvProviderName and iptvContentId
+     */
+    fun generateIptvHash(providerName: String, contentId: String): String {
+        return "${providerName}_${contentId}".hashCode().toString()
+    }
+    
+    /**
+     * Extracts the hash from an IPTV URL.
+     * Supports both formats:
+     * - New format: iptv://{hash}/{providerName}/{contentId}
+     * - Old format: iptv://{providerName}/{contentId} (will compute hash)
+     * 
+     * @param iptvUrl The IPTV URL to parse
+     * @return The hash, or null if URL format is invalid
+     */
+    fun extractHashFromIptvUrl(iptvUrl: String): String? {
+        if (!iptvUrl.startsWith("iptv://")) {
+            return null
+        }
+        
+        val linkWithoutProtocol = iptvUrl.removePrefix("iptv://")
+        val parts = linkWithoutProtocol.split("/")
+        
+        return when (parts.size) {
+            3 -> {
+                // New format: iptv://{hash}/{providerName}/{contentId}
+                parts[0]
+            }
+            2 -> {
+                // Old format: iptv://{providerName}/{contentId} - compute hash
+                generateIptvHash(parts[0], parts[1])
+            }
+            else -> null
+        }
+    }
+    
+    /**
+     * Creates a magnet-like URI for IPTV content that Radarr will accept.
+     * Format: magnet:?xt=urn:iptv:{hash}&dn={encodedTitle}
+     * This allows Radarr to recognize it as a valid download URL while our system
+     * can extract the IPTV info from it.
+     */
+    private fun createIptvMagnetUri(hash: String, title: String, guid: String): String {
+        // URL encode the title for the magnet link
+        val encodedTitle = java.net.URLEncoder.encode(title, Charsets.UTF_8.name())
+        // Create a magnet-like URI that Radarr will accept
+        // We'll use a custom URN scheme that our system can recognize
+        return "magnet:?xt=urn:iptv:$hash&dn=$encodedTitle&tr=$guid"
+    }
+    
     fun searchIptvContent(title: String, year: Int?, contentType: ContentType?): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType)
         return results.map { entity ->
+            // Generate infohash from providerName and contentId
+            val infohash = generateIptvHash(entity.providerName, entity.contentId)
+            // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
+            val guid = "iptv://$infohash/${entity.providerName}/${entity.contentId}"
+            // Create magnet URI for Radarr compatibility
+            val magnetUri = createIptvMagnetUri(infohash, entity.title, guid)
             IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
                 title = entity.title,
                 contentType = entity.contentType,
                 category = entity.category?.categoryName,
-                guid = "iptv://${entity.providerName}/${entity.contentId}"
+                guid = guid,
+                infohash = infohash,
+                url = magnetUri, // Use magnet URI for Radarr compatibility
+                magnetUri = magnetUri // Also provide as magnet field
             )
         }
     }
@@ -326,7 +394,13 @@ class IptvRequestService(
         @JsonProperty("category")
         val category: String?,
         @JsonProperty("guid")
-        val guid: String
+        val guid: String,
+        @JsonProperty("infohash")
+        val infohash: String,
+        @JsonProperty("url")
+        val url: String,
+        @JsonProperty("magnetUri")
+        val magnetUri: String
     )
 }
 

@@ -112,12 +112,16 @@ search:
       text: "1"
     details:
       text: "/api/iptv"
+    infohash:
+      # Hash is now included in URL format: iptv://{hash}/{provider}/{contentId}
+      # Can extract from URL or use the infohash field directly
+      selector: infohash
     magnet:
-      selector: guid
+      selector: magnetUri
     guid:
       selector: guid
     downloadurl:
-      selector: guid
+      selector: url
     year:
       selector: title
       filters:

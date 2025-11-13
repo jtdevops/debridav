@@ -47,9 +47,33 @@ class TorrentService(
 
     @Transactional
     fun addMagnet(category: String, magnet: TorrentMagnet): Boolean = runBlocking {
+        // Check if this is an IPTV magnet URI (magnet:?xt=urn:iptv:...)
+        if (magnet.magnet.startsWith("magnet:?xt=urn:iptv:")) {
+            // Extract IPTV info from magnet URI: magnet:?xt=urn:iptv:{hash}&dn={title}&tr={iptv://...}
+            val iptvGuid = extractIptvGuidFromMagnet(magnet.magnet)
+            if (iptvGuid != null && iptvGuid.startsWith("iptv://")) {
+                return@runBlocking handleIptvLink(iptvGuid, category)
+            }
+        }
+        
         // Check if this is an IPTV link
         if (magnet.magnet.startsWith("iptv://")) {
             return@runBlocking handleIptvLink(magnet.magnet, category)
+        }
+        
+        // Check if this might be an IPTV hash (if Radarr sends hash directly)
+        // Note: This is a fallback - normally Radarr sends the iptv:// URL via downloadurl field
+        val potentialHash = magnet.magnet.trim()
+        val existingTorrent = torrentRepository.getByHashIgnoreCase(potentialHash)
+        if (existingTorrent != null) {
+            // Check if this torrent is IPTV content by checking if files are DebridIptvContent
+            val isIptvContent = existingTorrent.files.any { file ->
+                file.contents is io.skjaere.debridav.fs.DebridIptvContent
+            }
+            if (isIptvContent) {
+                logger.info("Hash $potentialHash corresponds to existing IPTV torrent, skipping re-add")
+                return@runBlocking true
+            }
         }
         
         // Existing debrid handling
@@ -71,17 +95,34 @@ class TorrentService(
     private fun handleIptvLink(iptvLink: String, category: String): Boolean {
         logger.info("Processing IPTV link: $iptvLink")
         
-        // Parse: iptv://{providerName}/{contentId}
+        // Parse IPTV link format: iptv://{hash}/{providerName}/{contentId}
+        // Backward compatible with old format: iptv://{providerName}/{contentId}
         val linkWithoutProtocol = iptvLink.removePrefix("iptv://")
-        val parts = linkWithoutProtocol.split("/", limit = 2)
+        val parts = linkWithoutProtocol.split("/")
         
-        if (parts.size != 2) {
-            logger.error("Invalid IPTV link format: $iptvLink. Expected format: iptv://{providerName}/{contentId}")
-            return false
+        val (hash, providerName, contentId) = when (parts.size) {
+            3 -> {
+                // New format: iptv://{hash}/{providerName}/{contentId}
+                Triple(parts[0], parts[1], parts[2])
+            }
+            2 -> {
+                // Old format (backward compatibility): iptv://{providerName}/{contentId}
+                val providerName = parts[0]
+                val contentId = parts[1]
+                val hash = iptvRequestService.generateIptvHash(providerName, contentId)
+                Triple(hash, providerName, contentId)
+            }
+            else -> {
+                logger.error("Invalid IPTV link format: $iptvLink. Expected format: iptv://{hash}/{providerName}/{contentId} or iptv://{providerName}/{contentId}")
+                return false
+            }
         }
         
-        val providerName = parts[0]
-        val contentId = parts[1]
+        // Verify hash matches (if provided in URL)
+        val expectedHash = iptvRequestService.generateIptvHash(providerName, contentId)
+        if (hash != expectedHash) {
+            logger.warn("Hash mismatch in IPTV link: expected=$expectedHash, got=$hash. Using expected hash.")
+        }
         
         // Get IPTV content entity to retrieve title
         val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
@@ -100,22 +141,22 @@ class TorrentService(
             return false
         }
         
-        // Generate hash (same as in IptvRequestService)
-        val hash = "${providerName}_${contentId}".hashCode().toString()
+        // Use the expected hash (ensures consistency)
+        val finalHash = expectedHash
         
         // Retrieve the created file and create a Torrent entity for it
-        val createdFiles = debridFileRepository.getByHash(hash)
+        val createdFiles = debridFileRepository.getByHash(finalHash)
             .filterIsInstance<RemotelyCachedEntity>()
         
         if (createdFiles.isEmpty()) {
-            logger.error("IPTV file not found after creation: hash=$hash")
+            logger.error("IPTV file not found after creation: hash=$finalHash")
             return false
         }
         
         val file = createdFiles.first()
         
         // Create or update Torrent entity
-        val torrent = torrentRepository.getByHashIgnoreCase(hash) ?: Torrent()
+        val torrent = torrentRepository.getByHashIgnoreCase(finalHash) ?: Torrent()
         
         // If reusing an existing torrent, clean up old files first
         if (torrent.id != null) {
@@ -131,7 +172,7 @@ class TorrentService(
         torrent.name = iptvContent.title.substringBeforeLast(".").takeIf { it != iptvContent.title }
             ?: iptvContent.title
         torrent.created = Instant.now()
-        torrent.hash = hash
+        torrent.hash = finalHash
         torrent.status = Status.LIVE
         torrent.savePath = file.directory?.path?.let { "$it/${file.name}" }
             ?: "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
@@ -208,6 +249,21 @@ class TorrentService(
         }
         
         return torrentRepository.deleteByHashIgnoreCase(hash)
+    }
+    
+    /**
+     * Extracts the IPTV GUID from a magnet URI.
+     * Format: magnet:?xt=urn:iptv:{hash}&dn={title}&tr={iptv://...}
+     * Returns the tr parameter value which contains the IPTV GUID.
+     */
+    private fun extractIptvGuidFromMagnet(magnetUri: String): String? {
+        return try {
+            val trParam = magnetUri.split("&").find { it.startsWith("tr=") }
+            trParam?.substringAfter("tr=")?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8.name()) }
+        } catch (e: Exception) {
+            logger.warn("Failed to extract IPTV GUID from magnet URI: $magnetUri", e)
+            null
+        }
     }
 
     private fun getTorrentNameFromDebridFileContent(debridFileContents: DebridFileContents): String {
