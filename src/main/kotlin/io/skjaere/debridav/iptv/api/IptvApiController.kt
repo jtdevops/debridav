@@ -1,8 +1,10 @@
 package io.skjaere.debridav.iptv.api
 
 import io.skjaere.debridav.iptv.IptvRequestService
+import io.skjaere.debridav.iptv.metadata.MetadataService
 import io.skjaere.debridav.iptv.model.ContentType
 import jakarta.servlet.http.HttpServletRequest
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
@@ -11,11 +13,13 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
+import java.net.InetAddress
 
 @RestController
 @RequestMapping("/api/iptv")
 class IptvApiController(
-    private val iptvRequestService: IptvRequestService
+    private val iptvRequestService: IptvRequestService,
+    private val metadataService: MetadataService
 ) {
     private val logger = LoggerFactory.getLogger(IptvApiController::class.java)
 
@@ -24,31 +28,43 @@ class IptvApiController(
         @RequestParam(required = false) query: String?,
         @RequestParam(required = false) type: String?,
         @RequestParam(required = false) category: String?,
+        // New parameters from ARR indexer API
+        @RequestParam(required = false) q: String?,
+        @RequestParam(required = false) qTest: String?,
+        @RequestParam(required = false) imdbid: String?,
+        @RequestParam(required = false) tmdbid: String?,
+        @RequestParam(required = false) traktid: String?,
+        @RequestParam(required = false) doubanid: String?,
+        @RequestParam(required = false) year: String?,
+        @RequestParam(required = false) genre: String?,
+        // TV show specific parameters
+        @RequestParam(required = false) season: String?,
+        @RequestParam(required = false) ep: String?,
+        @RequestParam(required = false) episode: String?,
+        @RequestParam(required = false) tvdbid: String?,
+        @RequestParam(required = false) rid: String?,
         request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
         logger.info("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
             query, type, category, request.queryString)
-        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, request.remoteAddr)
+        
+        // Resolve hostname from IP address
+        val remoteAddr = request.remoteAddr
+        val remoteInfo = try {
+            val hostname = InetAddress.getByName(remoteAddr).hostName
+            if (hostname != remoteAddr) {
+                "$remoteAddr/$hostname"
+            } else {
+                remoteAddr
+            }
+        } catch (e: Exception) {
+            remoteAddr
+        }
+        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, remoteInfo)
         
         // Log all request parameters for debugging
         request.parameterMap.forEach { (key, values) ->
             logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
-        }
-        
-        // Handle empty or missing query (e.g., from Prowlarr connection tests)
-        if (query.isNullOrBlank()) {
-            logger.warn("Query is null or blank - this might indicate Prowlarr is not sending the search query correctly")
-            return ResponseEntity.ok(emptyList())
-        }
-        
-        // Check if query looks like an IMDB ID (starts with "tt" followed by digits)
-        val isImdbId = query.matches(Regex("^tt\\d+$", RegexOption.IGNORE_CASE))
-        if (isImdbId) {
-            logger.warn("Received IMDB ID query '{}' but IPTV API only supports title-based searches. " +
-                    "This suggests Prowlarr is sending IMDB ID instead of title. " +
-                    "Consider checking Prowlarr indexer configuration.", query)
-            // Return empty results for IMDB ID queries since we can't search by IMDB ID
-            return ResponseEntity.ok(emptyList())
         }
         
         val contentType = type?.let {
@@ -60,13 +76,98 @@ class IptvApiController(
             }
         }
         
-        logger.info("Searching IPTV content with query='{}', contentType={}", query, contentType)
-        val results = iptvRequestService.searchIptvContent(query, contentType)
+        // Determine search query following hierarchy:
+        // 1. Check ID fields (imdbid first, others for future use)
+        // 2. Fallback to 'q' parameter
+        // 3. Fallback to 'qTest' parameter (testing data)
+        // 4. Fallback to legacy 'query' parameter
+        
+        val searchQuery = determineSearchQuery(
+            imdbid = imdbid,
+            tmdbid = tmdbid,
+            traktid = traktid,
+            doubanid = doubanid,
+            q = q,
+            qTest = qTest,
+            query = query,
+            contentType = contentType
+        )
+        
+        if (searchQuery == null) {
+            logger.warn("No valid search query found in request parameters")
+            return ResponseEntity.ok(emptyList())
+        }
+        
+        logger.info("Searching IPTV content with query='{}', contentType={}, season={}, episode={}", 
+            searchQuery, contentType, season, episode)
+        val results = iptvRequestService.searchIptvContent(searchQuery, contentType)
         logger.info("Search returned {} results", results.size)
         if (results.isNotEmpty()) {
             logger.debug("First result sample: {}", results.first())
         }
         return ResponseEntity.ok(results)
+    }
+    
+    /**
+     * Determines the search query following the hierarchy:
+     * 1. Check ID fields (imdbid) - query external API to get title/year
+     * 2. Fallback to 'q' parameter
+     * 3. Fallback to 'qTest' parameter
+     * 4. Fallback to legacy 'query' parameter
+     */
+    private fun determineSearchQuery(
+        imdbid: String?,
+        tmdbid: String?,
+        traktid: String?,
+        doubanid: String?,
+        q: String?,
+        qTest: String?,
+        query: String?,
+        contentType: ContentType?
+    ): String? {
+        // Priority 1: Check IMDB ID (and potentially other IDs in the future)
+        val imdbId = imdbid?.takeIf { it.isNotBlank() }
+        if (imdbId != null) {
+            logger.debug("Found IMDB ID: $imdbId, attempting to fetch metadata")
+            val metadata = runBlocking {
+                metadataService.getMetadataByImdbId(imdbId)
+            }
+            
+            if (metadata != null) {
+                logger.info("Successfully resolved IMDB ID '$imdbId' to title: '${metadata.title}' (year: ${metadata.year})")
+                // Use the title from metadata, optionally include year for better matching
+                return if (metadata.year != null) {
+                    "${metadata.title} (${metadata.year})"
+                } else {
+                    metadata.title
+                }
+            } else {
+                logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata, falling back to next priority")
+            }
+        }
+        
+        // Priority 2: Use 'q' parameter
+        val qParam = q?.takeIf { it.isNotBlank() }
+        if (qParam != null) {
+            logger.debug("Using 'q' parameter: '$qParam'")
+            return qParam
+        }
+        
+        // Priority 3: Use 'qTest' parameter (testing data)
+        val qTestParam = qTest?.takeIf { it.isNotBlank() }
+        if (qTestParam != null) {
+            logger.debug("Using 'qTest' parameter (testing): '$qTestParam'")
+            return qTestParam
+        }
+        
+        // Priority 4: Fallback to legacy 'query' parameter
+        val queryParam = query?.takeIf { it.isNotBlank() }
+        if (queryParam != null) {
+            logger.debug("Using legacy 'query' parameter: '$queryParam'")
+            return queryParam
+        }
+        
+        return null
     }
 
     @PostMapping("/add")

@@ -16,8 +16,8 @@ caps:
     TV: TV
   modes:
     search: [q]
-    movie-search: [q, imdbid]
-    tv-search: [q, imdbid, season, ep]
+    movie-search: [q, imdbid, tmdbid, traktid, doubanid, year, genre]
+    tv-search: [q, season, ep, imdbid, tvdbid, rid, traktid, doubanid, year, genre]
   allowrawsearch: false
 
 settings:
@@ -39,17 +39,47 @@ settings:
 
 search:
   headers:
-    User-Agent: ["DebriDav-Prowlarr/1.0"]
+    User-Agent: ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0"]
     Accept: ["application/json"]
   paths:
-    - path: "/api/iptv/search?query={{ if .Query.Q }}{{ .Query.Q }}{{ else if .Query.IMDBID }}tt{{ .Query.IMDBID }}{{ else }}{{ .Config.validate_movie_title }}{{ end }}&type=MOVIE"
-      method: post
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_movie_title }}&imdbid={{ .Query.IMDBID }}&tmdbid={{ .Query.TMDBID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=MOVIE"
+    # - path: "/api/iptv/search"
+      method: get
+      # inputs:
+      #   # Available variables: https://github.com/Jackett/Jackett/wiki/Definition-format#search-query-variables
+      #   q: "{{ .Query.Q }}"
+      #   query: "{{ .Config.validate_movie_title }}"
+      #   qTest: "{{ .Config.validate_movie_title }}"
+      #   imdbid: "{{ .Query.IMDBID }}"
+      #   tmdbid: "{{ .Query.TMDBID }}"
+      #   traktid: "{{ .Query.TraktID }}"
+      #   doubanid: "{{ .Query.DoubanID }}"
+      #   year: "{{ .Query.Year }}"
+      #   genre: "{{ .Query.Genre }}"
+      #   type: "MOVIE"
       response:
         type: json
         noResultsMessage: "[]"
       categories: [Movies]
-    - path: "/api/iptv/search?query={{ if .Query.Q }}{{ .Query.Q }}{{ else if .Query.IMDBID }}tt{{ .Query.IMDBID }}{{ else }}{{ .Config.validate_tv_title }}{{ end }}&type=SERIES"
-      method: post
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_tv_title }}&season={{ .Query.Season }}&ep={{ .Query.Ep }}&episode={{ .Query.Episode }}&imdbid={{ .Query.IMDBID }}&tvdbid={{ .Query.TVDBID }}&rid={{ .Query.TVRageID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=SERIES"
+    # - path: "/api/iptv/search"
+      method: get
+      # inputs:
+      #   # Available variables: https://github.com/Jackett/Jackett/wiki/Definition-format#search-query-variables
+      #   q: "{{ .Query.Q }}"
+      #   query: "{{ .Config.validate_tv_title }}"
+      #   qTest: "{{ .Config.validate_tv_title }}"
+      #   season: "{{ .Query.Season }}"
+      #   ep: "{{ .Query.Ep }}"
+      #   episode: "{{ .Query.Episode }}"
+      #   imdbid: "{{ .Query.IMDBID }}"
+      #   tvdbid: "{{ .Query.TVDBID }}"
+      #   rid: "{{ .Query.TVRageID }}"
+      #   traktid: "{{ .Query.TraktID }}"
+      #   doubanid: "{{ .Query.DoubanID }}"
+      #   year: "{{ .Query.Year }}"
+      #   genre: "{{ .Query.Genre }}"
+      #   type: "SERIES"
       response:
         type: json
         noResultsMessage: "[]"
