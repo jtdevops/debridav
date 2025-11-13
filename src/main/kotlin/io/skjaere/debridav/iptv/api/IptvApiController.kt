@@ -98,9 +98,9 @@ class IptvApiController(
             return ResponseEntity.ok(emptyList())
         }
         
-        logger.info("Searching IPTV content with query='{}', contentType={}, season={}, episode={}", 
-            searchQuery, contentType, season, episode)
-        val results = iptvRequestService.searchIptvContent(searchQuery, contentType)
+        logger.info("Searching IPTV content with title='{}', year={}, contentType={}, season={}, episode={}", 
+            searchQuery.title, searchQuery.year, contentType, season, episode)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType)
         logger.info("Search returned {} results", results.size)
         if (results.isNotEmpty()) {
             logger.debug("First result sample: {}", results.first())
@@ -109,11 +109,21 @@ class IptvApiController(
     }
     
     /**
+     * Data class to hold search query with title and optional year
+     */
+    private data class SearchQuery(
+        val title: String,
+        val year: Int?
+    )
+    
+    /**
      * Determines the search query following the hierarchy:
      * 1. Check ID fields (imdbid) - query external API to get title/year
      * 2. Fallback to 'q' parameter
      * 3. Fallback to 'qTest' parameter
      * 4. Fallback to legacy 'query' parameter
+     * 
+     * Returns SearchQuery with title and optional year extracted separately
      */
     private fun determineSearchQuery(
         imdbid: String?,
@@ -124,7 +134,7 @@ class IptvApiController(
         qTest: String?,
         query: String?,
         contentType: ContentType?
-    ): String? {
+    ): SearchQuery? {
         // Priority 1: Check IMDB ID (and potentially other IDs in the future)
         val imdbId = imdbid?.takeIf { it.isNotBlank() }
         if (imdbId != null) {
@@ -135,12 +145,11 @@ class IptvApiController(
             
             if (metadata != null) {
                 logger.info("Successfully resolved IMDB ID '$imdbId' to title: '${metadata.title}' (year: ${metadata.year})")
-                // Use the title from metadata, optionally include year for better matching
-                return if (metadata.year != null) {
-                    "${metadata.title} (${metadata.year})"
-                } else {
-                    metadata.title
-                }
+                // Return title and year separately - we'll search by title only and filter by year
+                return SearchQuery(
+                    title = metadata.title,
+                    year = metadata.year
+                )
             } else {
                 logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata, falling back to next priority")
             }
@@ -150,24 +159,51 @@ class IptvApiController(
         val qParam = q?.takeIf { it.isNotBlank() }
         if (qParam != null) {
             logger.debug("Using 'q' parameter: '$qParam'")
-            return qParam
+            return extractTitleAndYear(qParam)
         }
         
         // Priority 3: Use 'qTest' parameter (testing data)
         val qTestParam = qTest?.takeIf { it.isNotBlank() }
         if (qTestParam != null) {
             logger.debug("Using 'qTest' parameter (testing): '$qTestParam'")
-            return qTestParam
+            return extractTitleAndYear(qTestParam)
         }
         
         // Priority 4: Fallback to legacy 'query' parameter
         val queryParam = query?.takeIf { it.isNotBlank() }
         if (queryParam != null) {
             logger.debug("Using legacy 'query' parameter: '$queryParam'")
-            return queryParam
+            return extractTitleAndYear(queryParam)
         }
         
         return null
+    }
+    
+    /**
+     * Extracts title and year from a query string.
+     * Handles formats like:
+     * - "Title (1996)"
+     * - "Title 1996"
+     * - "Title"
+     */
+    private fun extractTitleAndYear(query: String): SearchQuery {
+        // Try to extract year from patterns like "Title (1996)" or "Title 1996"
+        val yearPattern = Regex("""\s*\((\d{4})\)\s*$|\s+(\d{4})\s*$""")
+        val match = yearPattern.find(query)
+        
+        if (match != null) {
+            val yearStr = match.groupValues[1].takeIf { it.isNotBlank() } 
+                ?: match.groupValues[2].takeIf { it.isNotBlank() }
+            val year = yearStr?.toIntOrNull()
+            val title = query.substring(0, match.range.first).trim()
+            
+            logger.debug("Extracted title='$title', year=$year from query='$query'")
+            return SearchQuery(title = title, year = year)
+        }
+        
+        // No year found, return title as-is
+        logger.debug("No year found in query='$query', using entire query as title")
+        return SearchQuery(title = query.trim(), year = null)
     }
 
     @PostMapping("/add")

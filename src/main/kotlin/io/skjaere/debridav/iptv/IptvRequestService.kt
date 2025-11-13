@@ -282,8 +282,8 @@ class IptvRequestService(
         }
     }
     
-    fun searchIptvContent(query: String, contentType: ContentType?): List<IptvSearchResult> {
-        val results = iptvContentService.searchContent(query, contentType)
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?): List<IptvSearchResult> {
+        val results = iptvContentService.searchContent(title, year, contentType)
         return results.map { entity ->
             IptvSearchResult(
                 contentId = entity.contentId,

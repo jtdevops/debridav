@@ -22,5 +22,53 @@ interface IptvContentRepository : JpaRepository<IptvContentEntity, Long> {
         @Param("query") query: String,
         @Param("contentType") contentType: ContentType
     ): List<IptvContentEntity>
+    
+    /**
+     * Finds entities where the normalized title contains the query as a whole phrase/word.
+     * Uses word boundary matching to prevent partial matches (e.g., "twister" won't match "twisters").
+     * 
+     * For single-word queries like "twister", matches:
+     * - "twister" (exact match)
+     * - "twister " (followed by space)
+     * - " twister " (surrounded by spaces)
+     * - " twister" (preceded by space)
+     * 
+     * For multi-word queries like "spider man", matches:
+     * - "spider man" (exact match)
+     * - "spider man " (followed by space)
+     * - " spider man " (surrounded by spaces)
+     * - " spider man" (preceded by space)
+     */
+    @Query("""
+        SELECT e FROM IptvContentEntity e 
+        WHERE e.isActive = true 
+        AND (
+            e.normalizedTitle = :query 
+            OR e.normalizedTitle LIKE CONCAT(:query, ' %')
+            OR e.normalizedTitle LIKE CONCAT('% ', :query, ' %')
+            OR e.normalizedTitle LIKE CONCAT('% ', :query)
+        )
+    """)
+    fun findByNormalizedTitleWordBoundary(@Param("query") query: String): List<IptvContentEntity>
+    
+    /**
+     * Finds entities where the normalized title contains the query as a whole phrase/word, filtered by content type.
+     * Uses word boundary matching to prevent partial matches.
+     */
+    @Query("""
+        SELECT e FROM IptvContentEntity e 
+        WHERE e.isActive = true 
+        AND e.contentType = :contentType
+        AND (
+            e.normalizedTitle = :query 
+            OR e.normalizedTitle LIKE CONCAT(:query, ' %')
+            OR e.normalizedTitle LIKE CONCAT('% ', :query, ' %')
+            OR e.normalizedTitle LIKE CONCAT('% ', :query)
+        )
+    """)
+    fun findByNormalizedTitleWordBoundaryAndContentType(
+        @Param("query") query: String,
+        @Param("contentType") contentType: ContentType
+    ): List<IptvContentEntity>
 }
 

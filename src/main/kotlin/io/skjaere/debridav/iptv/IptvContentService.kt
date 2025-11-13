@@ -33,8 +33,8 @@ class IptvContentService(
         }
     }
 
-    fun searchContent(query: String, contentType: ContentType?): List<IptvContentEntity> {
-        val normalizedQuery = normalizeTitle(query)
+    fun searchContent(title: String, year: Int?, contentType: ContentType?): List<IptvContentEntity> {
+        val normalizedTitle = normalizeTitle(title)
         
         // Get currently configured providers
         val configuredProviderNames = iptvConfigurationService.getProviderConfigurations()
@@ -48,13 +48,14 @@ class IptvContentService(
         if (languagePrefixes.isNotEmpty()) {
             for (prefix in languagePrefixes) {
                 val cleanedPrefix = stripQuotes(prefix)
-                val prefixedQuery = normalizeTitle("$cleanedPrefix$query")
-                logger.debug("Trying prefix '$cleanedPrefix' (original: '$prefix') with query '$query' -> normalized: '$prefixedQuery'")
+                val prefixedTitle = normalizeTitle("$cleanedPrefix$title")
+                logger.debug("Trying prefix '$cleanedPrefix' (original: '$prefix') with title '$title' -> normalized: '$prefixedTitle'")
                 
+                // Use word boundary matching to prevent partial word matches
                 val prefixedResults = if (contentType != null) {
-                    iptvContentRepository.findByNormalizedTitleContainingAndContentType(prefixedQuery, contentType)
+                    iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(prefixedTitle, contentType)
                 } else {
-                    iptvContentRepository.findByNormalizedTitleContaining(prefixedQuery)
+                    iptvContentRepository.findByNormalizedTitleWordBoundary(prefixedTitle)
                 }
                 
                 val filteredPrefixedResults = prefixedResults.filter { it.providerName in configuredProviderNames }
@@ -62,8 +63,9 @@ class IptvContentService(
                 logger.debug("Prefix '$cleanedPrefix' returned ${filteredPrefixedResults.size} results (before filtering: ${prefixedResults.size})")
                 
                 if (filteredPrefixedResults.isNotEmpty()) {
-                    logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for query '$query', returning early")
-                    return filteredPrefixedResults
+                    logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$title', returning early")
+                    // Filter by year if provided
+                    return filterByYear(filteredPrefixedResults, year)
                 }
             }
             logger.debug("No results found with any language prefix, falling back to search without prefix")
@@ -71,20 +73,111 @@ class IptvContentService(
             logger.debug("No language prefixes configured, searching without prefix")
         }
         
-        // Fallback to search without prefix
+        // Fallback to search without prefix - search by title only (year excluded from search)
+        // Use word boundary matching to prevent partial word matches (e.g., "twister" won't match "twisters")
         val results = if (contentType != null) {
-            iptvContentRepository.findByNormalizedTitleContainingAndContentType(normalizedQuery, contentType)
+            iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(normalizedTitle, contentType)
         } else {
-            iptvContentRepository.findByNormalizedTitleContaining(normalizedQuery)
+            iptvContentRepository.findByNormalizedTitleWordBoundary(normalizedTitle)
         }
         
         // Filter to only include content from currently configured providers
-        return results.filter { it.providerName in configuredProviderNames }
+        val filteredResults = results.filter { it.providerName in configuredProviderNames }
+        
+        // Filter by year if provided
+        return filterByYear(filteredResults, year)
+    }
+    
+    /**
+     * Filters search results by year if year is provided.
+     * Year filtering is optional and follows these rules:
+     * - If no year is provided, return all results
+     * - If year is provided:
+     *   - Include results with matching year
+     *   - Include results with no year
+     *   - Exclude results with non-matching year ONLY if there are results with matching year or no year
+     *   - If ALL results have non-matching years (and none have matching year or no year), return all results
+     */
+    private fun filterByYear(results: List<IptvContentEntity>, year: Int?): List<IptvContentEntity> {
+        if (year == null) {
+            logger.debug("No year filter specified, returning all ${results.size} results")
+            return results
+        }
+        
+        logger.debug("Filtering ${results.size} results by year: $year")
+        
+        // Categorize results by year match status
+        val resultsWithMatchingYear = mutableListOf<IptvContentEntity>()
+        val resultsWithNoYear = mutableListOf<IptvContentEntity>()
+        val resultsWithNonMatchingYear = mutableListOf<IptvContentEntity>()
+        
+        results.forEach { entity ->
+            val extractedYear = extractYearFromTitle(entity.title)
+            when {
+                extractedYear == null -> {
+                    resultsWithNoYear.add(entity)
+                    logger.debug("Result '${entity.title}' has no year - will be included")
+                }
+                extractedYear == year -> {
+                    resultsWithMatchingYear.add(entity)
+                    logger.debug("Result '${entity.title}' (year: $extractedYear) matches filter year: $year - will be included")
+                }
+                else -> {
+                    resultsWithNonMatchingYear.add(entity)
+                    logger.debug("Result '${entity.title}' (year: $extractedYear) does not match filter year: $year - may be excluded")
+                }
+            }
+        }
+        
+        // Determine which results to return
+        val filtered = when {
+            // If we have results with matching year or no year, exclude non-matching year results
+            resultsWithMatchingYear.isNotEmpty() || resultsWithNoYear.isNotEmpty() -> {
+                val included = resultsWithMatchingYear + resultsWithNoYear
+                logger.info("Year filter: Found ${resultsWithMatchingYear.size} results with matching year and ${resultsWithNoYear.size} results with no year. Excluding ${resultsWithNonMatchingYear.size} results with non-matching year.")
+                included
+            }
+            // If ALL results have non-matching years, return all results (year filter is optional)
+            else -> {
+                logger.info("Year filter: All ${results.size} results have non-matching years. Returning all results (year filter is optional).")
+                results
+            }
+        }
+        
+        logger.info("Year filter returned ${filtered.size} results (from ${results.size} total)")
+        return filtered
+    }
+    
+    /**
+     * Extracts year from a title string.
+     * Handles formats like:
+     * - "Title (1996)"
+     * - "Title 1996"
+     * - "Title (1996) Extra"
+     * Returns null if no valid year is found.
+     */
+    private fun extractYearFromTitle(title: String): Int? {
+        // Try to match year in parentheses first: "Title (1996)"
+        val parenthesesPattern = Regex("""\((\d{4})\)""")
+        val parenthesesMatch = parenthesesPattern.find(title)
+        if (parenthesesMatch != null) {
+            return parenthesesMatch.groupValues[1].toIntOrNull()
+        }
+        
+        // Try to match year as standalone 4-digit number: "Title 1996" (but not "Title 1996-1997")
+        // Look for 4-digit years that are likely release years (1900-2099)
+        val yearPattern = Regex("""\b(19\d{2}|20\d{2})\b""")
+        val yearMatch = yearPattern.find(title)
+        if (yearMatch != null) {
+            return yearMatch.groupValues[1].toIntOrNull()
+        }
+        
+        return null
     }
 
     fun findExactMatch(title: String, contentType: ContentType?): IptvContentEntity? {
         val normalizedTitle = normalizeTitle(title)
-        val candidates = searchContent(normalizedTitle, contentType)
+        val candidates = searchContent(normalizedTitle, null, contentType)
         
         // Find exact match (normalized titles match exactly)
         return candidates.firstOrNull { it.normalizedTitle == normalizedTitle }
