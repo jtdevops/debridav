@@ -92,8 +92,9 @@ class IptvRequestService(
             ?: debridavConfigurationProperties.downloadPath
         val filePath = "$categoryPath/${sanitizeFileName(iptvContent.title)}"
         
-        // Generate hash from content ID using consistent method
-        val hash = generateIptvHash(providerName, contentId)
+        // Generate hash from content ID - use original format for database compatibility
+        // The database stores hashCode().toString() format, not hex
+        val hash = "${providerName}_${contentId}".hashCode().toString()
         
         // Create virtual file
         try {
@@ -222,8 +223,9 @@ class IptvRequestService(
             val filePath = "$categoryPath/${sanitizeFileName(episodeTitle)}"
             
             // Generate hash from episode content ID (series episodes use seriesId_episodeId format)
+            // Use original format for database compatibility
             val episodeContentId = "${seriesId}_${episode.id}"
-            val hash = generateIptvHash(providerName, episodeContentId)
+            val hash = "${providerName}_${episodeContentId}".hashCode().toString()
             
             // Create virtual file
             try {
@@ -288,13 +290,19 @@ class IptvRequestService(
      * This hash is used as the infohash in search results and matches the hash
      * used when creating Torrent entities from IPTV content.
      * 
+     * Returns a positive hex string suitable for use in magnet URIs.
+     * 
      * Reverse lookup: The hash can be used to find the IPTV content via:
      * 1. Look up Torrent by hash: torrentRepository.getByHashIgnoreCase(hash)
      * 2. Get files from Torrent: torrent.files
      * 3. Extract IPTV info: (file.contents as DebridIptvContent).iptvProviderName and iptvContentId
      */
     fun generateIptvHash(providerName: String, contentId: String): String {
-        return "${providerName}_${contentId}".hashCode().toString()
+        // Generate hash code and convert to positive hex string
+        val hashInt = "${providerName}_${contentId}".hashCode()
+        // Convert to unsigned long to ensure positive, then to hex
+        val unsignedHash = hashInt.toLong() and 0xFFFFFFFFL
+        return unsignedHash.toString(16).uppercase().padStart(8, '0')
     }
     
     /**
@@ -328,38 +336,131 @@ class IptvRequestService(
     }
     
     /**
-     * Creates a magnet-like URI for IPTV content that Radarr will accept.
-     * Format: magnet:?xt=urn:iptv:{hash}&dn={encodedTitle}
-     * This allows Radarr to recognize it as a valid download URL while our system
-     * can extract the IPTV info from it.
+     * Creates a magnet URI for IPTV content that Radarr will accept.
+     * Uses standard BitTorrent magnet format but encodes IPTV info in the tracker parameter.
+     * Format: magnet:?xt=urn:btih:{hash}&dn={encodedTitle}&tr={iptv://guid}
+     * 
+     * Note: We use a fake BTIH hash (same as our IPTV hash) so Radarr accepts it,
+     * but our system recognizes it as IPTV via the tracker parameter.
      */
     private fun createIptvMagnetUri(hash: String, title: String, guid: String): String {
         // URL encode the title for the magnet link
         val encodedTitle = java.net.URLEncoder.encode(title, Charsets.UTF_8.name())
-        // Create a magnet-like URI that Radarr will accept
-        // We'll use a custom URN scheme that our system can recognize
-        return "magnet:?xt=urn:iptv:$hash&dn=$encodedTitle&tr=$guid"
+        // Create a standard magnet URI format that Radarr will accept
+        // Use BTIH format (BitTorrent Info Hash) - must be exactly 40 hex characters
+        // Pad hash to 40 chars (standard BTIH length) with zeros
+        val btihHash = hash.lowercase().padEnd(40, '0').take(40)
+        return "magnet:?xt=urn:btih:$btihHash&dn=$encodedTitle&tr=${java.net.URLEncoder.encode(guid, Charsets.UTF_8.name())}"
+    }
+    
+    /**
+     * Estimates file size for IPTV content based on content type.
+     * Since IPTV streams don't have known sizes, we provide reasonable estimates.
+     */
+    private fun estimateIptvSize(contentType: ContentType): Long {
+        return when (contentType) {
+            ContentType.MOVIE -> 2_000_000_000L // ~2GB for movies
+            ContentType.SERIES -> 1_000_000_000L // ~1GB for episodes
+        }
+    }
+    
+    /**
+     * Attempts to extract quality information from title.
+     * Returns quality string like "1080p", "720p", "4K", etc. or null if not found.
+     */
+    private fun extractQualityFromTitle(title: String): String? {
+        val qualityPatterns = listOf(
+            Regex("4K|2160p", RegexOption.IGNORE_CASE),
+            Regex("1080p|FHD", RegexOption.IGNORE_CASE),
+            Regex("720p|HD", RegexOption.IGNORE_CASE),
+            Regex("480p|SD", RegexOption.IGNORE_CASE)
+        )
+        
+        return qualityPatterns.firstOrNull { it.containsMatchIn(title) }?.find(title)?.value?.uppercase()
+    }
+    
+    /**
+     * Formats title for Radarr compatibility.
+     * Radarr expects titles in format like: "Movie.Title.1990.1080p.BluRay.x264-GROUP"
+     * We'll add quality and encoding info if available.
+     */
+    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?): String {
+        // Remove language prefix if present (e.g., "EN| " or "NL| ")
+        var cleanTitle = originalTitle.replace(Regex("^[A-Z]{2}\\|\\s*"), "")
+        
+        // Extract year from title if not provided
+        val titleYear = year ?: extractYearFromTitle(cleanTitle)
+        
+        // Build Radarr-compatible title
+        val parts = mutableListOf<String>()
+        
+        // Add title (sanitize for filename)
+        val sanitizedTitle = cleanTitle
+            .replace(Regex("[<>:\"/\\|?*]"), ".")
+            .replace(Regex("\\s+"), ".")
+            .replace(Regex("\\.+"), ".")
+            .trim('.')
+        parts.add(sanitizedTitle)
+        
+        // Add year if available
+        if (titleYear != null) {
+            parts.add(titleYear.toString())
+        }
+        
+        // Add quality (default to 1080p if not detected)
+        val finalQuality = quality ?: "1080p"
+        parts.add(finalQuality)
+        
+        // Add source and codec (common defaults for IPTV)
+        parts.add("BluRay")
+        parts.add("x264")
+        
+        // Add a group identifier
+        parts.add("IPTV")
+        
+        return parts.joinToString(".")
+    }
+    
+    /**
+     * Extracts year from title if present.
+     */
+    private fun extractYearFromTitle(title: String): Int? {
+        val yearPattern = Regex("\\b(19|20)\\d{2}\\b")
+        return yearPattern.find(title)?.value?.toIntOrNull()
     }
     
     fun searchIptvContent(title: String, year: Int?, contentType: ContentType?): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType)
         return results.map { entity ->
-            // Generate infohash from providerName and contentId
+            // Generate infohash from providerName and contentId (now returns hex string)
             val infohash = generateIptvHash(entity.providerName, entity.contentId)
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
             val guid = "iptv://$infohash/${entity.providerName}/${entity.contentId}"
-            // Create magnet URI for Radarr compatibility
-            val magnetUri = createIptvMagnetUri(infohash, entity.title, guid)
+            
+            // Try to extract quality from title
+            val quality = extractQualityFromTitle(entity.title)
+            
+            // Format title for Radarr compatibility (includes quality, codec, etc.)
+            val radarrTitle = formatTitleForRadarr(entity.title, year, quality)
+            
+            // Create magnet URI for Radarr compatibility - use formatted title
+            val magnetUri = createIptvMagnetUri(infohash, radarrTitle, guid)
+            
+            // Estimate size for Radarr compatibility
+            val estimatedSize = estimateIptvSize(entity.contentType)
+            
             IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
-                title = entity.title,
+                title = radarrTitle, // Use Radarr-formatted title
                 contentType = entity.contentType,
                 category = entity.category?.categoryName,
                 guid = guid,
                 infohash = infohash,
                 url = magnetUri, // Use magnet URI for Radarr compatibility
-                magnetUri = magnetUri // Also provide as magnet field
+                magnetUri = magnetUri, // Also provide as magnet field
+                size = estimatedSize,
+                quality = quality ?: "1080p" // Default to 1080p if not detected
             )
         }
     }
@@ -400,7 +501,11 @@ class IptvRequestService(
         @JsonProperty("url")
         val url: String,
         @JsonProperty("magnetUri")
-        val magnetUri: String
+        val magnetUri: String,
+        @JsonProperty("size")
+        val size: Long,
+        @JsonProperty("quality")
+        val quality: String?
     )
 }
 

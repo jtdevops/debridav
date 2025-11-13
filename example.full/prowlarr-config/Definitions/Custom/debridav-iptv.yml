@@ -107,9 +107,11 @@ search:
         - name: replace
           args: ["MOVIE", "false"]
     size:
-      text: "0"
+      selector: size
     seeders:
       text: "1"
+    leechers:
+      text: "0"
     details:
       text: "/api/iptv"
     infohash:
