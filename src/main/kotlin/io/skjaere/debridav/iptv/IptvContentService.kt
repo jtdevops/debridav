@@ -48,24 +48,38 @@ class IptvContentService(
         if (languagePrefixes.isNotEmpty()) {
             for (prefix in languagePrefixes) {
                 val cleanedPrefix = stripQuotes(prefix)
-                val prefixedTitle = normalizeTitle("$cleanedPrefix$title")
-                logger.debug("Trying prefix '$cleanedPrefix' (original: '$prefix') with title '$title' -> normalized: '$prefixedTitle'")
                 
-                // Use word boundary matching to prevent partial word matches
-                val prefixedResults = if (contentType != null) {
-                    iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(prefixedTitle, contentType)
-                } else {
-                    iptvContentRepository.findByNormalizedTitleWordBoundary(prefixedTitle)
+                // Try the title as-is first
+                val titleVariations = mutableListOf(title)
+                
+                // If title doesn't start with an article, try adding common articles
+                // This handles cases where IPTV content has "The Breakfast Club" but search query is "Breakfast Club"
+                if (!title.matches(Regex("^(?i)(the|a|an)\\s+.*"))) {
+                    titleVariations.add("The $title")
+                    titleVariations.add("A $title")
+                    titleVariations.add("An $title")
                 }
                 
-                val filteredPrefixedResults = prefixedResults.filter { it.providerName in configuredProviderNames }
-                
-                logger.debug("Prefix '$cleanedPrefix' returned ${filteredPrefixedResults.size} results (before filtering: ${prefixedResults.size})")
-                
-                if (filteredPrefixedResults.isNotEmpty()) {
-                    logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$title', returning early")
-                    // Filter by year if provided
-                    return filterByYear(filteredPrefixedResults, year)
+                for (titleVariation in titleVariations) {
+                    val prefixedTitle = normalizeTitle("$cleanedPrefix$titleVariation")
+                    logger.debug("Trying prefix '$cleanedPrefix' (original: '$prefix') with title '$titleVariation' -> normalized: '$prefixedTitle'")
+                    
+                    // Use word boundary matching to prevent partial word matches
+                    val prefixedResults = if (contentType != null) {
+                        iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(prefixedTitle, contentType)
+                    } else {
+                        iptvContentRepository.findByNormalizedTitleWordBoundary(prefixedTitle)
+                    }
+                    
+                    val filteredPrefixedResults = prefixedResults.filter { it.providerName in configuredProviderNames }
+                    
+                    logger.debug("Prefix '$cleanedPrefix' with title '$titleVariation' returned ${filteredPrefixedResults.size} results (before filtering: ${prefixedResults.size})")
+                    
+                    if (filteredPrefixedResults.isNotEmpty()) {
+                        logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$titleVariation', returning early")
+                        // Filter by year if provided
+                        return filterByYear(filteredPrefixedResults, year)
+                    }
                 }
             }
             logger.debug("No results found with any language prefix, falling back to search without prefix")
@@ -74,15 +88,51 @@ class IptvContentService(
         }
         
         // Fallback to search without prefix - search by title only (year excluded from search)
-        // Use word boundary matching to prevent partial word matches (e.g., "twister" won't match "twisters")
-        val results = if (contentType != null) {
+        // First try word boundary matching to prevent partial word matches (e.g., "twister" won't match "twisters")
+        val results = mutableListOf<IptvContentEntity>()
+        
+        // Try word boundary matching first
+        val wordBoundaryResults = if (contentType != null) {
             iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(normalizedTitle, contentType)
         } else {
             iptvContentRepository.findByNormalizedTitleWordBoundary(normalizedTitle)
         }
+        results.addAll(wordBoundaryResults)
+        
+        // If no results with word boundary matching, try fuzzy matching with LIKE
+        // This handles cases where the title might have articles or other words in between
+        // For example: searching "breakfast club" should match "en the breakfast club"
+        // The fuzzy search will catch article variations automatically, so we don't need to try them explicitly
+        if (results.isEmpty()) {
+            logger.debug("Word boundary search returned 0 results, trying fuzzy LIKE search for: $normalizedTitle")
+            val fuzzyResults = if (contentType != null) {
+                iptvContentRepository.findByNormalizedTitleContainingAndContentType(normalizedTitle, contentType)
+            } else {
+                iptvContentRepository.findByNormalizedTitleContaining(normalizedTitle)
+            }
+            
+            // Filter fuzzy results to only include those that contain the search terms as whole words/phrases
+            // This prevents partial matches like "breakfast" matching "breakfasting"
+            // This also handles article variations automatically (e.g., "breakfast club" matches "the breakfast club")
+            val filteredFuzzyResults = fuzzyResults.filter { entity ->
+                val entityTitle = entity.normalizedTitle ?: ""
+                // Check if all words from the search query appear as whole words in the entity title
+                val searchWords = normalizedTitle.split("\\s+".toRegex()).filter { it.isNotBlank() }
+                searchWords.all { word ->
+                    // Match whole word boundaries: word at start, end, or surrounded by spaces/non-word chars
+                    // Use word boundary regex that works in Kotlin
+                    Regex("(^|[^a-z0-9])$word([^a-z0-9]|$)", RegexOption.IGNORE_CASE).containsMatchIn(entityTitle)
+                }
+            }
+            
+            results.addAll(filteredFuzzyResults)
+        }
+        
+        // Remove duplicates (same entity might match multiple variations)
+        val uniqueResults = results.distinctBy { it.id }
         
         // Filter to only include content from currently configured providers
-        val filteredResults = results.filter { it.providerName in configuredProviderNames }
+        val filteredResults = uniqueResults.filter { it.providerName in configuredProviderNames }
         
         // Filter by year if provided
         return filterByYear(filteredResults, year)

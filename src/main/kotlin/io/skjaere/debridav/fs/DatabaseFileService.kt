@@ -67,7 +67,8 @@ class DatabaseFileService(
                 is DebridCachedTorrentContent -> debridFileRepository.unlinkFileFromTorrents(it)
                 is DebridCachedUsenetReleaseContent -> debridFileRepository.unlinkFileFromUsenet(it)
                 is io.skjaere.debridav.fs.DebridIptvContent -> {
-                    // IPTV content cleanup - no special unlinking needed
+                    // IPTV content can also be linked to torrents, so unlink it before deletion
+                    debridFileRepository.unlinkFileFromTorrents(it)
                 }
             }
             fileChunkCachingService.deleteChunksForFile(it)
