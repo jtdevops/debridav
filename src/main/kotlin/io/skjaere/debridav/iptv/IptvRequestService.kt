@@ -34,8 +34,8 @@ class IptvRequestService(
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService)
 
     @Transactional
-    fun addIptvContent(contentId: String, providerName: String, category: String): Boolean {
-        logger.info("Adding IPTV content: contentId=$contentId, provider=$providerName, category=$category")
+    fun addIptvContent(contentId: String, providerName: String, category: String, magnetTitle: String? = null): Boolean {
+        logger.info("Adding IPTV content: contentId=$contentId, provider=$providerName, category=$category, magnetTitle=$magnetTitle")
         
         val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
             ?: run {
@@ -48,9 +48,12 @@ class IptvRequestService(
             return false
         }
         
+        // Use magnet title if provided, otherwise use IPTV content title
+        val titleToUse = magnetTitle ?: iptvContent.title
+        
         // Check if this is a series that needs episode lookup
         if (iptvContent.contentType == ContentType.SERIES && iptvContent.url.startsWith("SERIES_PLACEHOLDER:")) {
-            return handleSeriesContent(iptvContent, providerName, category, contentId)
+            return handleSeriesContent(iptvContent, providerName, category, contentId, magnetTitle)
         }
         
         // For movies or series with direct URLs, resolve tokenized URL to actual URL
@@ -61,15 +64,25 @@ class IptvRequestService(
             return false
         }
         
+        // Extract media file extension from the resolved URL
+        val mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
+        
+        // Append media extension to the title (keep .IPTV suffix and add actual extension)
+        val fileNameWithExtension = if (mediaExtension != null) {
+            "$titleToUse.$mediaExtension"
+        } else {
+            titleToUse
+        }
+        
         // Create DebridIptvContent entity
         val debridIptvContent = DebridIptvContent(
-            originalPath = iptvContent.title,
+            originalPath = fileNameWithExtension,
             size = null, // IPTV streams may not have known size
             modified = Instant.now().toEpochMilli(),
             iptvUrl = resolvedUrl,
             iptvProviderName = providerName,
             iptvContentId = contentId,
-            mimeType = determineMimeType(iptvContent.title),
+            mimeType = determineMimeType(fileNameWithExtension),
             debridLinks = mutableListOf()
         )
         // Set foreign key reference for cascading deletes
@@ -77,7 +90,7 @@ class IptvRequestService(
         
         // Create IptvFile link
         val iptvFile = IptvFile(
-            path = iptvContent.title,
+            path = fileNameWithExtension,
             size = 0L, // IPTV streams may not have known size
             mimeType = debridIptvContent.mimeType ?: "video/mp4",
             link = resolvedUrl,
@@ -90,7 +103,18 @@ class IptvRequestService(
         // Determine file path - use category if provided, otherwise use default
         val categoryPath = categoryService.findByName(category)?.downloadPath 
             ?: debridavConfigurationProperties.downloadPath
-        val filePath = "$categoryPath/${sanitizeFileName(iptvContent.title)}"
+        
+        // Create folder structure: folder name without media extension, file inside with full name including extension
+        val sanitizedTitle = sanitizeFileName(fileNameWithExtension)
+        // Remove the media extension (last extension) for folder name, but keep .IPTV if present
+        val folderName = if (mediaExtension != null && sanitizedTitle.endsWith(".$mediaExtension")) {
+            sanitizedTitle.removeSuffix(".$mediaExtension")
+        } else {
+            sanitizedTitle.substringBeforeLast(".").takeIf { it != sanitizedTitle }
+                ?: sanitizedTitle
+        }
+        val fileName = sanitizedTitle
+        val filePath = "$categoryPath/$folderName/$fileName"
         
         // Generate hash from content ID - use original format for database compatibility
         // The database stores hashCode().toString() format, not hex
@@ -114,7 +138,8 @@ class IptvRequestService(
         iptvContent: IptvContentEntity,
         providerName: String,
         category: String,
-        seriesId: String
+        seriesId: String,
+        magnetTitle: String? = null
     ): Boolean {
         logger.info("Handling series content: seriesId=$seriesId, title=${iptvContent.title}")
         
@@ -187,12 +212,24 @@ class IptvRequestService(
             val extension = episode.container_extension ?: "mp4"
             val episodeUrl = "$baseUrl/series/$username/$password/${episode.id}.$extension"
             
-            // Create episode title
-            val episodeTitle = if (episode.season != null && episode.episode != null) {
-                "${iptvContent.title} - S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)} - ${episode.title}"
+            // Use magnet title if available, otherwise construct episode title from IPTV content
+            val episodeTitleBase = if (magnetTitle != null) {
+                // Use magnet title directly if provided (it should already be episode-specific)
+                magnetTitle
             } else {
-                "${iptvContent.title} - ${episode.title}"
+                // Construct episode title from IPTV content
+                if (episode.season != null && episode.episode != null) {
+                    "${iptvContent.title} - S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)} - ${episode.title}"
+                } else {
+                    "${iptvContent.title} - ${episode.title}"
+                }
             }
+            
+            // Extract media file extension from the episode URL
+            val mediaExtension = extractMediaExtensionFromUrl(episodeUrl) ?: extension
+            
+            // Append media extension to the episode title
+            val episodeTitle = "$episodeTitleBase.$mediaExtension"
             
             // Create DebridIptvContent entity for episode
             val debridIptvContent = DebridIptvContent(
@@ -219,8 +256,12 @@ class IptvRequestService(
             
             debridIptvContent.debridLinks.add(iptvFile)
             
-            // Determine file path
-            val filePath = "$categoryPath/${sanitizeFileName(episodeTitle)}"
+            // Create folder structure: folder name without media extension, file inside with full name including extension
+            val sanitizedTitle = sanitizeFileName(episodeTitle)
+            // Remove the media extension (last extension) for folder name
+            val folderName = sanitizedTitle.removeSuffix(".$mediaExtension")
+            val fileName = sanitizedTitle
+            val filePath = "$categoryPath/$folderName/$fileName"
             
             // Generate hash from episode content ID (series episodes use seriesId_episodeId format)
             // Use original format for database compatibility
@@ -472,6 +513,31 @@ class IptvRequestService(
             title.endsWith(".avi", ignoreCase = true) -> "video/x-msvideo"
             title.endsWith(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
             else -> "video/mp4" // Default
+        }
+    }
+    
+    /**
+     * Extracts the media file extension from an IPTV URL.
+     * URLs are typically in format: {BASE_URL}/movie/{USERNAME}/{PASSWORD}/401804493.mkv
+     * or: {BASE_URL}/series/{USERNAME}/{PASSWORD}/12345.mp4
+     * 
+     * @param url The resolved IPTV URL
+     * @return The file extension (without the dot), or null if not found
+     */
+    private fun extractMediaExtensionFromUrl(url: String): String? {
+        // Extract extension from URL - look for the last dot before any query parameters
+        val urlWithoutQuery = url.substringBefore("?")
+        val lastDotIndex = urlWithoutQuery.lastIndexOf(".")
+        if (lastDotIndex == -1 || lastDotIndex == urlWithoutQuery.length - 1) {
+            return null
+        }
+        
+        val extension = urlWithoutQuery.substring(lastDotIndex + 1)
+        // Validate it's a reasonable extension (alphanumeric, 2-5 chars)
+        return if (extension.matches(Regex("[a-zA-Z0-9]{2,5}"))) {
+            extension.lowercase()
+        } else {
+            null
         }
     }
     

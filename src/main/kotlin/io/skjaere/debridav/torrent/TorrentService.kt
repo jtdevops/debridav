@@ -53,12 +53,12 @@ class TorrentService(
         val iptvGuid = extractIptvGuidFromMagnet(magnet.magnet)
         if (iptvGuid != null && iptvGuid.startsWith("iptv://")) {
             logger.info("Detected IPTV content from magnet URI, GUID: $iptvGuid")
-            return@runBlocking handleIptvLink(iptvGuid, category)
+            return@runBlocking handleIptvLink(iptvGuid, category, magnet)
         }
         
         // Check if this is a direct IPTV link
         if (magnet.magnet.startsWith("iptv://")) {
-            return@runBlocking handleIptvLink(magnet.magnet, category)
+            return@runBlocking handleIptvLink(magnet.magnet, category, magnet)
         }
         
         // Check if this might be an IPTV hash (if Radarr sends hash directly)
@@ -92,7 +92,7 @@ class TorrentService(
         }
     }
     
-    private fun handleIptvLink(iptvLink: String, category: String): Boolean {
+    private fun handleIptvLink(iptvLink: String, category: String, magnet: TorrentMagnet? = null): Boolean {
         logger.info("Processing IPTV link: $iptvLink")
         
         // Parse IPTV link format: iptv://{hash}/{providerName}/{contentId}
@@ -125,9 +125,12 @@ class TorrentService(
             return false
         }
         
+        // Extract title from magnet URL if available, otherwise use IPTV content title
+        val magnetTitle = magnet?.let { getNameFromMagnet(it) }
+        
         // Add IPTV content (creates the virtual file)
         val success = runBlocking {
-            iptvRequestService.addIptvContent(contentId, providerName, category)
+            iptvRequestService.addIptvContent(contentId, providerName, category, magnetTitle)
         }
         
         if (!success) {
@@ -163,9 +166,10 @@ class TorrentService(
         
         torrent.category = categoryService.findByName(category)
             ?: run { categoryService.createCategory(category) }
-        // Use IPTV content title for torrent name, removing file extension if present
-        torrent.name = iptvContent.title.substringBeforeLast(".").takeIf { it != iptvContent.title }
-            ?: iptvContent.title
+        // Use magnet title if available, otherwise use IPTV content title, removing file extension if present
+        val titleToUse = magnet?.let { getNameFromMagnet(it) } ?: iptvContent.title
+        torrent.name = titleToUse.substringBeforeLast(".").takeIf { it != titleToUse }
+            ?: titleToUse
         torrent.created = Instant.now()
         torrent.hash = finalHash
         torrent.status = Status.LIVE
