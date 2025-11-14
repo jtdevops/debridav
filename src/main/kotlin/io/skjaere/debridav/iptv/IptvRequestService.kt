@@ -67,11 +67,31 @@ class IptvRequestService(
         // Extract media file extension from the resolved URL
         val mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
         
-        // Append media extension to the title (keep .IPTV suffix and add actual extension)
+        // Check if IPTV content title starts with any configured language prefix
+        // If not, extract language code and append it after .IPTV
+        val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
+        
+        // Build filename: insert language code between .IPTV and media extension if needed
         val fileNameWithExtension = if (mediaExtension != null) {
-            "$titleToUse.$mediaExtension"
+            if (languageCode != null && titleToUse.endsWith(".IPTV", ignoreCase = true)) {
+                // Insert language code between .IPTV and media extension
+                "${titleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
+            } else if (languageCode != null) {
+                // Language code but no .IPTV suffix, append it before extension
+                "$titleToUse-$languageCode.$mediaExtension"
+            } else {
+                // No language code, just append extension
+                "$titleToUse.$mediaExtension"
+            }
         } else {
-            titleToUse
+            // No media extension, append language code if present
+            if (languageCode != null && titleToUse.endsWith(".IPTV", ignoreCase = true)) {
+                "${titleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode"
+            } else if (languageCode != null) {
+                "$titleToUse-$languageCode"
+            } else {
+                titleToUse
+            }
         }
         
         // Create DebridIptvContent entity
@@ -228,8 +248,21 @@ class IptvRequestService(
             // Extract media file extension from the episode URL
             val mediaExtension = extractMediaExtensionFromUrl(episodeUrl) ?: extension
             
-            // Append media extension to the episode title
-            val episodeTitle = "$episodeTitleBase.$mediaExtension"
+            // Check if IPTV content title starts with any configured language prefix
+            // If not, extract language code and append it after .IPTV
+            val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
+            
+            // Build episode filename: insert language code between .IPTV and media extension if needed
+            val episodeTitle = if (languageCode != null && episodeTitleBase.endsWith(".IPTV", ignoreCase = true)) {
+                // Insert language code between .IPTV and media extension
+                "${episodeTitleBase.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
+            } else if (languageCode != null) {
+                // Language code but no .IPTV suffix, append it before extension
+                "$episodeTitleBase-$languageCode.$mediaExtension"
+            } else {
+                // No language code, just append extension
+                "$episodeTitleBase.$mediaExtension"
+            }
             
             // Create DebridIptvContent entity for episode
             val debridIptvContent = DebridIptvContent(
@@ -539,6 +572,45 @@ class IptvRequestService(
         } else {
             null
         }
+    }
+    
+    /**
+     * Checks if the IPTV content title starts with any configured language prefix.
+     * If not, extracts the language code from the beginning of the title.
+     * 
+     * Language code format: uppercase letters followed by '|' or '-' (e.g., "NL| ", "NL- ")
+     * 
+     * @param iptvContentTitle The IPTV content title (e.g., "NL| The Breakfast Club")
+     * @return The uppercase language code if not in configured prefixes, null otherwise
+     */
+    private fun extractLanguageCodeIfNotInPrefixes(iptvContentTitle: String): String? {
+        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        
+        // Check if title starts with any configured prefix (after stripping quotes)
+        val startsWithConfiguredPrefix = languagePrefixes.any { prefix ->
+            val cleanedPrefix = stripQuotes(prefix)
+            iptvContentTitle.startsWith(cleanedPrefix, ignoreCase = false)
+        }
+        
+        // If it starts with a configured prefix, don't extract language code
+        if (startsWithConfiguredPrefix) {
+            return null
+        }
+        
+        // Extract language code from the beginning of the title
+        // Pattern: uppercase letters followed by '|' or '-' and optional space
+        val languagePattern = Regex("^([A-Z]{2,})\\s*[|\\-]\\s*")
+        val match = languagePattern.find(iptvContentTitle)
+        
+        return match?.groupValues?.get(1)?.uppercase()
+    }
+    
+    /**
+     * Strips surrounding quotes (single or double) from a string.
+     * Used to clean language prefixes that may be quoted in configuration.
+     */
+    private fun stripQuotes(value: String): String {
+        return value.trim().removeSurrounding("\"").removeSurrounding("'")
     }
     
     private fun sanitizeFileName(fileName: String): String {
