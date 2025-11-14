@@ -2,6 +2,9 @@ package io.skjaere.debridav.iptv
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.timeout
+import io.ktor.client.request.head
+import io.ktor.http.isSuccess
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.DatabaseFileService
@@ -94,10 +97,15 @@ class IptvRequestService(
             }
         }
         
+        // Try to fetch actual file size from IPTV URL, fallback to estimated size
+        val fileSize = runBlocking {
+            fetchActualFileSize(resolvedUrl, iptvContent.contentType)
+        }
+        
         // Create DebridIptvContent entity
         val debridIptvContent = DebridIptvContent(
             originalPath = fileNameWithExtension,
-            size = null, // IPTV streams may not have known size
+            size = fileSize,
             modified = Instant.now().toEpochMilli(),
             iptvUrl = resolvedUrl,
             iptvProviderName = providerName,
@@ -111,7 +119,7 @@ class IptvRequestService(
         // Create IptvFile link
         val iptvFile = IptvFile(
             path = fileNameWithExtension,
-            size = 0L, // IPTV streams may not have known size
+            size = fileSize,
             mimeType = debridIptvContent.mimeType ?: "video/mp4",
             link = resolvedUrl,
             params = emptyMap(),
@@ -264,10 +272,15 @@ class IptvRequestService(
                 "$episodeTitleBase.$mediaExtension"
             }
             
+            // Try to fetch actual file size from IPTV URL, fallback to estimated size
+            val episodeFileSize = runBlocking {
+                fetchActualFileSize(episodeUrl, ContentType.SERIES)
+            }
+            
             // Create DebridIptvContent entity for episode
             val debridIptvContent = DebridIptvContent(
                 originalPath = episodeTitle,
-                size = null,
+                size = episodeFileSize,
                 modified = Instant.now().toEpochMilli(),
                 iptvUrl = episodeUrl,
                 iptvProviderName = providerName,
@@ -280,7 +293,7 @@ class IptvRequestService(
             // Create IptvFile link
             val iptvFile = IptvFile(
                 path = episodeTitle,
-                size = 0L,
+                size = episodeFileSize,
                 mimeType = debridIptvContent.mimeType ?: "video/mp4",
                 link = episodeUrl,
                 params = emptyMap(),
@@ -425,6 +438,61 @@ class IptvRequestService(
         // Pad hash to 40 chars (standard BTIH length) with zeros
         val btihHash = hash.lowercase().padEnd(40, '0').take(40)
         return "magnet:?xt=urn:btih:$btihHash&dn=$encodedTitle&tr=${java.net.URLEncoder.encode(guid, Charsets.UTF_8.name())}"
+    }
+    
+    /**
+     * Attempts to fetch the actual file size from the IPTV URL using HTTP HEAD request.
+     * Falls back to estimated size if HEAD request fails or Content-Length is not available.
+     * Uses retry logic based on streaming configuration.
+     * 
+     * @param url The resolved IPTV URL
+     * @param contentType The content type (for fallback estimation)
+     * @return The actual file size if available, otherwise estimated size
+     */
+    private suspend fun fetchActualFileSize(url: String, contentType: ContentType): Long {
+        val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
+        val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
+        val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
+        
+        for (attempt in 0..maxRetries) {
+            try {
+                val response = httpClient.head(url) {
+                    timeout {
+                        requestTimeoutMillis = 10000 // 10 second timeout
+                    }
+                }
+                
+                // Check if request was successful
+                if (!response.status.isSuccess()) {
+                    logger.debug("HTTP HEAD request returned non-success status ${response.status.value} for IPTV URL, using estimated size ($url)")
+                    return estimateIptvSize(contentType)
+                }
+                
+                val contentLength = response.headers["Content-Length"]?.toLongOrNull()
+                if (contentLength != null && contentLength > 0) {
+                    logger.debug("Retrieved actual file size from IPTV URL: $contentLength bytes ($url)")
+                    return contentLength
+                } else {
+                    logger.debug("Content-Length header not available for IPTV URL, using estimated size ($url)")
+                    return estimateIptvSize(contentType)
+                }
+            } catch (e: Exception) {
+                val isNetworkError = e.message?.contains("timeout", ignoreCase = true) == true ||
+                        e.message?.contains("connection", ignoreCase = true) == true ||
+                        e.message?.contains("network", ignoreCase = true) == true
+                
+                if (attempt < maxRetries) {
+                    val waitTime = if (isNetworkError) waitAfterNetworkError else delayBetweenRetries
+                    logger.debug("Failed to fetch file size from IPTV URL (attempt ${attempt + 1}/${maxRetries + 1}), retrying after ${waitTime.toMillis()}ms: ${e.message}")
+                    kotlinx.coroutines.delay(waitTime.toMillis())
+                } else {
+                    logger.warn("Failed to fetch file size from IPTV URL after ${maxRetries + 1} attempts ($url), using estimated size: ${e.message}")
+                }
+            }
+        }
+        
+        // Fallback to estimated size if all retries failed
+        return estimateIptvSize(contentType)
     }
     
     /**
