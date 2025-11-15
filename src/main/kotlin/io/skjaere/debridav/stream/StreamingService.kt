@@ -108,6 +108,8 @@ class StreamingService(
     private val localVideoService: LocalVideoService,
     private val httpClient: HttpClient,
     private val iptvConfigurationProperties: io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties?,
+    private val iptvConfigurationService: io.skjaere.debridav.iptv.configuration.IptvConfigurationService?,
+    private val iptvResponseFileService: io.skjaere.debridav.iptv.util.IptvResponseFileService?,
     prometheusRegistry: PrometheusRegistry
 ) {
     
@@ -135,6 +137,27 @@ class StreamingService(
         remotelyCachedEntity: RemotelyCachedEntity,
         httpRequestInfo: HttpRequestInfo = HttpRequestInfo(),
     ): StreamResult = coroutineScope {
+        // For IPTV content, make an initial login/test call to the provider before streaming
+        if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent) {
+            val iptvContent = remotelyCachedEntity.contents as io.skjaere.debridav.fs.DebridIptvContent
+            val providerName = iptvContent.iptvProviderName
+            if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null) {
+                try {
+                    val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+                    val providerConfig = providerConfigs.find { it.name == providerName }
+                    if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+                        logger.debug("Making initial login call to IPTV provider $providerName before streaming")
+                        val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService)
+                        val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
+                        if (!loginSuccess) {
+                            logger.warn("IPTV provider login verification failed for $providerName, but continuing with stream attempt")
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to make initial login call to IPTV provider $providerName: ${e.message}, continuing with stream attempt", e)
+                }
+            }
+        }
         val originalRange = Range(range?.start ?: 0, range?.finish ?: (debridLink.size!! - 1))
 
         // Check if we should serve local video file for ARR requests

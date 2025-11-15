@@ -138,7 +138,7 @@ class IptvRequestService(
         // Try to fetch actual file size from IPTV URL, fallback to estimated size
         logger.debug("Fetching file size for IPTV content - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
         val fileSize = runBlocking {
-            fetchActualFileSize(resolvedUrl, iptvContent.contentType)
+            fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
         }
         
         // Create DebridIptvContent entity
@@ -321,7 +321,7 @@ class IptvRequestService(
             
             // Try to fetch actual file size from IPTV URL, fallback to estimated size
             val episodeFileSize = runBlocking {
-                fetchActualFileSize(episodeUrl, ContentType.SERIES)
+                fetchActualFileSize(episodeUrl, ContentType.SERIES, providerName)
             }
             
             // Create DebridIptvContent entity for episode
@@ -496,9 +496,27 @@ class IptvRequestService(
      * 
      * @param url The resolved IPTV URL
      * @param contentType The content type (for fallback estimation)
+     * @param providerName The IPTV provider name (for login call before fetching)
      * @return The actual file size if available, otherwise estimated size
      */
-    private suspend fun fetchActualFileSize(url: String, contentType: ContentType): Long {
+    private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Long {
+        // Make an initial login/test call to the provider before fetching file size
+        if (providerName != null) {
+            try {
+                val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+                val providerConfig = providerConfigs.find { it.name == providerName }
+                if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+                    logger.debug("Making initial login call to IPTV provider $providerName before fetching file size")
+                    val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
+                    if (!loginSuccess) {
+                        logger.warn("IPTV provider login verification failed for $providerName, but continuing with file size fetch")
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("Failed to make initial login call to IPTV provider $providerName before fetching file size: ${e.message}, continuing with fetch attempt", e)
+            }
+        }
+        
         val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
         val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
         val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
@@ -624,10 +642,9 @@ class IptvRequestService(
         parts.add("BluRay")
         parts.add("x264")
         
-        // Add a group identifier
-        parts.add("IPTV")
-        
-        return parts.joinToString(".")
+        // Join parts with dots, then add release group with dash (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV")
+        val baseTitle = parts.joinToString(".")
+        return "$baseTitle-IPTV"
     }
     
     /**
@@ -641,6 +658,9 @@ class IptvRequestService(
     fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         return results.map { entity ->
+            // Log initial content title
+            logger.debug("Generating magnet title - initial content title: {}", entity.title)
+            
             // Generate infohash from providerName and contentId (now returns hex string)
             val infohash = generateIptvHash(entity.providerName, entity.contentId)
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
@@ -653,34 +673,24 @@ class IptvRequestService(
             var radarrTitle = formatTitleForRadarr(entity.title, year, quality)
             
             // Check if IPTV content title starts with any configured language prefix
-            // If not, extract language code and append it after .IPTV
+            // If not, extract language code and append it after -IPTV
             val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
-            if (languageCode != null && radarrTitle.endsWith(".IPTV", ignoreCase = true)) {
-                // Insert language code between .IPTV and media extension
-                radarrTitle = "${radarrTitle.removeSuffix(".IPTV")}.IPTV-$languageCode"
+            if (languageCode != null && radarrTitle.endsWith("-IPTV", ignoreCase = true)) {
+                // Insert language code between -IPTV (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV-NL")
+                radarrTitle = "${radarrTitle.removeSuffix("-IPTV")}-IPTV-$languageCode"
             } else if (languageCode != null) {
-                // Language code but no .IPTV suffix, append it before extension
+                // Language code but no -IPTV suffix, append it
                 radarrTitle = "$radarrTitle-$languageCode"
             }
             
-            // Try to resolve URL and extract media extension to append to title
-            // Skip for series placeholders as they don't have direct URLs
-            var mediaExtension: String? = null
-            if (!entity.url.startsWith("SERIES_PLACEHOLDER:")) {
-                try {
-                    val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
-                    mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
-                } catch (e: Exception) {
-                    logger.debug("Failed to resolve IPTV URL to extract media extension for search result: ${e.message}")
-                    // Continue without extension if URL resolution fails
-                }
-            }
+            // Log final magnet title
+            logger.debug("Generating magnet title - final magnet title: {}", radarrTitle)
             
-            // Always append an extension - use detected extension or default to mp4
-            val extensionToUse = mediaExtension ?: "mp4"
-            radarrTitle = "$radarrTitle.$extensionToUse"
+            // Note: The magnet title should NOT contain the media extension
+            // The extension will be added when creating the actual file, but the magnet title
+            // (used as folder name) should be without extension
             
-            // Create magnet URI for Radarr compatibility - use formatted title with extension
+            // Create magnet URI for Radarr compatibility - use formatted title without extension
             val magnetUri = createIptvMagnetUri(infohash, radarrTitle, guid)
             
             // Estimate size for Radarr compatibility
@@ -689,7 +699,7 @@ class IptvRequestService(
             IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
-                title = radarrTitle, // Use Radarr-formatted title with extension
+                title = radarrTitle, // Use Radarr-formatted title without extension
                 contentType = entity.contentType,
                 category = entity.category?.categoryName,
                 guid = guid,

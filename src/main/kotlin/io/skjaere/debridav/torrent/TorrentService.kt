@@ -166,10 +166,18 @@ class TorrentService(
         
         torrent.category = categoryService.findByName(category)
 ?: run { categoryService.createCategory(category) }
-        // Use magnet title if available, otherwise use IPTV content title, removing file extension if present
+        // Use magnet title if available, otherwise use IPTV content title
+        // Remove any media file extension from the title to use as folder name
         val titleToUse = magnet?.let { getNameFromMagnet(it) } ?: iptvContent.title
-        torrent.name = titleToUse.substringBeforeLast(".").takeIf { it != titleToUse }
-            ?: titleToUse
+        // Remove media extension if present (e.g., .mp4, .mkv, etc.)
+        val videoExtensions = listOf("mp4", "mkv", "avi", "ts", "mov", "wmv", "flv", "webm", "m4v", 
+            "m2ts", "mts", "vob", "ogv", "3gp", "asf", "rm", "rmvb")
+        val titleWithoutExtension = videoExtensions.firstOrNull { ext ->
+            titleToUse.endsWith(".$ext", ignoreCase = true)
+        }?.let { ext ->
+            titleToUse.removeSuffix(".$ext").removeSuffix(".${ext.uppercase()}")
+        } ?: titleToUse
+        torrent.name = titleWithoutExtension
         torrent.created = Instant.now()
         torrent.hash = finalHash
         torrent.status = Status.LIVE
