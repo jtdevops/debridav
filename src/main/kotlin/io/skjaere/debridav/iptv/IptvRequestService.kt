@@ -605,19 +605,20 @@ class IptvRequestService(
             
             // Try to resolve URL and extract media extension to append to title
             // Skip for series placeholders as they don't have direct URLs
+            var mediaExtension: String? = null
             if (!entity.url.startsWith("SERIES_PLACEHOLDER:")) {
                 try {
                     val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
-                    val mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
-                    if (mediaExtension != null) {
-                        // Append extension after language code if present
-                        radarrTitle = "$radarrTitle.$mediaExtension"
-                    }
+                    mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
                 } catch (e: Exception) {
                     logger.debug("Failed to resolve IPTV URL to extract media extension for search result: ${e.message}")
                     // Continue without extension if URL resolution fails
                 }
             }
+            
+            // Always append an extension - use detected extension or default to mp4
+            val extensionToUse = mediaExtension ?: "mp4"
+            radarrTitle = "$radarrTitle.$extensionToUse"
             
             // Create magnet URI for Radarr compatibility - use formatted title with extension
             val magnetUri = createIptvMagnetUri(infohash, radarrTitle, guid)
