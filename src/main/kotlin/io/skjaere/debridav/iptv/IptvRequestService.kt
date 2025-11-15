@@ -60,8 +60,11 @@ class IptvRequestService(
         }
         
         // For movies or series with direct URLs, resolve tokenized URL to actual URL
+        logger.debug("IPTV content original URL (tokenized): {}", iptvContent.url)
         val resolvedUrl = try {
-            iptvContentService.resolveIptvUrl(iptvContent.url, providerName)
+            val resolved = iptvContentService.resolveIptvUrl(iptvContent.url, providerName)
+            logger.debug("IPTV content resolved URL (tokens replaced): {}", resolved)
+            resolved
         } catch (e: Exception) {
             logger.error("Failed to resolve IPTV URL for provider $providerName", e)
             return false
@@ -98,6 +101,7 @@ class IptvRequestService(
         }
         
         // Try to fetch actual file size from IPTV URL, fallback to estimated size
+        logger.debug("Fetching file size for IPTV content - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
         val fileSize = runBlocking {
             fetchActualFileSize(resolvedUrl, iptvContent.contentType)
         }
@@ -271,6 +275,9 @@ class IptvRequestService(
                 // No language code, just append extension
                 "$episodeTitleBase.$mediaExtension"
             }
+            
+            // Log episode URL information
+            logger.debug("Fetching file size for IPTV episode - original URL: {}, episode URL: {}", iptvContent.url, episodeUrl)
             
             // Try to fetch actual file size from IPTV URL, fallback to estimated size
             val episodeFileSize = runBlocking {
