@@ -195,6 +195,22 @@ class DebridFileResource(
             val fileName = file.name ?: "unknown"
             val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
+            // Check if IPTV provider should bypass local video serving
+            val iptvProviderName = if (file.contents is io.skjaere.debridav.fs.DebridIptvContent) {
+                (file.contents as io.skjaere.debridav.fs.DebridIptvContent).iptvProviderName
+            } else {
+                null
+            }
+            val shouldBypass = debridavConfigurationProperties.shouldBypassLocalVideoForIptvProvider(iptvProviderName)
+            
+            if (shouldBypass) {
+                // Return actual content type from database for IPTV content
+                val mimeType = file.mimeType ?: "video/mp4"
+                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_TYPE: file={}, iptvProvider={}, mimeType={}", 
+                    fileName, iptvProviderName, mimeType)
+                return mimeType
+            }
+            
             // Check if the file path matches the configured regex pattern
             if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
                 // Get MIME type from the local video file
@@ -228,6 +244,21 @@ class DebridFileResource(
             val fileName = file.name ?: "unknown"
             val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
+            // Check if IPTV provider should bypass local video serving
+            val iptvProviderName = if (file.contents is io.skjaere.debridav.fs.DebridIptvContent) {
+                (file.contents as io.skjaere.debridav.fs.DebridIptvContent).iptvProviderName
+            } else {
+                null
+            }
+            val shouldBypass = debridavConfigurationProperties.shouldBypassLocalVideoForIptvProvider(iptvProviderName)
+            
+            if (shouldBypass) {
+                // Return actual file size from database for IPTV content
+                val externalFileSize = file.contents!!.size!!.toLong()
+                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_LENGTH: file={}, iptvProvider={}, size={} bytes", 
+                    fileName, iptvProviderName, externalFileSize)
+                return externalFileSize
+            }
             
             // Check if the file path matches the configured regex pattern
             if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath)) {
