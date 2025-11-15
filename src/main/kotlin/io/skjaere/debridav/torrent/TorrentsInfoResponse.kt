@@ -81,6 +81,24 @@ data class TorrentsInfoResponse(
 ) {
     companion object {
         fun ofTorrent(torrent: Torrent, downloadDir: String): TorrentsInfoResponse {
+            // For IPTV torrents, contentPath should include the filename
+            // Check if this is an IPTV torrent by checking if files contain DebridIptvContent
+            // Regular torrents use DebridCachedTorrentContent, so they won't match this check
+            val isIptvTorrent = torrent.files.any { file ->
+                file.contents is io.skjaere.debridav.fs.DebridIptvContent
+            }
+            
+            val contentPath = if (isIptvTorrent && torrent.files.isNotEmpty()) {
+                // IPTV-specific: contentPath = downloadDir + savePath + "/" + filename
+                // This is needed because IPTV files are stored in a folder structure
+                val fileName = torrent.files.first().name ?: torrent.name
+                "$downloadDir${torrent.savePath}/$fileName"
+            } else {
+                // Regular torrents (DebridCachedTorrentContent): contentPath = downloadDir + savePath (folder only)
+                // This preserves the original behavior for regular torrents
+                "$downloadDir${torrent.savePath}"
+            }
+            
             return TorrentsInfoResponse(
                 addedOn = torrent.created!!.toEpochMilli().toInt(),
                 amountLeft = 0,
@@ -89,7 +107,7 @@ data class TorrentsInfoResponse(
                 category = torrent.category!!.name!!,
                 completed = 1,
                 completionOn = torrent.created!!.toEpochMilli().toInt(),
-                contentPath = "$downloadDir${torrent.savePath}",
+                contentPath = contentPath,
                 dlLimit = 0,
                 dlSpeed = 0,
                 downloaded = 100,

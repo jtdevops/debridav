@@ -165,7 +165,7 @@ class TorrentService(
         }
         
         torrent.category = categoryService.findByName(category)
-            ?: run { categoryService.createCategory(category) }
+?: run { categoryService.createCategory(category) }
         // Use magnet title if available, otherwise use IPTV content title, removing file extension if present
         val titleToUse = magnet?.let { getNameFromMagnet(it) } ?: iptvContent.title
         torrent.name = titleToUse.substringBeforeLast(".").takeIf { it != titleToUse }
@@ -173,8 +173,12 @@ class TorrentService(
         torrent.created = Instant.now()
         torrent.hash = finalHash
         torrent.status = Status.LIVE
-        torrent.savePath = file.directory?.path?.let { "$it/${file.name}" }
-            ?: "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
+        // For IPTV files, savePath should match the pattern used by regular torrents
+        // Regular torrents use: ${downloadPath}/${torrent.name} (folder path only)
+        // We need to construct the folder path from the file's directory
+        val directoryPath = file.directory?.path ?: debridavConfigurationProperties.downloadPath
+        // savePath should be the folder path (not including filename), matching regular torrents
+        torrent.savePath = directoryPath
         torrent.files = mutableListOf(file)
         
         torrentRepository.save(torrent)
