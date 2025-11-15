@@ -3,7 +3,9 @@ package io.skjaere.debridav.iptv
 import com.fasterxml.jackson.annotation.JsonProperty
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.timeout
-import io.ktor.client.request.head
+import io.ktor.client.request.get
+import io.ktor.client.request.headers
+import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
@@ -448,8 +450,10 @@ class IptvRequestService(
     }
     
     /**
-     * Attempts to fetch the actual file size from the IPTV URL using HTTP HEAD request.
-     * Falls back to estimated size if HEAD request fails or Content-Length is not available.
+     * Attempts to fetch the actual file size from the IPTV URL using HTTP GET request with Range header (bytes=0-0).
+     * Follows redirects automatically. Extracts file size from Content-Range header (e.g., "bytes 0-0/1882075726").
+     * Falls back to Content-Length header if Content-Range is not available.
+     * Falls back to estimated size if request fails or headers are not available.
      * Uses retry logic based on streaming configuration.
      * 
      * @param url The resolved IPTV URL
@@ -463,7 +467,11 @@ class IptvRequestService(
         
         for (attempt in 0..maxRetries) {
             try {
-                val response = httpClient.head(url) {
+                val response = httpClient.get(url) {
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                        append(HttpHeaders.Range, "bytes=0-0")
+                    }
                     timeout {
                         requestTimeoutMillis = 10000 // 10 second timeout
                     }
@@ -471,16 +479,30 @@ class IptvRequestService(
                 
                 // Check if request was successful
                 if (!response.status.isSuccess()) {
-                    logger.debug("HTTP HEAD request returned non-success status ${response.status.value} for IPTV URL, using estimated size ($url)")
+                    logger.debug("HTTP GET request returned non-success status ${response.status.value} for IPTV URL, using estimated size ($url)")
                     return estimateIptvSize(contentType)
                 }
                 
+                // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
+                val contentRange = response.headers["Content-Range"]
+                if (contentRange != null) {
+                    // Parse Content-Range: bytes 0-0/1882075726
+                    val rangeRegex = Regex("bytes\\s+\\d+-\\d+/(\\d+)")
+                    val matchResult = rangeRegex.find(contentRange)
+                    val totalSize = matchResult?.groupValues?.get(1)?.toLongOrNull()
+                    if (totalSize != null && totalSize > 0) {
+                        logger.debug("Retrieved actual file size from IPTV URL Content-Range header: $totalSize bytes ($url)")
+                        return totalSize
+                    }
+                }
+                
+                // Fallback to Content-Length header if Content-Range is not available
                 val contentLength = response.headers["Content-Length"]?.toLongOrNull()
                 if (contentLength != null && contentLength > 0) {
-                    logger.debug("Retrieved actual file size from IPTV URL: $contentLength bytes ($url)")
+                    logger.debug("Retrieved actual file size from IPTV URL Content-Length header: $contentLength bytes ($url)")
                     return contentLength
                 } else {
-                    logger.debug("Content-Length header not available for IPTV URL, using estimated size ($url)")
+                    logger.debug("Content-Range and Content-Length headers not available for IPTV URL, using estimated size ($url)")
                     return estimateIptvSize(contentType)
                 }
             } catch (e: Exception) {

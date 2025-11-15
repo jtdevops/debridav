@@ -107,6 +107,7 @@ class StreamingService(
     private val debridLinkService: DebridLinkService,
     private val localVideoService: LocalVideoService,
     private val httpClient: HttpClient,
+    private val iptvConfigurationProperties: io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties?,
     prometheusRegistry: PrometheusRegistry
 ) {
     
@@ -296,10 +297,12 @@ class StreamingService(
                     .limitForPeriod(100)
                     .limitRefreshPeriod(java.time.Duration.ofSeconds(1))
                     .build())
+                val iptvUserAgent = iptvConfigurationProperties?.userAgent
                 val linkPreparer = DefaultStreamableLinkPreparer(
                     httpClient,
                     debridavConfigProperties,
-                    rateLimiter
+                    rateLimiter,
+                    iptvUserAgent
                 )
                 linkPreparer.prepareStreamUrl(source.cachedFile, range)
             }
@@ -309,10 +312,12 @@ class StreamingService(
                 .limitForPeriod(100)
                 .limitRefreshPeriod(java.time.Duration.ofSeconds(1))
                 .build())
+            val iptvUserAgent = iptvConfigurationProperties?.userAgent
             val linkPreparer = DefaultStreamableLinkPreparer(
                 httpClient,
                 debridavConfigProperties,
-                rateLimiter
+                rateLimiter,
+                iptvUserAgent
             )
             linkPreparer.prepareStreamUrl(source.cachedFile, range)
         }
