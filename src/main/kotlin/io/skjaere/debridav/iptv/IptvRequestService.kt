@@ -73,14 +73,47 @@ class IptvRequestService(
         }
         
         // Extract media file extension from the resolved URL
-        val mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
+        val urlMediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
+        
+        // Check if magnet title already contains a media extension
+        // Common video extensions to check
+        val videoExtensions = listOf("mp4", "mkv", "avi", "ts", "mov", "wmv", "flv", "webm", "m4v", 
+            "m2ts", "mts", "vob", "ogv", "3gp", "asf", "rm", "rmvb")
+        val titleMediaExtension = videoExtensions.firstOrNull { ext ->
+            titleToUse.endsWith(".$ext", ignoreCase = true)
+        }
+        
+        // Use extension from title if present, otherwise use extension from URL
+        val mediaExtension = titleMediaExtension ?: urlMediaExtension
+        
+        // Get title without extension for folder name (if title had extension, remove it)
+        val titleWithoutExtension = if (titleMediaExtension != null) {
+            titleToUse.removeSuffix(".$titleMediaExtension").removeSuffix(".${titleMediaExtension.uppercase()}")
+        } else {
+            titleToUse
+        }
         
         // Check if IPTV content title starts with any configured language prefix
         // If not, extract language code and append it after .IPTV
         val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
         
         // Build filename: insert language code between .IPTV and media extension if needed
-        val fileNameWithExtension = if (mediaExtension != null) {
+        // If title already had extension, use it as-is (don't add another)
+        val fileNameWithExtension = if (titleMediaExtension != null) {
+            // Title already has extension - use it as-is, but handle language code if needed
+            if (languageCode != null && titleWithoutExtension.endsWith(".IPTV", ignoreCase = true)) {
+                // Insert language code between .IPTV and media extension
+                "${titleWithoutExtension.removeSuffix(".IPTV")}.IPTV-$languageCode.$titleMediaExtension"
+            } else if (languageCode != null) {
+                // Language code but no .IPTV suffix, insert before extension
+                val baseWithoutExt = titleWithoutExtension
+                "$baseWithoutExt-$languageCode.$titleMediaExtension"
+            } else {
+                // No language code, use title as-is
+                titleToUse
+            }
+        } else if (mediaExtension != null) {
+            // Title doesn't have extension, add it
             if (languageCode != null && titleToUse.endsWith(".IPTV", ignoreCase = true)) {
                 // Insert language code between .IPTV and media extension
                 "${titleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
@@ -92,7 +125,7 @@ class IptvRequestService(
                 "$titleToUse.$mediaExtension"
             }
         } else {
-            // No media extension, append language code if present
+            // No media extension available, append language code if present
             if (languageCode != null && titleToUse.endsWith(".IPTV", ignoreCase = true)) {
                 "${titleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode"
             } else if (languageCode != null) {
@@ -139,15 +172,20 @@ class IptvRequestService(
             ?: debridavConfigurationProperties.downloadPath
         
         // Create folder structure: folder name without media extension, file inside with full name including extension
-        val sanitizedTitle = sanitizeFileName(fileNameWithExtension)
-        // Remove the media extension (last extension) for folder name, but keep .IPTV if present
-        val folderName = if (mediaExtension != null && sanitizedTitle.endsWith(".$mediaExtension")) {
-            sanitizedTitle.removeSuffix(".$mediaExtension")
+        // Start with titleWithoutExtension (which already has extension removed if it was in magnet title)
+        // Then apply language code if needed, but don't add extension to folder name
+        val folderBaseName = if (languageCode != null && titleWithoutExtension.endsWith(".IPTV", ignoreCase = true)) {
+            // Insert language code between .IPTV (but no extension for folder)
+            "${titleWithoutExtension.removeSuffix(".IPTV")}.IPTV-$languageCode"
+        } else if (languageCode != null) {
+            // Language code but no .IPTV suffix, append it
+            "$titleWithoutExtension-$languageCode"
         } else {
-            sanitizedTitle.substringBeforeLast(".").takeIf { it != sanitizedTitle }
-                ?: sanitizedTitle
+            // No language code, use titleWithoutExtension as-is
+            titleWithoutExtension
         }
-        val fileName = sanitizedTitle
+        val folderName = sanitizeFileName(folderBaseName)
+        val fileName = sanitizeFileName(fileNameWithExtension)
         val filePath = "$categoryPath/$folderName/$fileName"
         
         // Generate hash from content ID - use original format for database compatibility
