@@ -583,9 +583,36 @@ class IptvRequestService(
             val quality = extractQualityFromTitle(entity.title)
             
             // Format title for Radarr compatibility (includes quality, codec, etc.)
-            val radarrTitle = formatTitleForRadarr(entity.title, year, quality)
+            var radarrTitle = formatTitleForRadarr(entity.title, year, quality)
             
-            // Create magnet URI for Radarr compatibility - use formatted title
+            // Check if IPTV content title starts with any configured language prefix
+            // If not, extract language code and append it after .IPTV
+            val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
+            if (languageCode != null && radarrTitle.endsWith(".IPTV", ignoreCase = true)) {
+                // Insert language code between .IPTV and media extension
+                radarrTitle = "${radarrTitle.removeSuffix(".IPTV")}.IPTV-$languageCode"
+            } else if (languageCode != null) {
+                // Language code but no .IPTV suffix, append it before extension
+                radarrTitle = "$radarrTitle-$languageCode"
+            }
+            
+            // Try to resolve URL and extract media extension to append to title
+            // Skip for series placeholders as they don't have direct URLs
+            if (!entity.url.startsWith("SERIES_PLACEHOLDER:")) {
+                try {
+                    val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
+                    val mediaExtension = extractMediaExtensionFromUrl(resolvedUrl)
+                    if (mediaExtension != null) {
+                        // Append extension after language code if present
+                        radarrTitle = "$radarrTitle.$mediaExtension"
+                    }
+                } catch (e: Exception) {
+                    logger.debug("Failed to resolve IPTV URL to extract media extension for search result: ${e.message}")
+                    // Continue without extension if URL resolution fails
+                }
+            }
+            
+            // Create magnet URI for Radarr compatibility - use formatted title with extension
             val magnetUri = createIptvMagnetUri(infohash, radarrTitle, guid)
             
             // Estimate size for Radarr compatibility
@@ -594,7 +621,7 @@ class IptvRequestService(
             IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
-                title = radarrTitle, // Use Radarr-formatted title
+                title = radarrTitle, // Use Radarr-formatted title with extension
                 contentType = entity.contentType,
                 category = entity.category?.categoryName,
                 guid = guid,
