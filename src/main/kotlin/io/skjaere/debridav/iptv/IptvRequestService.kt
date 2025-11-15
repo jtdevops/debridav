@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class IptvRequestService(
@@ -37,6 +38,10 @@ class IptvRequestService(
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService)
+    
+    // Rate limiting for IPTV provider login calls: max 1 call per minute per provider
+    private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
+    private val IPTV_LOGIN_RATE_LIMIT_MS = 60_000L // 1 minute
 
     @Transactional
     fun addIptvContent(contentId: String, providerName: String, category: String, magnetTitle: String? = null): Boolean {
@@ -501,15 +506,26 @@ class IptvRequestService(
      */
     private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Long {
         // Make an initial login/test call to the provider before fetching file size
+        // Rate limiting: max 1 call per minute per provider
         if (providerName != null) {
             try {
-                val providerConfigs = iptvConfigurationService.getProviderConfigurations()
-                val providerConfig = providerConfigs.find { it.name == providerName }
-                if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
-                    logger.debug("Making initial login call to IPTV provider $providerName before fetching file size")
-                    val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
-                    if (!loginSuccess) {
-                        logger.warn("IPTV provider login verification failed for $providerName, but continuing with file size fetch")
+                val now = System.currentTimeMillis()
+                val lastCallTime = iptvLoginCallTimestamps[providerName] ?: 0L
+                val timeSinceLastCall = now - lastCallTime
+                
+                if (timeSinceLastCall < IPTV_LOGIN_RATE_LIMIT_MS) {
+                    logger.debug("Skipping IPTV provider login call for $providerName before fetching file size (rate limited, last call was ${timeSinceLastCall}ms ago)")
+                } else {
+                    val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+                    val providerConfig = providerConfigs.find { it.name == providerName }
+                    if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+                        logger.debug("Making initial login call to IPTV provider $providerName before fetching file size")
+                        val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
+                        // Update timestamp after successful call
+                        iptvLoginCallTimestamps[providerName] = now
+                        if (!loginSuccess) {
+                            logger.warn("IPTV provider login verification failed for $providerName, but continuing with file size fetch")
+                        }
                     }
                 }
             } catch (e: Exception) {

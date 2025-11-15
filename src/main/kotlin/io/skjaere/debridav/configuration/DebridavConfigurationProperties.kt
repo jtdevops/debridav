@@ -57,7 +57,8 @@ data class DebridavConfigurationProperties(
     val rcloneArrsLocalVideoPathRegex: String? = null, // Regex pattern to match file paths for local video serving
     val rcloneArrsLocalVideoMinSizeKb: Long? = null, // Minimum file size in KB to use local video (smaller files served externally)
     val rcloneArrsUserAgentPattern: String?, // User agent pattern for ARR detection
-    val rcloneArrsHostnamePattern: String? // Hostname pattern for ARR detection
+    val rcloneArrsHostnamePattern: String?, // Hostname pattern for ARR detection
+    val rcloneArrsLocalVideoFileIptvBypassProviders: String? = null // Comma-separated list of IPTV provider names to bypass local video serving (use "*" for all providers)
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -154,6 +155,31 @@ data class DebridavConfigurationProperties(
         } catch (e: Exception) {
             false // Invalid regex, don't serve
         }
+    }
+    
+    /**
+     * Checks if an IPTV provider should bypass local video file serving for ARR requests.
+     * Returns true if the provider should bypass (use direct IPTV provider instead of local files).
+     * 
+     * @param iptvProviderName The IPTV provider name to check
+     * @return true if provider should bypass local video serving, false otherwise
+     */
+    fun shouldBypassLocalVideoForIptvProvider(iptvProviderName: String?): Boolean {
+        if (iptvProviderName == null || rcloneArrsLocalVideoFileIptvBypassProviders.isNullOrBlank()) {
+            return false
+        }
+        
+        val bypassProviders = rcloneArrsLocalVideoFileIptvBypassProviders.split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        
+        // Check if "*" is in the list (all providers bypass)
+        if (bypassProviders.contains("*")) {
+            return true
+        }
+        
+        // Check if the specific provider is in the list
+        return bypassProviders.contains(iptvProviderName)
     }
 
     /**

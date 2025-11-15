@@ -126,6 +126,10 @@ class StreamingService(
     private val activeInputStreams = ConcurrentLinkedQueue<InputStreamingContext>()
     private val activeDownloads = ConcurrentHashMap<String, DownloadTrackingContext>()
     private val completedDownloads = ConcurrentLinkedQueue<DownloadTrackingContext>()
+    
+    // Rate limiting for IPTV provider login calls: max 1 call per minute per provider
+    private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
+    private val IPTV_LOGIN_RATE_LIMIT_MS = 60_000L // 1 minute
 
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -138,19 +142,36 @@ class StreamingService(
         httpRequestInfo: HttpRequestInfo = HttpRequestInfo(),
     ): StreamResult = coroutineScope {
         // For IPTV content, make an initial login/test call to the provider before streaming
+        // Skip login call if this is an ARR request AND provider is not in bypass list (will use local video files, no external calls needed)
         if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent) {
             val iptvContent = remotelyCachedEntity.contents as io.skjaere.debridav.fs.DebridIptvContent
             val providerName = iptvContent.iptvProviderName
-            if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null) {
+            val isArrRequest = debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)
+            val shouldBypass = providerName != null && debridavConfigProperties.shouldBypassLocalVideoForIptvProvider(providerName)
+            
+            if (isArrRequest && !shouldBypass) {
+                logger.debug("Skipping IPTV provider login call for ARR request (will use local video file, provider=$providerName)")
+            } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null) {
                 try {
-                    val providerConfigs = iptvConfigurationService.getProviderConfigurations()
-                    val providerConfig = providerConfigs.find { it.name == providerName }
-                    if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
-                        logger.debug("Making initial login call to IPTV provider $providerName before streaming")
-                        val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService)
-                        val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
-                        if (!loginSuccess) {
-                            logger.warn("IPTV provider login verification failed for $providerName, but continuing with stream attempt")
+                    // Rate limiting: max 1 call per minute per provider
+                    val now = System.currentTimeMillis()
+                    val lastCallTime = iptvLoginCallTimestamps[providerName] ?: 0L
+                    val timeSinceLastCall = now - lastCallTime
+                    
+                    if (timeSinceLastCall < IPTV_LOGIN_RATE_LIMIT_MS) {
+                        logger.debug("Skipping IPTV provider login call for $providerName (rate limited, last call was ${timeSinceLastCall}ms ago)")
+                    } else {
+                        val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+                        val providerConfig = providerConfigs.find { it.name == providerName }
+                        if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+                            logger.debug("Making initial login call to IPTV provider $providerName before streaming")
+                            val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService)
+                            val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
+                            // Update timestamp after successful call
+                            iptvLoginCallTimestamps[providerName] = now
+                            if (!loginSuccess) {
+                                logger.warn("IPTV provider login verification failed for $providerName, but continuing with stream attempt")
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -165,34 +186,47 @@ class StreamingService(
             val fileName = remotelyCachedEntity.name ?: "unknown"
             val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
             
-            logger.debug("LOCAL_VIDEO_CHECK: file={}, fullPath={}, shouldServeLocalVideoForArrs=true", fileName, fullPath)
-            
-            // Check if the file path matches the configured regex pattern
-            if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
-                logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}, will serve external file", 
-                    fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+            // Check if IPTV provider should bypass local video serving
+            val iptvProviderName = if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent) {
+                (remotelyCachedEntity.contents as io.skjaere.debridav.fs.DebridIptvContent).iptvProviderName
             } else {
-                // Only apply local video serving to media files, not subtitles or other files
-                if (isMediaFile(fileName)) {
-                    // Get the external file size to check against the minimum size threshold
-                    val externalFileSize = debridLink.size ?: 0L
-                    
-                    // Check if the file is large enough to use local video serving
-                    if (debridavConfigProperties.shouldUseLocalVideoForSize(externalFileSize)) {
-                        logger.debug("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}",
-                            fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo, 
-                            externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
-                        
-                        val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
-                        return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
-                    } else {
-                        logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_TOO_SMALL: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}, will serve external file", 
-                            fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex, 
-                            externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
-                    }
-                } else {
-                    logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_NOT_MEDIA: file={}, fullPath={}, regex={}, isMediaFile=false, will serve external file", 
+                null
+            }
+            
+            val shouldBypass = debridavConfigProperties.shouldBypassLocalVideoForIptvProvider(iptvProviderName)
+            if (shouldBypass) {
+                logger.debug("LOCAL_VIDEO_BYPASS: file={}, iptvProvider={}, bypassing local video serving, will serve from IPTV provider", 
+                    fileName, iptvProviderName)
+            } else {
+                logger.debug("LOCAL_VIDEO_CHECK: file={}, fullPath={}, shouldServeLocalVideoForArrs=true", fileName, fullPath)
+                
+                // Check if the file path matches the configured regex pattern
+                if (!debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
+                    logger.debug("LOCAL_VIDEO_PATH_NOT_MATCHED: file={}, fullPath={}, regex={}, will serve external file", 
                         fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+                } else {
+                    // Only apply local video serving to media files, not subtitles or other files
+                    if (isMediaFile(fileName)) {
+                        // Get the external file size to check against the minimum size threshold
+                        val externalFileSize = debridLink.size ?: 0L
+                        
+                        // Check if the file is large enough to use local video serving
+                        if (debridavConfigProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                            logger.debug("LOCAL_VIDEO_SERVING_REQUEST: file={}, range={}-{}, source={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}",
+                                fileName, originalRange.start, originalRange.finish, httpRequestInfo.sourceInfo, 
+                                externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                            
+                            val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
+                            return@coroutineScope if (success) StreamResult.OK else StreamResult.IO_ERROR
+                        } else {
+                            logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_TOO_SMALL: file={}, fullPath={}, regex={}, isMediaFile=true, externalSize={} bytes, minSizeKb={}, will serve external file", 
+                                fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex, 
+                                externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                        }
+                    } else {
+                        logger.debug("LOCAL_VIDEO_PATH_MATCHED_BUT_NOT_MEDIA: file={}, fullPath={}, regex={}, isMediaFile=false, will serve external file", 
+                            fileName, fullPath, debridavConfigProperties.rcloneArrsLocalVideoPathRegex)
+                    }
                 }
             }
         } else {
