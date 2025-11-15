@@ -98,9 +98,9 @@ class IptvApiController(
             return ResponseEntity.ok(emptyList())
         }
         
-        logger.info("Searching IPTV content with title='{}', year={}, contentType={}, season={}, episode={}", 
-            searchQuery.title, searchQuery.year, contentType, season, episode)
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType)
+        logger.info("Searching IPTV content with title='{}', year={}, contentType={}, season={}, episode={}, useArticleVariations={}", 
+            searchQuery.title, searchQuery.year, contentType, season, episode, searchQuery.useArticleVariations)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations)
         logger.info("Search returned {} results", results.size)
         if (results.isNotEmpty()) {
             logger.debug("First result sample: {}", results.first())
@@ -113,7 +113,8 @@ class IptvApiController(
      */
     private data class SearchQuery(
         val title: String,
-        val year: Int?
+        val year: Int?,
+        val useArticleVariations: Boolean = false // Whether to use article variations (The, A, An) in search
     )
     
     /**
@@ -146,9 +147,11 @@ class IptvApiController(
             if (metadata != null) {
                 logger.info("Successfully resolved IMDB ID '$imdbId' to title: '${metadata.title}' (year: ${metadata.year})")
                 // Return title and year separately - we'll search by title only and filter by year
+                // Don't use article variations when metadata is provided (useArticleVariations = false)
                 return SearchQuery(
                     title = metadata.title,
-                    year = metadata.year
+                    year = metadata.year,
+                    useArticleVariations = false
                 )
             } else {
                 logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata, falling back to next priority")
@@ -159,21 +162,21 @@ class IptvApiController(
         val qParam = q?.takeIf { it.isNotBlank() }
         if (qParam != null) {
             logger.debug("Using 'q' parameter: '$qParam'")
-            return extractTitleAndYear(qParam)
+            return extractTitleAndYear(qParam, useArticleVariations = true)
         }
         
         // Priority 3: Use 'qTest' parameter (testing data)
         val qTestParam = qTest?.takeIf { it.isNotBlank() }
         if (qTestParam != null) {
             logger.debug("Using 'qTest' parameter (testing): '$qTestParam'")
-            return extractTitleAndYear(qTestParam)
+            return extractTitleAndYear(qTestParam, useArticleVariations = true)
         }
         
         // Priority 4: Fallback to legacy 'query' parameter
         val queryParam = query?.takeIf { it.isNotBlank() }
         if (queryParam != null) {
             logger.debug("Using legacy 'query' parameter: '$queryParam'")
-            return extractTitleAndYear(queryParam)
+            return extractTitleAndYear(queryParam, useArticleVariations = true)
         }
         
         return null
@@ -185,8 +188,11 @@ class IptvApiController(
      * - "Title (1996)"
      * - "Title 1996"
      * - "Title"
+     * 
+     * @param query The query string to parse
+     * @param useArticleVariations Whether to use article variations (The, A, An) in search
      */
-    private fun extractTitleAndYear(query: String): SearchQuery {
+    private fun extractTitleAndYear(query: String, useArticleVariations: Boolean = false): SearchQuery {
         // Try to extract year from patterns like "Title (1996)" or "Title 1996"
         val yearPattern = Regex("""\s*\((\d{4})\)\s*$|\s+(\d{4})\s*$""")
         val match = yearPattern.find(query)
@@ -198,12 +204,12 @@ class IptvApiController(
             val title = query.substring(0, match.range.first).trim()
             
             logger.debug("Extracted title='$title', year=$year from query='$query'")
-            return SearchQuery(title = title, year = year)
+            return SearchQuery(title = title, year = year, useArticleVariations = useArticleVariations)
         }
         
         // No year found, return title as-is
         logger.debug("No year found in query='$query', using entire query as title")
-        return SearchQuery(title = query.trim(), year = null)
+        return SearchQuery(title = query.trim(), year = null, useArticleVariations = useArticleVariations)
     }
 
     @PostMapping("/add")

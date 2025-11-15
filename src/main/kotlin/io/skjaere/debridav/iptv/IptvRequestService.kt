@@ -600,8 +600,8 @@ class IptvRequestService(
         return yearPattern.find(title)?.value?.toIntOrNull()
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?): List<IptvSearchResult> {
-        val results = iptvContentService.searchContent(title, year, contentType)
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvSearchResult> {
+        val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         return results.map { entity ->
             // Generate infohash from providerName and contentId (now returns hex string)
             val infohash = generateIptvHash(entity.providerName, entity.contentId)

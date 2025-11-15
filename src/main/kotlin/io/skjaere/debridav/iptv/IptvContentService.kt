@@ -33,7 +33,7 @@ class IptvContentService(
         }
     }
 
-    fun searchContent(title: String, year: Int?, contentType: ContentType?): List<IptvContentEntity> {
+    fun searchContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvContentEntity> {
         val normalizedTitle = normalizeTitle(title)
         
         // Get currently configured providers
@@ -52,9 +52,10 @@ class IptvContentService(
                 // Try the title as-is first
                 val titleVariations = mutableListOf(title)
                 
-                // If title doesn't start with an article, try adding common articles
+                // Only add article variations if useArticleVariations is true
                 // This handles cases where IPTV content has "The Breakfast Club" but search query is "Breakfast Club"
-                if (!title.matches(Regex("^(?i)(the|a|an)\\s+.*"))) {
+                // Skip article variations when metadata is provided (e.g., from IMDB ID) as it should be accurate
+                if (useArticleVariations && !title.matches(Regex("^(?i)(the|a|an)\\s+.*"))) {
                     titleVariations.add("The $title")
                     titleVariations.add("A $title")
                     titleVariations.add("An $title")
