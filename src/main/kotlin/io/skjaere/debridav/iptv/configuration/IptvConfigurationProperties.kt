@@ -16,7 +16,8 @@ data class IptvConfigurationProperties(
     val seriesMetadataCacheTtl: Duration = Duration.ofDays(7), // Default: 7 days
     val seriesMetadataPurgeInterval: Duration = Duration.ofHours(24), // Default: purge check every 24 hours
     val languagePrefixes: List<String> = emptyList(), // Language prefixes to try when searching (e.g., "EN - ", "EN| ", "EN | ")
-    val userAgent: String = "TiviMate/5.0.3" // User-Agent string for IPTV media requests (default: TiviMate)
+    val userAgent: String = "TiviMate/5.0.3", // User-Agent string for IPTV media requests (default: TiviMate)
+    val includeProviderInMagnetTitle: Boolean = false // Include provider name in magnet title after -IPTV (e.g., -IPTV-mega-NL) for debugging
 ) {
     init {
         // Validate searchFuzziness regardless of enabled state
