@@ -683,20 +683,46 @@ class IptvRequestService(
             val guid = "iptv://$infohash/${entity.providerName}/${entity.contentId}"
             
             // Try to extract quality from title
-            val quality = extractQualityFromTitle(entity.title)
+            var quality = extractQualityFromTitle(entity.title)
+            
+            // Check if IPTV content title starts with any configured language prefix
+            // If not, extract language code and adjust quality if needed
+            val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
+            
+            // If language code is valid ISO 639-1 language code but not EN, change quality from 1080p to 480p
+            if (languageCode != null && isValidLanguageCode(languageCode) && languageCode != "EN") {
+                // Valid non-EN language code found, downgrade quality to 480p
+                val currentQuality = quality ?: "1080p"
+                if (currentQuality.equals("1080p", ignoreCase = true) || currentQuality.equals("FHD", ignoreCase = true)) {
+                    quality = "480p"
+                    logger.debug("Valid language code '$languageCode' detected (non-EN), downgrading quality from 1080p to 480p")
+                }
+            } else if (languageCode != null && !isValidLanguageCode(languageCode)) {
+                logger.debug("Extracted code '$languageCode' is not a valid ISO 639-1 language code, skipping quality adjustment")
+            }
             
             // Format title for Radarr compatibility (includes quality, codec, etc.)
             var radarrTitle = formatTitleForRadarr(entity.title, year, quality)
             
-            // Check if IPTV content title starts with any configured language prefix
-            // If not, extract language code and append it after -IPTV
-            val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
-            if (languageCode != null && radarrTitle.endsWith("-IPTV", ignoreCase = true)) {
-                // Insert language code between -IPTV (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV-NL")
-                radarrTitle = "${radarrTitle.removeSuffix("-IPTV")}-IPTV-$languageCode"
-            } else if (languageCode != null) {
-                // Language code but no -IPTV suffix, append it
-                radarrTitle = "$radarrTitle-$languageCode"
+            // Build the release group suffix: -IPTV[-provider][-languageCode]
+            val releaseGroupParts = mutableListOf("IPTV")
+            
+            // Add provider name if configured
+            if (iptvConfigurationProperties.includeProviderInMagnetTitle) {
+                releaseGroupParts.add(entity.providerName)
+            }
+            
+            // Add language code if present
+            if (languageCode != null) {
+                releaseGroupParts.add(languageCode)
+            }
+            
+            // Replace -IPTV with the full release group (e.g., -IPTV-mega-NL)
+            if (radarrTitle.endsWith("-IPTV", ignoreCase = true)) {
+                radarrTitle = "${radarrTitle.removeSuffix("-IPTV")}-${releaseGroupParts.joinToString("-")}"
+            } else if (languageCode != null || iptvConfigurationProperties.includeProviderInMagnetTitle) {
+                // Title doesn't end with -IPTV, append the release group
+                radarrTitle = "$radarrTitle-${releaseGroupParts.joinToString("-")}"
             }
             
             // Log final magnet title
@@ -723,7 +749,7 @@ class IptvRequestService(
                 url = magnetUri, // Use magnet URI for Radarr compatibility
                 magnetUri = magnetUri, // Also provide as magnet field
                 size = estimatedSize,
-                quality = quality ?: "1080p" // Default to 1080p if not detected
+                quality = quality ?: "1080p" // Use adjusted quality (may be downgraded to 480p for non-EN languages)
             )
         }
     }
