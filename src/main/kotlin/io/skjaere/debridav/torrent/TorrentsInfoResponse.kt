@@ -80,12 +80,13 @@ data class TorrentsInfoResponse(
     val upSpeed: Int
 ) {
     companion object {
-        fun ofTorrent(torrent: Torrent, downloadDir: String): TorrentsInfoResponse {
+        fun ofTorrent(torrent: Torrent, downloadDir: String, debugSuffix: String? = null): TorrentsInfoResponse {
             // For IPTV torrents, contentPath should be the folder path only (same as regular torrents)
             // Check if this is an IPTV torrent by checking if files contain DebridIptvContent
             // Regular torrents use DebridCachedTorrentContent, so they won't match this check
             // Both IPTV and regular torrents return folder path only in contentPath
-            val contentPath = "$downloadDir${torrent.savePath}"
+            val baseContentPath = "$downloadDir${torrent.savePath}"
+            val contentPath = if (debugSuffix != null) "$baseContentPath$debugSuffix" else baseContentPath
             
             return TorrentsInfoResponse(
                 addedOn = torrent.created!!.toEpochMilli().toInt(),

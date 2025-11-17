@@ -83,7 +83,7 @@ class QBittorrentEmulationController(
             .getTorrentsByCategory(category)
             //.filter { it.files?.firstOrNull()?.originalPath != null }
             .map {
-                TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath)
+                TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath, debridavConfigurationProperties.debugArrTorrentInfoContentPathSuffix)
             }
     }
 

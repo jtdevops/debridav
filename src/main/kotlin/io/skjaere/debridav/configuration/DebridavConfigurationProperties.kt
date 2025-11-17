@@ -58,7 +58,8 @@ data class DebridavConfigurationProperties(
     val rcloneArrsLocalVideoMinSizeKb: Long? = null, // Minimum file size in KB to use local video (smaller files served externally)
     val rcloneArrsUserAgentPattern: String?, // User agent pattern for ARR detection
     val rcloneArrsHostnamePattern: String?, // Hostname pattern for ARR detection
-    val rcloneArrsLocalVideoFileIptvBypassProviders: String? = null // Comma-separated list of IPTV provider names to bypass local video serving (use "*" for all providers)
+    val rcloneArrsLocalVideoFileIptvBypassProviders: String? = null, // Comma-separated list of IPTV provider names to bypass local video serving (use "*" for all providers)
+    val debugArrTorrentInfoContentPathSuffix: String? = null // Optional suffix to append to contentPath in ARR torrent info API responses (qBittorrent emulation /api/v2/torrents/info endpoint used by Sonarr/Radarr) for debugging purposes (e.g., "__DEBUG_TESTING")
 ) {
     init {
         require(debridClients.isNotEmpty()) {
