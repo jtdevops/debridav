@@ -18,6 +18,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import java.io.File
+import java.time.Duration
 import java.time.Instant
 
 @Service
@@ -37,12 +38,25 @@ class IptvSyncService(
 
     @Scheduled(
         initialDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('iptv.initial-sync-delay', 'PT30S')).toMillis()}",
-        fixedRateString = "\${iptv.sync-interval}"
+        fixedDelayString = "\${iptv.sync-interval}"
     )
     fun syncIptvContent() {
         if (!iptvConfigurationProperties.enabled) {
             logger.debug("IPTV sync skipped - IPTV is disabled")
             return
+        }
+
+        // Check if enough time has passed since the last sync
+        val mostRecentSync = iptvSyncHashRepository.findMostRecentLastChecked()
+        if (mostRecentSync != null) {
+            val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
+            val syncInterval = iptvConfigurationProperties.syncInterval
+            
+            if (timeSinceLastSync < syncInterval) {
+                val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
+                logger.debug("IPTV sync skipped - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
+                return
+            }
         }
 
         logger.info("Starting IPTV content sync")
@@ -593,6 +607,18 @@ class IptvSyncService(
                 existingMap[saved.contentId] = saved
             }
             logger.info("Synced ${entitiesToSave.size} items for provider $providerName")
+        }
+    }
+    
+    private fun formatDuration(duration: Duration): String {
+        val hours = duration.toHours()
+        val minutes = duration.toMinutes() % 60
+        val seconds = duration.seconds % 60
+        
+        return when {
+            hours > 0 -> "${hours}h ${minutes}m"
+            minutes > 0 -> "${minutes}m ${seconds}s"
+            else -> "${seconds}s"
         }
     }
 }
