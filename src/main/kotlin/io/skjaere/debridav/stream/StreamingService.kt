@@ -461,6 +461,10 @@ class StreamingService(
                 } catch (e: CancellationException) {
                     close(e)
                     throw e
+                } catch (e: EOFException) {
+                    // EOFException is expected when stream ends early (e.g., IPTV provider unavailable)
+                    // Let it propagate to outer handler for proper handling
+                    throw e
                 } catch (e: Exception) {
                     logger.error("An error occurred during reading from stream", e)
                     throw ReadFromHttpStreamException("An error occurred during reading from stream", e)
@@ -607,7 +611,19 @@ class StreamingService(
     }
 
     fun handleEOFException(debridLink: CachedFile, remotelyCachedEntity: RemotelyCachedEntity, range: Range, outputStream: OutputStream): StreamResult {
-        logger.info("EOF reached while streaming ${debridLink.path}")
+        // Check if this is IPTV content to provide more informative logging
+        val isIptvContent = remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent
+        val iptvProviderName = if (isIptvContent) {
+            (remotelyCachedEntity.contents as io.skjaere.debridav.fs.DebridIptvContent).iptvProviderName
+        } else {
+            null
+        }
+        
+        if (isIptvContent && iptvProviderName != null) {
+            logger.warn("EOF reached while streaming IPTV content ${debridLink.path} from provider $iptvProviderName - provider may be unavailable or stream ended early")
+        } else {
+            logger.info("EOF reached while streaming ${debridLink.path}")
+        }
         return StreamResult.OK
     }
 
