@@ -79,8 +79,10 @@ class IptvContentService(
                     
                     if (filteredPrefixedResults.isNotEmpty()) {
                         logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$titleVariation', returning early")
-                        // Filter by year if provided, then sort by provider priority
-                        return sortByProviderPriority(filterByYear(filteredPrefixedResults, year), providerPriorityMap)
+                        // Filter by year if provided, then sort by relevance and provider priority
+                        // Use original normalized title (without prefix) for scoring relevance
+                        val yearFiltered = filterByYear(filteredPrefixedResults, year)
+                        return sortByRelevanceAndProviderPriority(yearFiltered, normalizedTitle, year, providerPriorityMap)
                     }
                 }
             }
@@ -136,14 +138,123 @@ class IptvContentService(
         // Filter to only include content from currently configured providers
         val filteredResults = uniqueResults.filter { it.providerName in configuredProviderNames }
         
-        // Filter by year if provided, then sort by provider priority
-        return sortByProviderPriority(filterByYear(filteredResults, year), providerPriorityMap)
+        // Filter by year if provided, then sort by relevance and provider priority
+        val yearFiltered = filterByYear(filteredResults, year)
+        return sortByRelevanceAndProviderPriority(yearFiltered, normalizedTitle, year, providerPriorityMap)
+    }
+    
+    /**
+     * Sorts search results by relevance score (higher is better) first, then by provider priority.
+     * Relevance scoring prioritizes exact matches and closer matches.
+     * Optionally limits results based on configuration.
+     */
+    private fun sortByRelevanceAndProviderPriority(
+        results: List<IptvContentEntity>,
+        searchTitle: String,
+        searchYear: Int?,
+        providerPriorityMap: Map<String, Int>
+    ): List<IptvContentEntity> {
+        if (results.isEmpty()) {
+            return results
+        }
+        
+        val scoredResults = results.map { entity ->
+            val score = calculateRelevanceScore(entity, searchTitle, searchYear)
+            logger.debug("Relevance score for '${entity.title}': $score (search: '$searchTitle', year: $searchYear)")
+            Pair(entity, score)
+        }
+        
+        val sorted = scoredResults.sortedWith(compareByDescending<Pair<IptvContentEntity, Int>> { it.second }
+            .thenBy { entity ->
+                // Secondary sort by provider priority (lower number = higher priority)
+                providerPriorityMap[entity.first.providerName] ?: Int.MAX_VALUE
+            })
+        
+        val maxResults = iptvConfigurationProperties.maxSearchResults
+        val limitedResults = if (maxResults > 0 && sorted.size > maxResults) {
+            logger.debug("Limiting results from ${sorted.size} to $maxResults (top scores: ${sorted.take(maxResults).joinToString { "${it.first.title}=${it.second}" }})")
+            sorted.take(maxResults)
+        } else {
+            logger.debug("Sorted ${sorted.size} results by relevance score (top 3 scores: ${sorted.take(3).joinToString { "${it.first.title}=${it.second}" }})")
+            sorted
+        }
+        
+        return limitedResults.map { it.first }
+    }
+    
+    /**
+     * Calculates a relevance score for a search result.
+     * Higher scores indicate better matches.
+     * 
+     * Scoring factors:
+     * - Exact normalized title match: 1000 points
+     * - Title starts with search query: 500 points
+     * - Title contains search query as whole words: 300 points
+     * - Title contains all search words: 100 points
+     * - Year match bonus: +200 points (if year provided and matches)
+     * - Year mismatch penalty: -100 points (if year provided but doesn't match)
+     */
+    private fun calculateRelevanceScore(entity: IptvContentEntity, searchTitle: String, searchYear: Int?): Int {
+        var entityNormalizedTitle = entity.normalizedTitle ?: ""
+        
+        // Strip language prefixes from entity title for comparison
+        // Language prefixes are typically in format "en " or "nl| " at the start
+        val languagePrefixPattern = Regex("^[a-z]{2,3}\\s*[|\\-]?\\s+", RegexOption.IGNORE_CASE)
+        entityNormalizedTitle = languagePrefixPattern.replace(entityNormalizedTitle, "").trim()
+        
+        var score = 0
+        
+        // Exact match (highest priority)
+        if (entityNormalizedTitle == searchTitle) {
+            score += 1000
+        }
+        // Starts with search query
+        else if (entityNormalizedTitle.startsWith(searchTitle)) {
+            score += 500
+            // Bonus for shorter titles (more specific matches)
+            // If title is just the search query plus a small amount, give bonus
+            val remainingAfterSearch = entityNormalizedTitle.removePrefix(searchTitle).trim()
+            if (remainingAfterSearch.isEmpty() || remainingAfterSearch.length <= 10) {
+                score += 50 // Bonus for very close matches
+            }
+        }
+        // Contains search query as whole phrase (word boundary match)
+        else {
+            val searchWords = searchTitle.split("\\s+".toRegex()).filter { it.isNotBlank() }
+            val allWordsMatch = searchWords.all { word ->
+                Regex("(^|[^a-z0-9])$word([^a-z0-9]|$)", RegexOption.IGNORE_CASE).containsMatchIn(entityNormalizedTitle)
+            }
+            
+            if (allWordsMatch) {
+                // Check if words appear in order as a phrase
+                val searchPhrase = searchWords.joinToString("\\s+")
+                if (Regex(searchPhrase, RegexOption.IGNORE_CASE).containsMatchIn(entityNormalizedTitle)) {
+                    score += 300 // Whole phrase match
+                } else {
+                    score += 100 // All words present but not as phrase
+                }
+            }
+        }
+        
+        // Year match bonus/penalty
+        if (searchYear != null) {
+            val entityYear = extractYearFromTitle(entity.title)
+            when {
+                entityYear == searchYear -> score += 200 // Year match bonus
+                entityYear != null -> score -= 100 // Year mismatch penalty
+                // No year in entity title: no penalty (neutral)
+            }
+        }
+        
+        return score
     }
     
     /**
      * Sorts search results by provider priority (lower priority number = higher priority).
      * Results from providers with lower priority numbers will appear first.
+     * @deprecated Use sortByRelevanceAndProviderPriority instead for better search accuracy
      */
+    @Deprecated("Use sortByRelevanceAndProviderPriority for better search accuracy")
     private fun sortByProviderPriority(results: List<IptvContentEntity>, providerPriorityMap: Map<String, Int>): List<IptvContentEntity> {
         return results.sortedBy { entity ->
             // Get priority for this provider, default to Int.MAX_VALUE if not found (shouldn't happen)
