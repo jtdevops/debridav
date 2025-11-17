@@ -15,5 +15,8 @@ interface IptvSyncHashRepository : JpaRepository<IptvSyncHashEntity, Long> {
     
     @Query("SELECT MAX(h.lastChecked) FROM IptvSyncHashEntity h")
     fun findMostRecentLastChecked(): Instant?
+    
+    @Query("SELECT MAX(h.lastChecked) FROM IptvSyncHashEntity h WHERE h.providerName = :providerName")
+    fun findMostRecentLastCheckedByProvider(providerName: String): Instant?
 }
 
