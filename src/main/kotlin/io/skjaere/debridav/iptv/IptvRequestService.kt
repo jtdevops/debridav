@@ -628,8 +628,8 @@ class IptvRequestService(
      * We'll add quality and encoding info if available.
      */
     private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?): String {
-        // Remove language prefix if present (e.g., "EN| " or "NL| ")
-        var cleanTitle = originalTitle.replace(Regex("^[A-Z]{2}\\|\\s*"), "")
+        // Remove configured language prefixes if present (e.g., "EN| ", "EN - ", "NL| ")
+        var cleanTitle = removeLanguagePrefixes(originalTitle)
         
         // Extract year from title if not provided
         val titleYear = year ?: extractYearFromTitle(cleanTitle)
@@ -818,6 +818,25 @@ class IptvRequestService(
         val match = languagePattern.find(iptvContentTitle)
         
         return match?.groupValues?.get(1)?.uppercase()
+    }
+    
+    /**
+     * Removes configured language prefixes from the beginning of a title.
+     * This ensures that titles like "EN - Titanic (1997)" become "Titanic (1997)".
+     */
+    private fun removeLanguagePrefixes(title: String): String {
+        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        
+        // Try each configured prefix and remove the first matching one
+        for (prefix in languagePrefixes) {
+            val cleanedPrefix = stripQuotes(prefix)
+            if (title.startsWith(cleanedPrefix, ignoreCase = false)) {
+                return title.removePrefix(cleanedPrefix).trimStart()
+            }
+        }
+        
+        // Fallback to old regex pattern for backward compatibility
+        return title.replace(Regex("^[A-Z]{2}\\s*[|-]\\s*"), "")
     }
     
     /**
