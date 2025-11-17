@@ -36,10 +36,11 @@ class IptvContentService(
     fun searchContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvContentEntity> {
         val normalizedTitle = normalizeTitle(title)
         
-        // Get currently configured providers
-        val configuredProviderNames = iptvConfigurationService.getProviderConfigurations()
-            .map { it.name }
-            .toSet()
+        // Get currently configured providers sorted by priority (lower number = higher priority)
+        val configuredProviders = iptvConfigurationService.getProviderConfigurations()
+        val configuredProviderNames = configuredProviders.map { it.name }.toSet()
+        // Create a map of provider name to priority for sorting results
+        val providerPriorityMap = configuredProviders.associate { it.name to it.priority }
         
         // Try language prefixes first if configured
         val languagePrefixes = iptvConfigurationProperties.languagePrefixes
@@ -78,8 +79,8 @@ class IptvContentService(
                     
                     if (filteredPrefixedResults.isNotEmpty()) {
                         logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$titleVariation', returning early")
-                        // Filter by year if provided
-                        return filterByYear(filteredPrefixedResults, year)
+                        // Filter by year if provided, then sort by provider priority
+                        return sortByProviderPriority(filterByYear(filteredPrefixedResults, year), providerPriorityMap)
                     }
                 }
             }
@@ -135,8 +136,19 @@ class IptvContentService(
         // Filter to only include content from currently configured providers
         val filteredResults = uniqueResults.filter { it.providerName in configuredProviderNames }
         
-        // Filter by year if provided
-        return filterByYear(filteredResults, year)
+        // Filter by year if provided, then sort by provider priority
+        return sortByProviderPriority(filterByYear(filteredResults, year), providerPriorityMap)
+    }
+    
+    /**
+     * Sorts search results by provider priority (lower priority number = higher priority).
+     * Results from providers with lower priority numbers will appear first.
+     */
+    private fun sortByProviderPriority(results: List<IptvContentEntity>, providerPriorityMap: Map<String, Int>): List<IptvContentEntity> {
+        return results.sortedBy { entity ->
+            // Get priority for this provider, default to Int.MAX_VALUE if not found (shouldn't happen)
+            providerPriorityMap[entity.providerName] ?: Int.MAX_VALUE
+        }
     }
     
     /**
