@@ -802,6 +802,55 @@ class IptvRequestService(
         return value.trim().removeSurrounding("\"").removeSurrounding("'")
     }
     
+    /**
+     * Validates if a code is a valid ISO 639-1 language code.
+     * ISO 639-1 codes are 2-letter codes for languages (e.g., EN, NL, DE, FR).
+     * This excludes country codes (e.g., AM for America, US for United States).
+     * 
+     * @param code The code to validate (should be uppercase 2-letter code)
+     * @return true if the code is a valid ISO 639-1 language code, false otherwise
+     */
+    private fun isValidLanguageCode(code: String): Boolean {
+        if (code.length != 2) {
+            return false
+        }
+        
+        // Common ISO 639-1 language codes (2-letter codes)
+        // This is a subset of commonly used language codes for IPTV content
+        // Note: Excludes ambiguous codes that might be used as country/region codes
+        // (e.g., "AM" could mean Amharic language or America region, so we exclude it)
+        val validLanguageCodes = setOf(
+            "AA", "AB", "AE", "AF", "AK", "AN", "AR", "AS", "AV", "AY", "AZ", // A (excluded AM - ambiguous)
+            "BA", "BE", "BG", "BH", "BI", "BM", "BN", "BO", "BR", "BS", // B
+            "CA", "CE", "CH", "CO", "CR", "CS", "CU", "CV", "CY", // C
+            "DA", "DE", "DV", "DZ", // D
+            "EE", "EL", "EN", "EO", "ES", "ET", "EU", // E
+            "FA", "FF", "FI", "FJ", "FO", "FR", "FY", // F
+            "GA", "GD", "GL", "GN", "GU", "GV", // G
+            "HA", "HE", "HI", "HO", "HR", "HT", "HU", "HY", "HZ", // H
+            "IA", "ID", "IE", "IG", "II", "IK", "IO", "IS", "IT", "IU", // I
+            "JA", "JV", // J
+            "KA", "KG", "KI", "KJ", "KK", "KL", "KM", "KN", "KO", "KR", "KS", "KU", "KV", "KW", "KY", "KZ", // K
+            "LA", "LB", "LG", "LI", "LN", "LO", "LT", "LU", "LV", // L
+            "MG", "MH", "MI", "MK", "ML", "MN", "MR", "MS", "MT", "MY", // M
+            "NA", "NB", "ND", "NE", "NG", "NL", "NN", "NO", "NR", "NV", "NY", // N
+            "OC", "OJ", "OM", "OR", "OS", // O
+            "PA", "PI", "PL", "PS", "PT", // P
+            "QU", // Q
+            "RM", "RN", "RO", "RU", "RW", // R
+            "SA", "SC", "SD", "SE", "SG", "SI", "SK", "SL", "SM", "SN", "SO", "SQ", "SR", "SS", "ST", "SU", "SV", "SW", "SY", "SZ", // S
+            "TA", "TE", "TG", "TH", "TI", "TK", "TL", "TN", "TO", "TR", "TS", "TT", "TW", "TY", // T
+            "UG", "UK", "UR", "UZ", // U
+            "VE", "VI", "VO", // V
+            "WA", "WO", // W
+            "XH", // X
+            "YI", "YO", "YU", // Y
+            "ZA", "ZH", "ZU" // Z
+        )
+        
+        return validLanguageCodes.contains(code.uppercase())
+    }
+    
     private fun sanitizeFileName(fileName: String): String {
         // Remove invalid file system characters
         return fileName
