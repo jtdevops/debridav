@@ -270,6 +270,65 @@ class StreamingService(
         } catch (e: RuntimeException) {
             logger.error("An error occurred during streaming ${debridLink.path}", e)
             result = StreamResult.UNKNOWN_ERROR
+        }
+        
+        // Fallback to local video files if IPTV provider streaming failed and bypass was configured
+        if (result != StreamResult.OK && debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)) {
+            val fileName = remotelyCachedEntity.name ?: "unknown"
+            val fullPath = remotelyCachedEntity.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+            
+            // Check if this is IPTV content that was configured to bypass local video
+            val iptvProviderName = if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent) {
+                (remotelyCachedEntity.contents as io.skjaere.debridav.fs.DebridIptvContent).iptvProviderName
+            } else {
+                null
+            }
+            val shouldBypass = debridavConfigProperties.shouldBypassLocalVideoForIptvProvider(iptvProviderName)
+            
+            if (shouldBypass && VideoFileExtensions.isVideoFile(fileName)) {
+                // IPTV provider failed, try to fallback to local video files
+                logger.warn("IPTV provider streaming failed (result={}) for file={}, provider={}, attempting fallback to local video file", 
+                    result, fileName, iptvProviderName)
+                
+                // Check if the file path matches the configured regex pattern
+                if (debridavConfigProperties.shouldServeLocalVideoForPath(fullPath)) {
+                    // Get the external file size to check against the minimum size threshold
+                    val externalFileSize = debridLink.size ?: 0L
+                    
+                    // Check if the file is large enough to use local video serving
+                    if (debridavConfigProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                        logger.info("FALLBACK_TO_LOCAL_VIDEO: file={}, iptvProvider={}, falling back to local video file after IPTV provider failure", 
+                            fileName, iptvProviderName)
+                        
+                        try {
+                            val success = localVideoService.serveLocalVideoFile(outputStream, range, httpRequestInfo, fileName)
+                            if (success) {
+                                logger.info("FALLBACK_TO_LOCAL_VIDEO_SUCCESS: file={}, iptvProvider={}, successfully served local video file", 
+                                    fileName, iptvProviderName)
+                                this.coroutineContext.cancelChildren()
+                                trackingId?.let { id -> completeDownloadTracking(id, StreamResult.OK) }
+                                return@coroutineScope StreamResult.OK
+                            } else {
+                                logger.warn("FALLBACK_TO_LOCAL_VIDEO_FAILED: file={}, iptvProvider={}, local video file serving failed", 
+                                    fileName, iptvProviderName)
+                            }
+                        } catch (e: Exception) {
+                            logger.error("FALLBACK_TO_LOCAL_VIDEO_ERROR: file={}, iptvProvider={}, error serving local video file", 
+                                fileName, iptvProviderName, e)
+                        }
+                    } else {
+                        logger.debug("FALLBACK_TO_LOCAL_VIDEO_SKIPPED_SIZE: file={}, iptvProvider={}, externalSize={} bytes, minSizeKb={}, file too small for local video", 
+                            fileName, iptvProviderName, externalFileSize, debridavConfigProperties.rcloneArrsLocalVideoMinSizeKb)
+                    }
+                } else {
+                    logger.debug("FALLBACK_TO_LOCAL_VIDEO_SKIPPED_PATH: file={}, iptvProvider={}, fullPath={}, path does not match regex", 
+                        fileName, iptvProviderName, fullPath)
+                }
+            }
+        }
+        
+        try {
+            // Cleanup
         } finally {
             this.coroutineContext.cancelChildren()
             trackingId?.let { id -> completeDownloadTracking(id, result) }

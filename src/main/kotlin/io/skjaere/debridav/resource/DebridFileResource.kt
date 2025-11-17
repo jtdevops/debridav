@@ -204,9 +204,34 @@ class DebridFileResource(
             val shouldBypass = debridavConfigurationProperties.shouldBypassLocalVideoForIptvProvider(iptvProviderName)
             
             if (shouldBypass) {
-                // Return actual content type from database for IPTV content
+                // When bypass is configured, prefer local video file content type if available
+                // This ensures headers are correct if fallback to local video happens
+                if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath) && isMediaFile(fileName)) {
+                    val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                    if (localVideoPath != null) {
+                        val localVideoFile = java.io.File(localVideoPath)
+                        if (localVideoFile.exists() && localVideoFile.isFile) {
+                            val localFileName = localVideoFile.name.lowercase()
+                            val mimeType = when {
+                                localFileName.endsWith(".mp4") -> "video/mp4"
+                                localFileName.endsWith(".avi") -> "video/x-msvideo"
+                                localFileName.endsWith(".mkv") -> "video/x-matroska"
+                                localFileName.endsWith(".mov") -> "video/quicktime"
+                                localFileName.endsWith(".wmv") -> "video/x-ms-wmv"
+                                localFileName.endsWith(".flv") -> "video/x-flv"
+                                localFileName.endsWith(".webm") -> "video/webm"
+                                localFileName.endsWith(".m4v") -> "video/x-m4v"
+                                else -> "video/mp4"
+                            }
+                            logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_TYPE_LOCAL: file={}, iptvProvider={}, mimeType={} (from local video file)", 
+                                fileName, iptvProviderName, mimeType)
+                            return mimeType
+                        }
+                    }
+                }
+                // Fallback to database content type if local video file not available
                 val mimeType = file.mimeType ?: "video/mp4"
-                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_TYPE: file={}, iptvProvider={}, mimeType={}", 
+                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_TYPE_DB: file={}, iptvProvider={}, mimeType={} (from database)", 
                     fileName, iptvProviderName, mimeType)
                 return mimeType
             }
@@ -253,9 +278,28 @@ class DebridFileResource(
             val shouldBypass = debridavConfigurationProperties.shouldBypassLocalVideoForIptvProvider(iptvProviderName)
             
             if (shouldBypass) {
-                // Return actual file size from database for IPTV content
+                // When bypass is configured, prefer local video file size if available
+                // This ensures headers are correct if fallback to local video happens
+                val fullPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+                if (debridavConfigurationProperties.shouldServeLocalVideoForPath(fullPath) && isMediaFile(fileName)) {
+                    val externalFileSize = file.contents!!.size!!.toLong()
+                    // Check if file meets minimum size threshold for local video serving
+                    if (debridavConfigurationProperties.shouldUseLocalVideoForSize(externalFileSize)) {
+                        val localVideoPath = debridavConfigurationProperties.getLocalVideoFilePath(fileName)
+                        if (localVideoPath != null) {
+                            val localVideoFile = java.io.File(localVideoPath)
+                            if (localVideoFile.exists() && localVideoFile.isFile) {
+                                val localFileSize = localVideoFile.length()
+                                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_LENGTH_LOCAL: file={}, iptvProvider={}, size={} bytes (from local video file)", 
+                                    fileName, iptvProviderName, localFileSize)
+                                return localFileSize
+                            }
+                        }
+                    }
+                }
+                // Fallback to database file size if local video file not available
                 val externalFileSize = file.contents!!.size!!.toLong()
-                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_LENGTH: file={}, iptvProvider={}, size={} bytes", 
+                logger.debug("LOCAL_VIDEO_BYPASS_CONTENT_LENGTH_DB: file={}, iptvProvider={}, size={} bytes (from database)", 
                     fileName, iptvProviderName, externalFileSize)
                 return externalFileSize
             }
