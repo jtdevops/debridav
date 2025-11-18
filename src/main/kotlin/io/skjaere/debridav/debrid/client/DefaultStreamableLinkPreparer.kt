@@ -37,8 +37,54 @@ class DefaultStreamableLinkPreparer(
         rateLimiter: RateLimiter
     ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null)
 
+    /**
+     * Detects if a URL is likely an IPTV content URL.
+     * IPTV URLs typically come from Xtream Codes providers and have patterns like:
+     * - {baseUrl}/movie/{username}/{password}/{id}.{ext}
+     * - {baseUrl}/series/{username}/{password}/{id}.{ext}
+     * - {baseUrl}/live/{username}/{password}/{id}.{ext}
+     * - Or M3U playlist URLs
+     */
+    private fun isIptvUrl(url: String): Boolean {
+        if (url.isBlank()) {
+            return false
+        }
+        
+        // Check for Xtream Codes patterns (most common IPTV format)
+        // Pattern: /movie/ or /series/ or /live/ followed by username/password/id.ext
+        val xtreamPattern = Regex(".*/(movie|series|live)/[^/]+/[^/]+/[^/]+\\.(mp4|mkv|avi|ts|mov|m4v|m2ts|mts|vob|flv|webm|m3u8)$", RegexOption.IGNORE_CASE)
+        if (xtreamPattern.matches(url)) {
+            return true
+        }
+        
+        // Check for M3U playlist URLs
+        if (url.contains(".m3u", ignoreCase = true)) {
+            return true
+        }
+        
+        // Check if provider is not a known debrid provider (heuristic)
+        // This is detected at the StreamingService level, but we can also check URL patterns
+        // If URL doesn't match known debrid patterns, it might be IPTV
+        val debridPatterns = listOf(
+            "real-debrid.com",
+            "premiumize.me",
+            "easynews.com",
+            "torbox.app"
+        )
+        val isDebridUrl = debridPatterns.any { url.contains(it, ignoreCase = true) }
+        
+        // If it's not a debrid URL and matches video file patterns, assume IPTV
+        if (!isDebridUrl && url.matches(Regex(".*\\.(mp4|mkv|avi|ts|mov|m4v|m2ts|mts|vob|flv|webm|m3u8)$", RegexOption.IGNORE_CASE))) {
+            return true
+        }
+        
+        return false
+    }
+
     @Suppress("MagicNumber")
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
+        val isIptv = isIptvUrl(debridLink.link ?: "")
+        
         return rateLimiter.executeSuspendFunction {
             httpClient.prepareGet(debridLink.link!!) {
                 headers {
@@ -71,6 +117,13 @@ class DefaultStreamableLinkPreparer(
                         append(HttpHeaders.UserAgent, it)
                     }
                 }
+                
+                // For IPTV URLs, log that insecure SSL and redirect following are enabled
+                // (SSL trust-all and redirect following are configured at the HTTP client engine level)
+                if (isIptv) {
+                    logger.debug("Detected IPTV URL, using insecure SSL and redirect following: ${debridLink.link?.take(100)}")
+                }
+                
                 timeout {
                     requestTimeoutMillis = 20_000_000
                     socketTimeoutMillis = 10_000
