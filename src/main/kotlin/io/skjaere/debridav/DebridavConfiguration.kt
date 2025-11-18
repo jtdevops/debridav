@@ -24,12 +24,39 @@ import org.springframework.scheduling.annotation.EnableScheduling
 import java.time.Clock
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import javax.net.ssl.SSLContext
 import java.security.cert.X509Certificate
+import org.slf4j.LoggerFactory
 
 @Configuration
 @ConfigurationPropertiesScan("io.skjaere.debridav")
 @EnableScheduling
 class DebridavConfiguration {
+    private val logger = LoggerFactory.getLogger(DebridavConfiguration::class.java)
+    
+    init {
+        // Log supported TLS versions at startup for diagnostics
+        try {
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, null, null)
+            val supportedProtocols = sslContext.defaultSSLParameters.protocols
+            val enabledProtocols = sslContext.supportedSSLParameters.protocols
+            logger.info("JVM TLS Support: supportedProtocols={}, enabledProtocols={}", 
+                supportedProtocols.contentToString(), enabledProtocols.contentToString())
+            
+            // Check system properties for TLS configuration
+            val clientProtocols = System.getProperty("jdk.tls.client.protocols")
+            val disabledAlgorithms = System.getProperty("jdk.tls.disabledAlgorithms")
+            if (clientProtocols != null) {
+                logger.info("JVM TLS Configuration: jdk.tls.client.protocols={}", clientProtocols)
+            }
+            if (disabledAlgorithms != null) {
+                logger.info("JVM TLS Configuration: jdk.tls.disabledAlgorithms={}", disabledAlgorithms)
+            }
+        } catch (e: Exception) {
+            logger.warn("Failed to check TLS version support", e)
+        }
+    }
     @Bean
     fun miltonFilterFilterRegistrationBean(): FilterRegistrationBean<SpringMiltonFilter> {
         val registration = FilterRegistrationBean<SpringMiltonFilter>()

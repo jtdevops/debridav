@@ -2,11 +2,13 @@ package io.skjaere.debridav.iptv
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import io.ktor.client.HttpClient
+import io.ktor.client.call.body
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.ByteReadChannel
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.DatabaseFileService
@@ -549,9 +551,103 @@ class IptvRequestService(
                     }
                 }
                 
-                // Check if request was successful
+                // Check if this is a redirect response - redirects don't have content bodies
+                // HttpRedirect plugin may not follow redirects for range requests, so we need to handle it manually
+                if (response.status.value in 300..399) {
+                    val redirectLocation = response.headers["Location"]
+                    if (redirectLocation != null) {
+                        logger.debug("IPTV file size request received redirect response (status ${response.status.value}), following redirect manually: originalUrl={}, redirectLocation={}", url, redirectLocation)
+                        
+                        // Consume the redirect response body to ensure proper cleanup
+                        try {
+                            response.body<ByteReadChannel>()
+                        } catch (e: Exception) {
+                            // Ignore errors when consuming redirect body
+                        }
+                        
+                        // Make new request to redirect location with Range header preserved
+                        val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                            redirectLocation
+                        } else {
+                            // Relative redirect - construct absolute URL using URI
+                            val originalUri = java.net.URI(url)
+                            originalUri.resolve(redirectLocation).toString()
+                        }
+                        
+                        // Create new request to redirect URL with Range header
+                        val redirectResponse = httpClient.get(redirectUrl) {
+                            headers {
+                                append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                                append(HttpHeaders.Range, "bytes=0-0")
+                            }
+                            timeout {
+                                requestTimeoutMillis = 10000 // 10 second timeout
+                            }
+                        }
+                        
+                        // Check if redirect response was successful
+                        if (!redirectResponse.status.isSuccess()) {
+                            logger.debug("HTTP GET request to redirect URL returned non-success status ${redirectResponse.status.value} for IPTV URL, using estimated size (redirectUrl: $redirectUrl)")
+                            try {
+                                redirectResponse.body<ByteReadChannel>()
+                            } catch (e: Exception) {
+                                // Ignore errors when consuming response body
+                            }
+                            return estimateIptvSize(contentType)
+                        }
+                        
+                        // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
+                        val contentRange = redirectResponse.headers["Content-Range"]
+                        if (contentRange != null) {
+                            // Parse Content-Range: bytes 0-0/1882075726
+                            val rangeRegex = Regex("bytes\\s+\\d+-\\d+/(\\d+)")
+                            val matchResult = rangeRegex.find(contentRange)
+                            val totalSize = matchResult?.groupValues?.get(1)?.toLongOrNull()
+                            if (totalSize != null && totalSize > 0) {
+                                logger.debug("Retrieved actual file size from IPTV redirect URL Content-Range header: $totalSize bytes (redirectUrl: $redirectUrl)")
+                                try {
+                                    redirectResponse.body<io.ktor.utils.io.ByteReadChannel>()
+                                } catch (e: Exception) {
+                                    // Ignore errors when consuming response body
+                                }
+                                return totalSize
+                            }
+                        }
+                        
+                        // Fallback to Content-Length header if Content-Range is not available
+                        val contentLength = redirectResponse.headers["Content-Length"]?.toLongOrNull()
+                        try {
+                            redirectResponse.body<io.ktor.utils.io.ByteReadChannel>()
+                        } catch (e: Exception) {
+                            // Ignore errors when consuming response body
+                        }
+                        if (contentLength != null && contentLength > 0) {
+                            logger.debug("Retrieved actual file size from IPTV redirect URL Content-Length header: $contentLength bytes (redirectUrl: $redirectUrl)")
+                            return contentLength
+                        } else {
+                            logger.debug("Content-Range and Content-Length headers not available for IPTV redirect URL, using estimated size (redirectUrl: $redirectUrl)")
+                            return estimateIptvSize(contentType)
+                        }
+                    } else {
+                        // No redirect location - fallback to estimated size
+                        logger.debug("HTTP GET request returned redirect status ${response.status.value} but no Location header for IPTV URL, using estimated size ($url)")
+                                try {
+                                    response.body<ByteReadChannel>()
+                                } catch (e: Exception) {
+                                    // Ignore errors when consuming response body
+                                }
+                        return estimateIptvSize(contentType)
+                    }
+                }
+                
+                // Check if request was successful (non-redirect)
                 if (!response.status.isSuccess()) {
                     logger.debug("HTTP GET request returned non-success status ${response.status.value} for IPTV URL, using estimated size ($url)")
+                                try {
+                                    response.body<ByteReadChannel>()
+                                } catch (e: Exception) {
+                                    // Ignore errors when consuming response body
+                                }
                     return estimateIptvSize(contentType)
                 }
                 
@@ -564,12 +660,22 @@ class IptvRequestService(
                     val totalSize = matchResult?.groupValues?.get(1)?.toLongOrNull()
                     if (totalSize != null && totalSize > 0) {
                         logger.debug("Retrieved actual file size from IPTV URL Content-Range header: $totalSize bytes ($url)")
+                                try {
+                                    response.body<ByteReadChannel>()
+                                } catch (e: Exception) {
+                                    // Ignore errors when consuming response body
+                                }
                         return totalSize
                     }
                 }
                 
                 // Fallback to Content-Length header if Content-Range is not available
                 val contentLength = response.headers["Content-Length"]?.toLongOrNull()
+                                try {
+                                    response.body<ByteReadChannel>()
+                                } catch (e: Exception) {
+                                    // Ignore errors when consuming response body
+                                }
                 if (contentLength != null && contentLength > 0) {
                     logger.debug("Retrieved actual file size from IPTV URL Content-Length header: $contentLength bytes ($url)")
                     return contentLength

@@ -29,7 +29,14 @@ class DefaultStreamableLinkPreparer(
     private val rateLimiter: RateLimiter,
     private val userAgent: String?
 ) : StreamableLinkPreparable {
-    private val logger = LoggerFactory.getLogger(RealDebridClient::class.java)
+    private val logger = LoggerFactory.getLogger(DefaultStreamableLinkPreparer::class.java)
+
+    init {
+        // Log the effective logger level at startup for debugging
+        logger.info("DefaultStreamableLinkPreparer logger initialized: loggerName={}, effectiveLevel={}", 
+            DefaultStreamableLinkPreparer::class.java.name,
+            if (logger.isTraceEnabled) "TRACE" else if (logger.isDebugEnabled) "DEBUG" else if (logger.isInfoEnabled) "INFO" else if (logger.isWarnEnabled) "WARN" else "ERROR")
+    }
 
     constructor(
         httpClient: HttpClient,
@@ -85,8 +92,12 @@ class DefaultStreamableLinkPreparer(
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
         val isIptv = isIptvUrl(debridLink.link ?: "")
         
-        return rateLimiter.executeSuspendFunction {
-            httpClient.prepareGet(debridLink.link!!) {
+        // Test TRACE logging to verify logger level is configured correctly
+        logger.trace("TRACE_LOG_TEST: DefaultStreamableLinkPreparer TRACE logging is enabled. This log should appear if TRACE level is configured correctly.")
+        
+        return try {
+            rateLimiter.executeSuspendFunction {
+                httpClient.prepareGet(debridLink.link!!) {
                 headers {
                     // Always handle byte range requests - the chunking control is internal
                     range?.let { range ->
@@ -131,16 +142,34 @@ class DefaultStreamableLinkPreparer(
                 }
             }
         }
+        } catch (e: Exception) {
+            // TRACE level logging for HTTP request exceptions with full stack trace
+            logger.trace("HTTP_REQUEST_EXCEPTION: Exception preparing HTTP request: path={}, link={}, provider={}, exceptionClass={}", 
+                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+            // Explicitly log stack trace to ensure it appears
+            logger.trace("HTTP_REQUEST_EXCEPTION_STACK_TRACE", e)
+            throw e
+        }
     }
 
     override suspend fun isLinkAlive(debridLink: CachedFile): Boolean = flow {
         logger.debug("LINK_ALIVE_HTTP_CHECK: file={}, provider={}, link={}, size={} bytes", 
             debridLink.path, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size)
-        rateLimiter.executeSuspendFunction {
-            val result = httpClient.head(debridLink.link!!).status.isSuccess()
-            logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
-                debridLink.path, debridLink.provider, result)
-            emit(result)
+        val isIptv = isIptvUrl(debridLink.link ?: "")
+        try {
+            rateLimiter.executeSuspendFunction {
+                val result = httpClient.head(debridLink.link!!).status.isSuccess()
+                logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
+                    debridLink.path, debridLink.provider, result)
+                emit(result)
+            }
+        } catch (e: Exception) {
+            // TRACE level logging for HTTP HEAD request exceptions with full stack trace
+            logger.trace("HTTP_HEAD_EXCEPTION: Exception checking link alive: path={}, link={}, provider={}, exceptionClass={}", 
+                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+            // Explicitly log stack trace to ensure it appears
+            logger.trace("HTTP_HEAD_EXCEPTION_STACK_TRACE", e)
+            throw e
         }
     }.retry(RETRIES)
         .first()
