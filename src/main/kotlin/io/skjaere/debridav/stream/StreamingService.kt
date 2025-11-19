@@ -627,9 +627,15 @@ class StreamingService(
                         }
                             }  // closes use block
                         } catch (e: Exception) {
-                            logger.trace("REDIRECT_BODY_EXCEPTION: Exception creating input stream from redirect response body: redirectUrl={}, exceptionClass={}", 
-                                redirectUrl, e::class.simpleName, e)
-                            logger.trace("REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                            // Check if this is a client abort (expected when client disconnects)
+                            if (isClientAbortException(e)) {
+                                logger.debug("REDIRECT_BODY_EXCEPTION: Client disconnected (expected): redirectUrl={}, exceptionClass={}", 
+                                    redirectUrl, e::class.simpleName)
+                            } else {
+                                logger.trace("REDIRECT_BODY_EXCEPTION: Exception creating input stream from redirect response body: redirectUrl={}, exceptionClass={}", 
+                                    redirectUrl, e::class.simpleName, e)
+                                logger.trace("REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                            }
                             redirectResponse.cancel()
                             throw ReadFromHttpStreamException("Failed to create input stream from redirect response: $redirectUrl", e)
                         }
@@ -637,8 +643,8 @@ class StreamingService(
                         // Automatic redirect handling: HttpRedirect plugin should have handled it
                         // However, if we see a redirect response here, it means the plugin didn't follow it
                         // (likely because Range headers prevent automatic redirect following)
-                        // Fall back to manual handling with a warning
-                        logger.warn("REDIRECT_RESPONSE: Automatic redirect handling failed (HttpRedirect plugin didn't follow redirect), falling back to manual handling: path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}", 
+                        // Fall back to manual handling - this is expected behavior, so log at DEBUG level
+                        logger.debug("REDIRECT_RESPONSE: Automatic redirect handling skipped (HttpRedirect plugin doesn't follow redirects with Range headers), using manual handling: path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}", 
                             source.cachedFile.path, source.cachedFile.link?.take(100), redirectLocation, requestedRange, isIptv)
                         
                         // Manually follow redirect while preserving Range header
@@ -732,12 +738,19 @@ class StreamingService(
                                         source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName, e)
                                     throw e
                                 } catch (e: Exception) {
-                                    val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                                    logger.trace("STREAMING_EXCEPTION: Exception during stream read (after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                                        source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, redirectResponse.status.value, e::class.simpleName, e)
-                                    // Explicitly log stack trace to ensure it appears
-                                    logger.trace("STREAMING_EXCEPTION_STACK_TRACE (after redirect fallback)", e)
-                                    logger.error("An error occurred during reading from stream after redirect fallback", e)
+                                    // Check if this is a client abort (expected when client disconnects)
+                                    if (isClientAbortException(e)) {
+                                        val actualBytesRead = streamingContext.inputStream.getTotalCount()
+                                        logger.debug("STREAMING_EXCEPTION: Client disconnected (expected, after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
+                                            source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, redirectResponse.status.value, e::class.simpleName)
+                                    } else {
+                                        val actualBytesRead = streamingContext.inputStream.getTotalCount()
+                                        logger.trace("STREAMING_EXCEPTION: Exception during stream read (after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
+                                            source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, redirectResponse.status.value, e::class.simpleName, e)
+                                        // Explicitly log stack trace to ensure it appears
+                                        logger.trace("STREAMING_EXCEPTION_STACK_TRACE (after redirect fallback)", e)
+                                        logger.error("An error occurred during reading from stream after redirect fallback", e)
+                                    }
                                     throw ReadFromHttpStreamException("An error occurred during reading from stream after redirect fallback", e)
                                 } finally {
                                     logger.trace("REDIRECT_CLEANUP: Cleaning up redirect response (fallback): redirectUrl={}", redirectUrl)
@@ -746,9 +759,15 @@ class StreamingService(
                                 }
                                 }  // closes use block
                             } catch (e: Exception) {
-                                logger.trace("REDIRECT_BODY_EXCEPTION: Exception creating input stream from redirect response body (fallback): redirectUrl={}, exceptionClass={}", 
-                                    redirectUrl, e::class.simpleName, e)
-                                logger.trace("REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                                // Check if this is a client abort (expected when client disconnects)
+                                if (isClientAbortException(e)) {
+                                    logger.debug("REDIRECT_BODY_EXCEPTION: Client disconnected (expected): redirectUrl={}, exceptionClass={}", 
+                                        redirectUrl, e::class.simpleName)
+                                } else {
+                                    logger.trace("REDIRECT_BODY_EXCEPTION: Exception creating input stream from redirect response body (fallback): redirectUrl={}, exceptionClass={}", 
+                                        redirectUrl, e::class.simpleName, e)
+                                    logger.trace("REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                                }
                                 redirectResponse.cancel()
                                 throw ReadFromHttpStreamException("Failed to create input stream from redirect response: $redirectUrl", e)
                             }
@@ -804,14 +823,22 @@ class StreamingService(
                         // Let it propagate to outer handler for proper handling
                         throw e
                     } catch (e: Exception) {
-                        // TRACE level logging for streaming exceptions with full stack trace
-                        val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                        logger.trace("STREAMING_EXCEPTION: Exception during stream read: path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                            source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
-                            requestedRange, expectedBytes, actualBytesRead, response.status.value, e::class.simpleName, e)
-                        // Explicitly log stack trace to ensure it appears
-                        logger.trace("STREAMING_EXCEPTION_STACK_TRACE", e)
-                        logger.error("An error occurred during reading from stream", e)
+                        // Check if this is a client abort (expected when client disconnects)
+                        if (isClientAbortException(e)) {
+                            val actualBytesRead = streamingContext.inputStream.getTotalCount()
+                            logger.debug("STREAMING_EXCEPTION: Client disconnected (expected): path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
+                                source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
+                                requestedRange, expectedBytes, actualBytesRead, response.status.value, e::class.simpleName)
+                        } else {
+                            // TRACE level logging for streaming exceptions with full stack trace
+                            val actualBytesRead = streamingContext.inputStream.getTotalCount()
+                            logger.trace("STREAMING_EXCEPTION: Exception during stream read: path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
+                                source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
+                                requestedRange, expectedBytes, actualBytesRead, response.status.value, e::class.simpleName, e)
+                            // Explicitly log stack trace to ensure it appears
+                            logger.trace("STREAMING_EXCEPTION_STACK_TRACE", e)
+                            logger.error("An error occurred during reading from stream", e)
+                        }
                         throw ReadFromHttpStreamException("An error occurred during reading from stream", e)
                     } finally {
                         response.cancel()
@@ -1098,6 +1125,35 @@ class StreamingService(
      */
     private fun isMediaFile(fileName: String): Boolean {
         return VideoFileExtensions.isVideoFile(fileName)
+    }
+    
+    /**
+     * Checks if an exception is caused by a client abort (client disconnecting).
+     * This is expected behavior and shouldn't be logged as an error.
+     */
+    private fun isClientAbortException(e: Exception): Boolean {
+        if (e is ClientAbortException) {
+            return true
+        }
+        // Check if CancellationException is caused by ClientAbortException
+        if (e is CancellationException) {
+            var cause: Throwable? = e.cause
+            while (cause != null) {
+                if (cause is ClientAbortException) {
+                    return true
+                }
+                cause = cause.cause
+            }
+        }
+        // Check if any exception in the chain is ClientAbortException
+        var cause: Throwable? = e.cause
+        while (cause != null) {
+            if (cause is ClientAbortException) {
+                return true
+            }
+            cause = cause.cause
+        }
+        return false
     }
     
     /**

@@ -114,10 +114,11 @@ data class DebridavConfigurationProperties(
             if (matches) {
                 return true
             }
-        } else if (userAgent != null) {
-            // Log when pattern is null to help debug configuration issues
+        } else if (userAgent != null && enableRcloneArrsLocalVideo) {
+            // Only log when feature is enabled but pattern is not configured - helps debug configuration issues
+            // Use TRACE level to reduce verbosity since this is expected when pattern is not configured
             org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
-                .debug("ARR_LOCAL_VIDEO: user-agent={}, but rcloneArrsUserAgentPattern is null (not configured)", userAgent)
+                .trace("ARR_LOCAL_VIDEO: user-agent={}, but rcloneArrsUserAgentPattern is null (not configured)", userAgent)
         }
 
         // Check hostname
