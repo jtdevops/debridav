@@ -1,6 +1,7 @@
 package io.skjaere.debridav.stream
 
 import io.ktor.client.call.body
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.headers
 import io.ktor.http.HttpHeaders
@@ -548,6 +549,11 @@ class StreamingService(
                                     append(HttpHeaders.UserAgent, it)
                                 }
                             }
+                            timeout {
+                                requestTimeoutMillis = 20_000_000
+                                socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
+                                connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                            }
                         }
                     } catch (e: Exception) {
                         logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeHeader={}, exceptionClass={}", 
@@ -672,6 +678,11 @@ class StreamingService(
                                     iptvConfigurationProperties?.userAgent?.let {
                                         append(HttpHeaders.UserAgent, it)
                                     }
+                                }
+                                timeout {
+                                    requestTimeoutMillis = 20_000_000
+                                    socketTimeoutMillis = 10_000
+                                    connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
                                 }
                             }
                         } catch (e: Exception) {
