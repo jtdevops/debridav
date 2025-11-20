@@ -93,18 +93,37 @@ class IptvRequestService(
         // Use extension from title if present, otherwise use extension from URL
         val mediaExtension = titleMediaExtension ?: urlMediaExtension
         
-        // Get title without extension for folder name (if title had extension, remove it)
-        val titleWithoutExtension = if (titleMediaExtension != null) {
-            titleToUse.removeSuffix(".$titleMediaExtension").removeSuffix(".${titleMediaExtension.uppercase()}")
+        // Check if magnet title already has a language code at the end (e.g., "-PRMT", ".PRMT")
+        // Extract it and remove from beginning to avoid duplication
+        val languageCodeAtEnd = extractLanguageCodeFromEnd(titleToUse)
+        var languageCode: String? = null
+        var cleanedTitleToUse = titleToUse
+        
+        if (languageCodeAtEnd != null) {
+            // Language code found at the end, use it and remove from beginning
+            languageCode = languageCodeAtEnd
+            // Remove language code from beginning of titleToUse
+            cleanedTitleToUse = removeSpecificLanguageCodeFromBeginning(titleToUse, languageCode)
         } else {
-            titleToUse
+            // No language code at end, check if IPTV content title has one at beginning
+            languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
         }
         
-        // Check if IPTV content title starts with any configured language prefix
-        // If not, extract language code and append it after .IPTV
-        val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
+        // Get title without extension for folder name (if title had extension, remove it)
+        // Use cleaned title if we removed language code from beginning
+        val titleWithoutExtension = if (titleMediaExtension != null) {
+            cleanedTitleToUse.removeSuffix(".$titleMediaExtension").removeSuffix(".${titleMediaExtension.uppercase()}")
+        } else {
+            cleanedTitleToUse
+        }
+        
+        // If language code is at the end of titleWithoutExtension, don't add it again
+        if (languageCode != null && titleWithoutExtension.endsWith("-$languageCode", ignoreCase = true)) {
+            languageCode = null // Already at the end, don't add again
+        }
         
         // Build filename: insert language code between .IPTV and media extension if needed
+        // Use cleanedTitleToUse (which has language code removed from beginning if it was at the end)
         // If title already had extension, use it as-is (don't add another)
         val fileNameWithExtension = if (titleMediaExtension != null) {
             // Title already has extension - use it as-is, but handle language code if needed
@@ -116,29 +135,29 @@ class IptvRequestService(
                 val baseWithoutExt = titleWithoutExtension
                 "$baseWithoutExt-$languageCode.$titleMediaExtension"
             } else {
-                // No language code, use title as-is
-                titleToUse
+                // No language code, use cleaned title as-is
+                cleanedTitleToUse
             }
         } else if (mediaExtension != null) {
             // Title doesn't have extension, add it
-            if (languageCode != null && titleToUse.endsWith(".IPTV", ignoreCase = true)) {
+            if (languageCode != null && cleanedTitleToUse.endsWith(".IPTV", ignoreCase = true)) {
                 // Insert language code between .IPTV and media extension
-                "${titleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
+                "${cleanedTitleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
             } else if (languageCode != null) {
                 // Language code but no .IPTV suffix, append it before extension
-                "$titleToUse-$languageCode.$mediaExtension"
+                "$cleanedTitleToUse-$languageCode.$mediaExtension"
             } else {
                 // No language code, just append extension
-                "$titleToUse.$mediaExtension"
+                "$cleanedTitleToUse.$mediaExtension"
             }
         } else {
             // No media extension available, append language code if present
-            if (languageCode != null && titleToUse.endsWith(".IPTV", ignoreCase = true)) {
-                "${titleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode"
+            if (languageCode != null && cleanedTitleToUse.endsWith(".IPTV", ignoreCase = true)) {
+                "${cleanedTitleToUse.removeSuffix(".IPTV")}.IPTV-$languageCode"
             } else if (languageCode != null) {
-                "$titleToUse-$languageCode"
+                "$cleanedTitleToUse-$languageCode"
             } else {
-                titleToUse
+                cleanedTitleToUse
             }
         }
         
@@ -733,17 +752,30 @@ class IptvRequestService(
      * Radarr expects titles in format like: "Movie.Title.1990.1080p.BluRay.x264-GROUP"
      * We'll add quality and encoding info if available.
      */
-    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?): String {
-        // Remove configured language prefixes if present (e.g., "EN| ", "EN - ", "NL| ")
+    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?, languageCodeToRemove: String? = null): String {
+        // STEP 1: Remove configured language prefixes if present (e.g., "EN| ", "EN - ", "NL| ")
         var cleanTitle = removeLanguagePrefixes(originalTitle)
         
-        // Extract year from title if not provided
+        // STEP 2: Also remove any language code pattern from the beginning (e.g., "PRMT - ", "NL| ")
+        // This handles cases where language codes are not in configured prefixes
+        cleanTitle = removeLanguageCodePrefix(cleanTitle)
+        
+        // STEP 3: If a specific language code is being added to the end, remove it from the beginning
+        if (languageCodeToRemove != null) {
+            cleanTitle = removeSpecificLanguageCodeFromBeginning(cleanTitle, languageCodeToRemove)
+        }
+        
+        // STEP 4: Extract year from title if not provided
         val titleYear = year ?: extractYearFromTitle(cleanTitle)
+        
+        // STEP 5: Remove standalone year from title to avoid duplication (keep year in brackets if present)
+        // This removes standalone "1986" if "(1986)" exists in the title
+        cleanTitle = removeStandaloneYearFromTitle(cleanTitle, titleYear)
         
         // Build Radarr-compatible title
         val parts = mutableListOf<String>()
         
-        // Add title (sanitize for filename)
+        // STEP 7: Add title (sanitize for filename)
         val sanitizedTitle = cleanTitle
             .replace(Regex("[<>:\"/\\|?*]"), ".")
             .replace(Regex("\\s+"), ".")
@@ -751,20 +783,30 @@ class IptvRequestService(
             .trim('.')
         parts.add(sanitizedTitle)
         
-        // Add year if available
-        if (titleYear != null) {
-            parts.add(titleYear.toString())
+        // STEP 8: Conditionally add year - only if not already present in the sanitized title
+        // Check if year already exists in sanitized title (could be in brackets like "(1986)" or as standalone)
+        val yearAlreadyInTitle = if (titleYear != null) {
+            val yearPattern = Regex("(?:^|[.\\(-])$titleYear(?:$|[.)-])")
+            yearPattern.containsMatchIn(sanitizedTitle)
+        } else {
+            true // No year to add
         }
         
-        // Add quality (default to 1080p if not detected)
+        if (titleYear != null && !yearAlreadyInTitle) {
+            // Year not found in sanitized title, add it as standalone
+            parts.add(titleYear.toString())
+        }
+        // If year already exists in sanitizedTitle (in brackets or otherwise), don't add again
+        
+        // STEP 9: Add quality (default to 1080p if not detected)
         val finalQuality = quality ?: "1080p"
         parts.add(finalQuality)
         
-        // Add source and codec (common defaults for IPTV)
+        // STEP 10: Add source and codec (common defaults for IPTV)
         parts.add("BluRay")
         parts.add("x264")
         
-        // Join parts with dots, then add release group with dash (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV")
+        // STEP 11: Join parts with dots, then add release group with dash (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV")
         val baseTitle = parts.joinToString(".")
         return "$baseTitle-IPTV"
     }
@@ -775,6 +817,84 @@ class IptvRequestService(
     private fun extractYearFromTitle(title: String): Int? {
         val yearPattern = Regex("\\b(19|20)\\d{2}\\b")
         return yearPattern.find(title)?.value?.toIntOrNull()
+    }
+    
+    /**
+     * Removes any language code pattern from the beginning of a title.
+     * Pattern: uppercase letters followed by '|' or '-' and optional space
+     * Examples: "PRMT - ", "NL| ", "EN - "
+     */
+    private fun removeLanguageCodePrefix(title: String): String {
+        val languagePattern = Regex("^([A-Z]{2,})\\s*[|\\-]\\s*")
+        return languagePattern.replace(title, "").trimStart()
+    }
+    
+    /**
+     * Removes a specific language code from the beginning of a title.
+     * Handles patterns like "PRMT - ", "PRMT| ", "PRMT-", etc.
+     */
+    private fun removeSpecificLanguageCodeFromBeginning(title: String, languageCode: String): String {
+        // Try various patterns: "PRMT - ", "PRMT| ", "PRMT-", "PRMT|", etc.
+        val patterns = listOf(
+            Regex("^$languageCode\\s*[|\\-]\\s+", RegexOption.IGNORE_CASE),
+            Regex("^$languageCode\\s*[|\\-]", RegexOption.IGNORE_CASE),
+            Regex("^$languageCode\\s+", RegexOption.IGNORE_CASE)
+        )
+        
+        var result = title
+        for (pattern in patterns) {
+            if (pattern.containsMatchIn(result)) {
+                result = pattern.replace(result, "").trimStart()
+                break
+            }
+        }
+        return result
+    }
+    
+    /**
+     * Extracts language code from the end of a title.
+     * Looks for patterns like "-PRMT", ".PRMT" at the end of the title.
+     * Returns the language code if found, null otherwise.
+     */
+    private fun extractLanguageCodeFromEnd(title: String): String? {
+        // Pattern: ends with "-CODE" or ".CODE" where CODE is 2+ uppercase letters
+        val endPattern = Regex("[-.]([A-Z]{2,})$")
+        val match = endPattern.find(title)
+        return match?.groupValues?.get(1)?.uppercase()
+    }
+    
+    /**
+     * Removes standalone year from title if year is already present in brackets.
+     * Example: "Movie (1986) 1986" -> "Movie (1986)"
+     * Keeps the year in brackets and removes standalone duplicate.
+     * Also handles cases where brackets become dots after sanitization: "Movie.(1986).1986" -> "Movie.(1986)"
+     */
+    private fun removeStandaloneYearFromTitle(title: String, year: Int?): String {
+        if (year == null) {
+            return title
+        }
+        
+        val yearStr = year.toString()
+        val yearInBrackets = "($yearStr)"
+        val yearInBracketsWithDots = "\\.\\($yearStr\\)\\." // Pattern: .(1986).
+        
+        // Check if year is already in brackets (either as "(1986)" or ".(1986).")
+        val hasYearInBrackets = title.contains(yearInBrackets) || 
+                               Regex(yearInBracketsWithDots).containsMatchIn(title)
+        
+        if (hasYearInBrackets) {
+            // Remove standalone year occurrences (not in brackets)
+            // Pattern: word boundary or dot, year, word boundary or dot (but not if preceded by '(' or followed by ')')
+            // Handle cases like: "Movie.(1986).1986" -> "Movie.(1986)"
+            val standaloneYearPattern = Regex("(?<![(])(?:^|[.\\s-])$yearStr(?![)])(?:$|[.\\s-])")
+            var result = standaloneYearPattern.replace(title, "")
+            // Clean up multiple consecutive dots/spaces
+            result = result.replace(Regex("\\.{2,}"), ".")
+            result = result.replace(Regex("\\s{2,}"), " ")
+            return result.trim()
+        }
+        
+        return title
     }
     
     fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvSearchResult> {
@@ -791,11 +911,11 @@ class IptvRequestService(
             // Try to extract quality from title
             var quality = extractQualityFromTitle(entity.title)
             
-            // Check if IPTV content title starts with any configured language prefix
+            // STEP 1: Identify language code early - check if IPTV content title starts with any configured language prefix
             // If not, extract language code and adjust quality if needed
             val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
             
-            // If language code is valid ISO 639-1 language code but not EN, change quality from 1080p to 480p
+            // STEP 2: Adjust quality based on language code (if valid ISO 639-1 language code but not EN)
             if (languageCode != null && isValidLanguageCode(languageCode) && languageCode != "EN") {
                 // Valid non-EN language code found, downgrade quality to 480p
                 val currentQuality = quality ?: "1080p"
@@ -807,10 +927,11 @@ class IptvRequestService(
                 logger.debug("Extracted code '$languageCode' is not a valid ISO 639-1 language code, skipping quality adjustment")
             }
             
-            // Format title for Radarr compatibility (includes quality, codec, etc.)
-            var radarrTitle = formatTitleForRadarr(entity.title, year, quality)
+            // STEP 3: Format title for Radarr compatibility (includes quality, codec, etc.)
+            // This will remove language code from beginning and handle duplicate years
+            var radarrTitle = formatTitleForRadarr(entity.title, year, quality, languageCode)
             
-            // Build the release group suffix: -IPTV[-provider][-languageCode]
+            // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
             val releaseGroupParts = mutableListOf("IPTV")
             
             // Add provider name if configured
@@ -818,15 +939,19 @@ class IptvRequestService(
                 releaseGroupParts.add(entity.providerName)
             }
             
-            // Add language code if present
-            if (languageCode != null) {
+            // Conditionally add language code - only if it's not already at the end of the formatted title
+            val shouldAddLanguageCode = languageCode != null && 
+                                       !radarrTitle.endsWith("-$languageCode", ignoreCase = true) &&
+                                       !radarrTitle.endsWith(".$languageCode", ignoreCase = true)
+            
+            if (shouldAddLanguageCode) {
                 releaseGroupParts.add(languageCode)
             }
             
-            // Replace -IPTV with the full release group (e.g., -IPTV-mega-NL)
+            // STEP 5: Replace -IPTV with the full release group (e.g., -IPTV-mega-NL)
             if (radarrTitle.endsWith("-IPTV", ignoreCase = true)) {
                 radarrTitle = "${radarrTitle.removeSuffix("-IPTV")}-${releaseGroupParts.joinToString("-")}"
-            } else if (languageCode != null || iptvConfigurationProperties.includeProviderInMagnetTitle) {
+            } else if (shouldAddLanguageCode || iptvConfigurationProperties.includeProviderInMagnetTitle) {
                 // Title doesn't end with -IPTV, append the release group
                 radarrTitle = "$radarrTitle-${releaseGroupParts.joinToString("-")}"
             }
