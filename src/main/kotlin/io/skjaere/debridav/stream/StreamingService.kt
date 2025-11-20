@@ -876,9 +876,6 @@ class StreamingService(
         while (remaining > 0) {
             readIterations++
             val size = listOf(remaining, DEFAULT_BUFFER_SIZE).min()
-            
-            logger.trace("PIPE_STREAM_READ_ATTEMPT: iteration={}, remaining={}, size={}, readBytes={}", 
-                readIterations, remaining, size, readBytes)
 
             val bytes = try {
                 streamingContext.inputStream.readNBytes(size.toInt())
@@ -890,8 +887,6 @@ class StreamingService(
             }
             
             readBytes += bytes.size
-            logger.trace("PIPE_STREAM_READ_SUCCESS: iteration={}, bytesRead={}, totalReadBytes={}, remaining={}", 
-                readIterations, bytes.size, readBytes, remaining - bytes.size)
             if (!hasReadFirstByte) {
                 hasReadFirstByte = true
                 timeToFirstByte = Duration.between(started, Instant.now()).toMillis().toDouble()
@@ -924,6 +919,9 @@ class StreamingService(
                 throw EOFException()
             }
         }
+        
+        logger.trace("PIPE_STREAM_END: Completed piping stream: path={}, totalBytesRead={}, iterations={}", 
+            source.cachedFile.path, readBytes, readIterations)
     }
 
     private suspend fun ProducerScope<ByteArrayContext>.sendCachedBytes(
