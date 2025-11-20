@@ -303,7 +303,7 @@ open class IptvFile() : DebridFile() {
         this.link = link
         this.params = params
         this.lastChecked = lastChecked
-        // IPTV files don't have a debrid provider
-        this.provider = null
+        // IPTV files use the IPTV provider
+        this.provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
     }
 }

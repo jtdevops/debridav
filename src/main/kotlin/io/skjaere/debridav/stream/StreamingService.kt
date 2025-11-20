@@ -426,7 +426,7 @@ class StreamingService(
         val started = Instant.now()
         
         // Handle IPTV files - check if we can find a matching debrid client
-        // If not found, it's likely an IPTV file (using dummy provider)
+        // If not found, it's likely an IPTV file (using IPTV provider)
         val httpStatement = try {
             val debridClient = debridClients.firstOrNull { it.getProvider() == source.cachedFile.provider }
             if (debridClient != null) {
@@ -681,7 +681,7 @@ class StreamingService(
                                 }
                                 timeout {
                                     requestTimeoutMillis = 20_000_000
-                                    socketTimeoutMillis = 10_000
+                                    socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
                                     connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
                                 }
                             }
@@ -794,7 +794,7 @@ class StreamingService(
             
             try {
                 response.body<ByteReadChannel>().toInputStream().use { inputStream ->
-                    // For IPTV files, provider might be a dummy value - set to null for metrics
+                    // For IPTV files, provider is IPTV (not a debrid client) - set to null for metrics
                     val actualProvider = if (debridClients.none { it.getProvider() == source.cachedFile.provider }) {
                         null
                     } else {

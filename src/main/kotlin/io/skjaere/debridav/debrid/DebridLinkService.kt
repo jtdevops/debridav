@@ -132,7 +132,7 @@ class DebridLinkService(
                     link = link,
                     params = iptvFile.params ?: emptyMap(),
                     lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
-                    provider = io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID // Dummy
+                    provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
                 )
             }
             return null
@@ -201,7 +201,7 @@ class DebridLinkService(
                     link = link,
                     params = iptvFile.params ?: emptyMap(),
                     lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
-                    provider = io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID // Dummy
+                    provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
                 ))
             }
             return@flow
@@ -238,10 +238,10 @@ class DebridLinkService(
                     link = link,
                     params = iptvFile.params ?: emptyMap(),
                     lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
-                    provider = io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID // Dummy
+                    provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
                 )
             }
-            return MissingFile(io.skjaere.debridav.debrid.DebridProvider.REAL_DEBRID, clock.instant().toEpochMilli())
+            return MissingFile(io.skjaere.debridav.debrid.DebridProvider.IPTV, clock.instant().toEpochMilli())
         }
         
         val key = when (debridFileContents) {
