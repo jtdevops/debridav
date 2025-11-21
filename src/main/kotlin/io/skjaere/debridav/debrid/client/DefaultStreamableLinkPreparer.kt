@@ -92,9 +92,6 @@ class DefaultStreamableLinkPreparer(
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
         val isIptv = isIptvUrl(debridLink.link ?: "")
         
-        // Test TRACE logging to verify logger level is configured correctly
-        logger.trace("TRACE_LOG_TEST: DefaultStreamableLinkPreparer TRACE logging is enabled. This log should appear if TRACE level is configured correctly.")
-        
         return try {
             rateLimiter.executeSuspendFunction {
                 httpClient.prepareGet(debridLink.link!!) {

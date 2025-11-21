@@ -253,9 +253,6 @@ class StreamingService(
             remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
             appliedRange.finish - appliedRange.start + 1, debridLink.provider, httpRequestInfo.sourceInfo)
         
-        // Test TRACE logging to verify logger level is configured correctly
-        logger.trace("TRACE_LOG_TEST: StreamingService TRACE logging is enabled. This log should appear if TRACE level is configured correctly.")
-        
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
         
         var result: StreamResult = StreamResult.OK
@@ -616,7 +613,7 @@ class StreamingService(
                             }
                             
                             logger.trace("STREAMING_EOF: EOFException during stream read (after redirect): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
-                                source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName, e)
+                                source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName)
                             throw e
                         } catch (e: Exception) {
                             val actualBytesRead = streamingContext.inputStream.getTotalCount()
@@ -746,7 +743,7 @@ class StreamingService(
                                     }
                                     
                                     logger.trace("STREAMING_EOF: EOFException during stream read (after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
-                                        source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName, e)
+                                        source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName)
                                     throw e
                                 } catch (e: Exception) {
                                     // Check if this is a client abort (expected when client disconnects)
@@ -830,7 +827,7 @@ class StreamingService(
                         
                         logger.trace("STREAMING_EOF: EOFException during stream read: path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
                             source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
-                            requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, response.status.value, e::class.simpleName, e)
+                            requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, response.status.value, e::class.simpleName)
                         // Let it propagate to outer handler for proper handling
                         throw e
                     } catch (e: Exception) {
@@ -859,7 +856,10 @@ class StreamingService(
             } catch (e: Exception) {
                 logger.trace("NON_REDIRECT_BODY_EXCEPTION: Exception creating input stream from response body: status={}, exceptionClass={}", 
                     response.status.value, e::class.simpleName, e)
-                logger.trace("NON_REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                // Skip stacktrace logging for CancellationException and EOFException as they're expected during normal streaming
+                if (e !is CancellationException && e !is EOFException) {
+                    logger.trace("NON_REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                }
                 response.cancel()
                 throw ReadFromHttpStreamException("Failed to create input stream from response", e)
             }
@@ -893,7 +893,10 @@ class StreamingService(
             } catch (e: Exception) {
                 logger.trace("PIPE_STREAM_READ_EXCEPTION: Exception during readNBytes: iteration={}, remaining={}, size={}, readBytes={}, exceptionClass={}", 
                     readIterations, remaining, size, readBytes, e::class.simpleName, e)
-                logger.trace("PIPE_STREAM_READ_EXCEPTION_STACK_TRACE", e)
+                // Skip stacktrace logging for CancellationException as it's expected during normal streaming
+                if (e !is CancellationException) {
+                    logger.trace("PIPE_STREAM_READ_EXCEPTION_STACK_TRACE", e)
+                }
                 throw e
             }
             

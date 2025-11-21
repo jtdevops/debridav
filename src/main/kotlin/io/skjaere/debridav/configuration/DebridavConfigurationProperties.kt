@@ -114,12 +114,8 @@ data class DebridavConfigurationProperties(
             if (matches) {
                 return true
             }
-        } else if (userAgent != null && enableRcloneArrsLocalVideo) {
-            // Only log when feature is enabled but pattern is not configured - helps debug configuration issues
-            // Use TRACE level to reduce verbosity since this is expected when pattern is not configured
-            org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
-                .trace("ARR_LOCAL_VIDEO: user-agent={}, but rcloneArrsUserAgentPattern is null (not configured)", userAgent)
         }
+        // Note: Removed TRACE logging for "not configured" case as it's expected when pattern is not configured
 
         // Check hostname
         val sourceInfo = httpRequestInfo.sourceInfo
