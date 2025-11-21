@@ -92,32 +92,43 @@ class DefaultStreamableLinkPreparer(
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
         val isIptv = isIptvUrl(debridLink.link ?: "")
         
+        // Check if IPTV content has default file size (2GB for movies, 1GB for episodes)
+        // If so, skip Range header to allow automatic redirect following
+        val hasDefaultIptvSize = isIptv && debridLink.size != null && 
+            (debridLink.size == 2_000_000_000L || debridLink.size == 1_000_000_000L)
+        
         return try {
             rateLimiter.executeSuspendFunction {
                 httpClient.prepareGet(debridLink.link!!) {
                 headers {
-                    // Always handle byte range requests - the chunking control is internal
-                    range?.let { range ->
-                        getByteRange(range, debridLink.size!!)?.let { byteRange ->
-                            // Only apply byte range if chunking is not disabled
-                            if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
-                                logger.info(
-                                    "Applying byteRange $byteRange " +
-                                            "for ${debridLink.link}" +
-                                            " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
-                                )
+                    // Skip Range header for IPTV content with default file size to allow automatic redirect following
+                    if (!hasDefaultIptvSize) {
+                        // Always handle byte range requests - the chunking control is internal
+                        range?.let { range ->
+                            getByteRange(range, debridLink.size!!)?.let { byteRange ->
+                                // Only apply byte range if chunking is not disabled
+                                if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
+                                    logger.info(
+                                        "Applying byteRange $byteRange " +
+                                                "for ${debridLink.link}" +
+                                                " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
+                                    )
 
-                                if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                    append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
-                                }
-                            } else {
-                                logger.info("Byte range chunking disabled - using exact user range")
-                                // When chunking is disabled, use the exact range requested by user
-                                if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                    append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                    if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                        append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
+                                    }
+                                } else {
+                                    logger.info("Byte range chunking disabled - using exact user range")
+                                    // When chunking is disabled, use the exact range requested by user
+                                    if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                        append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        logger.debug("Skipping Range header for IPTV content with default file size to enable automatic redirect following: path={}, size={}", 
+                            debridLink.path, debridLink.size)
                     }
 
                     // Use user agent from constructor if provided
@@ -128,8 +139,13 @@ class DefaultStreamableLinkPreparer(
                 
                 // For IPTV URLs, log that insecure SSL and redirect following are enabled
                 // (SSL trust-all and redirect following are configured at the HTTP client engine level)
+                // When no Range header is sent, HttpRedirect plugin can automatically follow redirects
                 if (isIptv) {
-                    logger.debug("Detected IPTV URL, using insecure SSL and redirect following: ${debridLink.link?.take(100)}")
+                    if (hasDefaultIptvSize) {
+                        logger.debug("Detected IPTV URL with default file size, using automatic redirect following (no Range header): ${debridLink.link?.take(100)}")
+                    } else {
+                        logger.debug("Detected IPTV URL, using insecure SSL and redirect following: ${debridLink.link?.take(100)}")
+                    }
                 }
                 
                 timeout {
