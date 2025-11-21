@@ -854,10 +854,10 @@ class StreamingService(
                     }
                 }
             } catch (e: Exception) {
-                logger.trace("NON_REDIRECT_BODY_EXCEPTION: Exception creating input stream from response body: status={}, exceptionClass={}", 
-                    response.status.value, e::class.simpleName, e)
-                // Skip stacktrace logging for CancellationException and EOFException as they're expected during normal streaming
+                // Skip logging for CancellationException and EOFException as they're expected during normal streaming
                 if (e !is CancellationException && e !is EOFException) {
+                    logger.trace("NON_REDIRECT_BODY_EXCEPTION: Exception creating input stream from response body: status={}, exceptionClass={}", 
+                        response.status.value, e::class.simpleName, e)
                     logger.trace("NON_REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
                 }
                 response.cancel()
@@ -891,10 +891,10 @@ class StreamingService(
             val bytes = try {
                 streamingContext.inputStream.readNBytes(size.toInt())
             } catch (e: Exception) {
-                logger.trace("PIPE_STREAM_READ_EXCEPTION: Exception during readNBytes: iteration={}, remaining={}, size={}, readBytes={}, exceptionClass={}", 
-                    readIterations, remaining, size, readBytes, e::class.simpleName, e)
-                // Skip stacktrace logging for CancellationException as it's expected during normal streaming
+                // Skip logging for CancellationException as it's expected during normal streaming
                 if (e !is CancellationException) {
+                    logger.trace("PIPE_STREAM_READ_EXCEPTION: Exception during readNBytes: iteration={}, remaining={}, size={}, readBytes={}, exceptionClass={}", 
+                        readIterations, remaining, size, readBytes, e::class.simpleName, e)
                     logger.trace("PIPE_STREAM_READ_EXCEPTION_STACK_TRACE", e)
                 }
                 throw e
