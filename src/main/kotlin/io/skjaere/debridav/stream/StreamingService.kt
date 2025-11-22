@@ -139,9 +139,10 @@ class StreamingService(
     private val activeDownloads = ConcurrentHashMap<String, DownloadTrackingContext>()
     private val completedDownloads = ConcurrentLinkedQueue<DownloadTrackingContext>()
     
-    // Rate limiting for IPTV provider login calls: max 1 call per minute per provider
+    // Rate limiting for IPTV provider login calls per provider
     private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
-    private val IPTV_LOGIN_RATE_LIMIT_MS = 60_000L // 1 minute
+    private val IPTV_LOGIN_RATE_LIMIT_MS: Long get() = 
+        iptvConfigurationProperties?.loginRateLimit?.toMillis() ?: 60_000L // Default: 1 minute
 
 
     @OptIn(ExperimentalCoroutinesApi::class)

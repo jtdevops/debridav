@@ -112,8 +112,8 @@ search:
       text: "1"
     leechers:
       text: "0"
-    details:
-      text: "/api/iptv"
+    # details:
+    #   text: "/api/iptv"
     infohash:
       # Hash is now included in URL format: iptv://{hash}/{provider}/{contentId}
       # Can extract from URL or use the infohash field directly
