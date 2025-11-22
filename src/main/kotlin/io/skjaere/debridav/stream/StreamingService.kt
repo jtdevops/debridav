@@ -498,8 +498,14 @@ class StreamingService(
             val storedFileSize = source.cachedFile.size ?: -1L
             val httpContentLength = response.headers["Content-Length"]?.toLongOrNull() ?: -1L
             val redirectLocation = response.headers["Location"]
+            // For byte range requests, httpContentLength is the range size, not the full file size
+            // This mismatch is expected and normal for range requests
             val sizeMismatch = if (storedFileSize > 0 && httpContentLength > 0 && storedFileSize != httpContentLength) {
-                "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                if (httpContentLength < storedFileSize) {
+                    "EXPECTED_RANGE: storedSize=$storedFileSize != httpContentLength=$httpContentLength (range request)"
+                } else {
+                    "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                }
             } else {
                 "OK"
             }
@@ -606,8 +612,14 @@ class StreamingService(
                             val storedFileSize = source.cachedFile.size ?: -1L
                             val httpContentLength = redirectResponse.headers["Content-Length"]?.toLongOrNull() ?: -1L
                             val fullFileSize = if (storedFileSize > 0) storedFileSize else httpContentLength
+                            // For byte range requests, httpContentLength is the range size, not the full file size
+                            // This mismatch is expected and normal for range requests
                             val sizeMismatch = if (storedFileSize > 0 && httpContentLength > 0 && storedFileSize != httpContentLength) {
-                                "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                                if (httpContentLength < storedFileSize) {
+                                    "EXPECTED_RANGE: storedSize=$storedFileSize != httpContentLength=$httpContentLength (range request)"
+                                } else {
+                                    "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                                }
                             } else {
                                 "OK"
                             }
@@ -736,8 +748,14 @@ class StreamingService(
                                     val storedFileSize = source.cachedFile.size ?: -1L
                                     val httpContentLength = redirectResponse.headers["Content-Length"]?.toLongOrNull() ?: -1L
                                     val fullFileSize = if (storedFileSize > 0) storedFileSize else httpContentLength
+                                    // For byte range requests, httpContentLength is the range size, not the full file size
+                                    // This mismatch is expected and normal for range requests
                                     val sizeMismatch = if (storedFileSize > 0 && httpContentLength > 0 && storedFileSize != httpContentLength) {
-                                        "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                                        if (httpContentLength < storedFileSize) {
+                                            "EXPECTED_RANGE: storedSize=$storedFileSize != httpContentLength=$httpContentLength (range request)"
+                                        } else {
+                                            "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                                        }
                                     } else {
                                         "OK"
                                     }
@@ -819,8 +837,14 @@ class StreamingService(
                         val storedFileSize = source.cachedFile.size ?: -1L
                         val httpContentLength = response.headers["Content-Length"]?.toLongOrNull() ?: -1L
                         val fullFileSize = if (storedFileSize > 0) storedFileSize else httpContentLength
+                        // For byte range requests, httpContentLength is the range size, not the full file size
+                        // This mismatch is expected and normal for range requests
                         val sizeMismatch = if (storedFileSize > 0 && httpContentLength > 0 && storedFileSize != httpContentLength) {
-                            "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                            if (httpContentLength < storedFileSize) {
+                                "EXPECTED_RANGE: storedSize=$storedFileSize != httpContentLength=$httpContentLength (range request)"
+                            } else {
+                                "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
+                            }
                         } else {
                             "OK"
                         }
