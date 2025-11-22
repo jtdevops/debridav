@@ -114,6 +114,7 @@ class StreamingService(
     private val iptvConfigurationProperties: io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties?,
     private val iptvConfigurationService: io.skjaere.debridav.iptv.configuration.IptvConfigurationService?,
     private val iptvResponseFileService: io.skjaere.debridav.iptv.util.IptvResponseFileService?,
+    private val iptvRequestService: io.skjaere.debridav.iptv.IptvRequestService?,
     prometheusRegistry: PrometheusRegistry
 ) {
     
@@ -531,13 +532,36 @@ class StreamingService(
                     // Close the current response first
                     response.cancel()
                     
+                    val originalUrl = source.cachedFile.link!!
+                    
+                    // Check cache first for redirect URL - this avoids slow redirect resolution
+                    val cachedRedirectUrl = if (isIptv && iptvRequestService != null) {
+                        runBlocking {
+                            iptvRequestService.getCachedRedirectUrl(originalUrl)
+                        }
+                    } else {
+                        null
+                    }
+                    
                     // Make new request to redirect location with Range header preserved
-                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                    val redirectUrl = if (cachedRedirectUrl != null) {
+                        logger.debug("Using cached redirect URL for streaming: originalUrl={}, cachedRedirectUrl={}", originalUrl.take(100), cachedRedirectUrl.take(100))
+                        cachedRedirectUrl
+                    } else if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
                         redirectLocation
                     } else {
                         // Relative redirect - construct absolute URL using URI
-                        val originalUri = java.net.URI(source.cachedFile.link!!)
+                        val originalUri = java.net.URI(originalUrl)
                         originalUri.resolve(redirectLocation).toString()
+                    }
+                    
+                    // Cache the redirect URL for future use (if IPTV and service available)
+                    if (isIptv && iptvRequestService != null && cachedRedirectUrl == null) {
+                        try {
+                            iptvRequestService.cacheRedirectUrl(originalUrl, redirectUrl)
+                        } catch (e: Exception) {
+                            // Ignore cache errors
+                        }
                     }
                     
                     // Create new request to redirect URL with Range header preserved
@@ -560,10 +584,41 @@ class StreamingService(
                             }
                         }
                     } catch (e: Exception) {
-                        logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeHeader={}, exceptionClass={}", 
-                            redirectUrl, rangeHeader, e::class.simpleName, e)
-                        logger.trace("REDIRECT_REQUEST_EXCEPTION_STACK_TRACE", e)
-                        throw ReadFromHttpStreamException("Failed to make request to redirect URL: $redirectUrl", e)
+                        // If cached redirect failed, invalidate cache and retry with redirectLocation from response
+                        if (isIptv && iptvRequestService != null && cachedRedirectUrl != null) {
+                            logger.debug("Cached redirect URL failed, invalidating cache and retrying with fresh redirect: cachedRedirectUrl={}, error={}", cachedRedirectUrl.take(100), e.message)
+                            iptvRequestService.invalidateRedirectUrlCache(originalUrl)
+                            // Retry with redirectLocation from the response header (not cached)
+                            val freshRedirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                                redirectLocation
+                            } else {
+                                val originalUri = java.net.URI(originalUrl)
+                                originalUri.resolve(redirectLocation).toString()
+                            }
+                            // Retry the request with fresh redirect URL
+                            val retryResponse = httpClient.get(freshRedirectUrl) {
+                                headers {
+                                    append(HttpHeaders.Range, rangeHeader)
+                                    iptvConfigurationProperties?.userAgent?.let {
+                                        append(HttpHeaders.UserAgent, it)
+                                    }
+                                }
+                                timeout {
+                                    requestTimeoutMillis = 20_000_000
+                                    socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
+                                    connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                                }
+                            }
+                            // Cache the fresh redirect URL for next time
+                            iptvRequestService.cacheRedirectUrl(originalUrl, freshRedirectUrl)
+                            // Return the retry response
+                            retryResponse
+                        } else {
+                            logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeHeader={}, exceptionClass={}", 
+                                redirectUrl, rangeHeader, e::class.simpleName, e)
+                            logger.trace("REDIRECT_REQUEST_EXCEPTION_STACK_TRACE", e)
+                            throw ReadFromHttpStreamException("Failed to make request to redirect URL: $redirectUrl", e)
+                        }
                     }
                     
                     logger.trace("REDIRECT_RESPONSE_RECEIVED: Received response from redirect URL: redirectUrl={}, status={}, contentLength={}, contentType={}", 

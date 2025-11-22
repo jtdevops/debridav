@@ -1,10 +1,14 @@
 package io.skjaere.debridav.iptv
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.github.benmanes.caffeine.cache.CacheLoader
+import com.github.benmanes.caffeine.cache.Caffeine
+import com.github.benmanes.caffeine.cache.LoadingCache
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
+import io.ktor.client.request.head
 import io.ktor.client.request.headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
@@ -22,6 +26,7 @@ import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
@@ -45,6 +50,17 @@ class IptvRequestService(
     private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
     private val IPTV_LOGIN_RATE_LIMIT_MS: Long get() = 
         iptvConfigurationProperties.loginRateLimit.toMillis()
+    
+    // Cache for redirect URLs: original URL -> redirect URL
+    // Expires after 10 minutes to handle cases where redirect URLs change
+    private val redirectUrlCache: LoadingCache<String, String?> = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(10))
+        .maximumSize(1000L)
+        .build(CacheLoader<String, String?> { originalUrl ->
+            runBlocking {
+                resolveRedirectUrl(originalUrl)
+            }
+        })
 
     @Transactional
     fun addIptvContent(contentId: String, providerName: String, category: String, magnetTitle: String? = null): Boolean {
@@ -515,8 +531,137 @@ class IptvRequestService(
     }
     
     /**
+     * Resolves the redirect URL for a given original URL.
+     * Tries HEAD request first for speed (no body transfer).
+     * Falls back to GET with Range header (bytes=0-0) if HEAD is rejected (e.g., 405 Method Not Allowed).
+     * Returns null if no redirect or if request fails.
+     */
+    private suspend fun resolveRedirectUrl(originalUrl: String): String? {
+        // Try HEAD request first (faster, no body transfer)
+        val headResponse = try {
+            httpClient.head(originalUrl) {
+                headers {
+                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                }
+                timeout {
+                    requestTimeoutMillis = 5000 // 5 second timeout
+                    connectTimeoutMillis = 2000 // 2 second connect timeout
+                }
+            }
+        } catch (e: Exception) {
+            logger.debug("HEAD request failed for {}, will try GET fallback: {}", originalUrl.take(100), e.message)
+            null
+        }
+        
+        // Check if HEAD request was successful and returned a redirect
+        if (headResponse != null) {
+            if (headResponse.status.value in 300..399) {
+                val redirectLocation = headResponse.headers["Location"]
+                if (redirectLocation != null) {
+                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                        redirectLocation
+                    } else {
+                        // Relative redirect - construct absolute URL
+                        val originalUri = java.net.URI(originalUrl)
+                        originalUri.resolve(redirectLocation).toString()
+                    }
+                    logger.debug("Resolved redirect URL via HEAD: originalUrl={}, redirectUrl={}", originalUrl.take(100), redirectUrl.take(100))
+                    return redirectUrl
+                }
+            } else if (headResponse.status.isSuccess()) {
+                // HEAD succeeded but no redirect - URL doesn't redirect
+                logger.debug("HEAD request succeeded but no redirect for: {}", originalUrl.take(100))
+                return null
+            }
+            // If HEAD returned an error status (like 405 Method Not Allowed), fall through to GET
+        }
+        
+        // Fallback to GET with Range header if HEAD failed or was rejected
+        // Some providers don't support HEAD requests, so we use GET with minimal data transfer
+        return try {
+            val getResponse = httpClient.get(originalUrl) {
+                headers {
+                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    append(HttpHeaders.Range, "bytes=0-0") // Request only first byte to minimize data transfer
+                }
+                timeout {
+                    requestTimeoutMillis = 5000 // 5 second timeout
+                    connectTimeoutMillis = 2000 // 2 second connect timeout
+                }
+            }
+            
+            if (getResponse.status.value in 300..399) {
+                val redirectLocation = getResponse.headers["Location"]
+                if (redirectLocation != null) {
+                    // Consume response body to ensure proper cleanup
+                    try {
+                        getResponse.body<ByteReadChannel>()
+                    } catch (e: Exception) {
+                        // Ignore errors when consuming response body
+                    }
+                    
+                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                        redirectLocation
+                    } else {
+                        // Relative redirect - construct absolute URL
+                        val originalUri = java.net.URI(originalUrl)
+                        originalUri.resolve(redirectLocation).toString()
+                    }
+                    logger.debug("Resolved redirect URL via GET fallback: originalUrl={}, redirectUrl={}", originalUrl.take(100), redirectUrl.take(100))
+                    redirectUrl
+                } else {
+                    null
+                }
+            } else {
+                // Consume response body to ensure proper cleanup
+                try {
+                    getResponse.body<ByteReadChannel>()
+                } catch (e: Exception) {
+                    // Ignore errors when consuming response body
+                }
+                null
+            }
+        } catch (e: Exception) {
+            logger.debug("Failed to resolve redirect URL via GET fallback for {}: {}", originalUrl.take(100), e.message)
+            null
+        }
+    }
+    
+    /**
+     * Gets the cached redirect URL for a given original URL, or resolves it if not cached.
+     * Returns null if no redirect exists or if resolution fails.
+     */
+    suspend fun getCachedRedirectUrl(originalUrl: String): String? {
+        return try {
+            redirectUrlCache.get(originalUrl)
+        } catch (e: Exception) {
+            logger.debug("Failed to get cached redirect URL for {}: {}", originalUrl.take(100), e.message)
+            null
+        }
+    }
+    
+    /**
+     * Invalidates the cached redirect URL for a given original URL.
+     * Call this when a cached redirect URL fails, so it will be re-resolved next time.
+     */
+    fun invalidateRedirectUrlCache(originalUrl: String) {
+        redirectUrlCache.invalidate(originalUrl)
+        logger.debug("Invalidated redirect URL cache for: {}", originalUrl.take(100))
+    }
+    
+    /**
+     * Pre-populates the cache with a redirect URL.
+     * Useful when we've already resolved a redirect and want to cache it for future use.
+     */
+    fun cacheRedirectUrl(originalUrl: String, redirectUrl: String) {
+        redirectUrlCache.put(originalUrl, redirectUrl)
+        logger.debug("Cached redirect URL: originalUrl={}, redirectUrl={}", originalUrl.take(100), redirectUrl.take(100))
+    }
+    
+    /**
      * Attempts to fetch the actual file size from the IPTV URL using HTTP GET request with Range header (bytes=0-0).
-     * Follows redirects automatically. Extracts file size from Content-Range header (e.g., "bytes 0-0/1882075726").
+     * Uses cached redirect URL if available to avoid slow redirect resolution.
+     * Extracts file size from Content-Range header (e.g., "bytes 0-0/1882075726").
      * Falls back to Content-Length header if Content-Range is not available.
      * Falls back to estimated size if request fails or headers are not available.
      * Uses retry logic based on streaming configuration.
@@ -561,7 +706,15 @@ class IptvRequestService(
         
         for (attempt in 0..maxRetries) {
             try {
-                val response = httpClient.get(url) {
+                // Check cache first for redirect URL - this avoids slow redirect resolution
+                val cachedRedirectUrl = getCachedRedirectUrl(url)
+                val targetUrl = cachedRedirectUrl ?: url
+                
+                if (cachedRedirectUrl != null) {
+                    logger.debug("Using cached redirect URL for file size fetch: originalUrl={}, cachedRedirectUrl={}", url.take(100), cachedRedirectUrl.take(100))
+                }
+                
+                val response = httpClient.get(targetUrl) {
                     headers {
                         append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
                         append(HttpHeaders.Range, "bytes=0-0")
@@ -570,6 +723,19 @@ class IptvRequestService(
                         requestTimeoutMillis = 5000 // 5 second timeout - fail fast for slow providers
                         connectTimeoutMillis = 2000 // 2 second connect timeout
                     }
+                }
+                
+                // If we used cached redirect and it failed, invalidate cache and retry with original URL
+                if (cachedRedirectUrl != null && !response.status.isSuccess() && response.status.value !in 300..399) {
+                    logger.debug("Cached redirect URL failed, invalidating cache and retrying with original URL: cachedRedirectUrl={}, status={}", cachedRedirectUrl.take(100), response.status.value)
+                    invalidateRedirectUrlCache(url)
+                    try {
+                        response.body<ByteReadChannel>()
+                    } catch (e: Exception) {
+                        // Ignore errors when consuming response body
+                    }
+                    // Retry with original URL
+                    continue
                 }
                 
                 // Check if this is a redirect response - redirects don't have content bodies
@@ -594,6 +760,9 @@ class IptvRequestService(
                             val originalUri = java.net.URI(url)
                             originalUri.resolve(redirectLocation).toString()
                         }
+                        
+                        // Cache the redirect URL for future use
+                        cacheRedirectUrl(url, redirectUrl)
                         
                         // Create new request to redirect URL with Range header
                         // Use shorter timeout for redirects (3 seconds) - if redirect URLs are slow,
