@@ -52,10 +52,12 @@ class IptvRequestService(
         iptvConfigurationProperties.loginRateLimit.toMillis()
     
     // Cache for redirect URLs: original URL -> redirect URL
-    // Expires after 1 minute - redirect URLs from streamq appear to be time-limited/session-based
-    // and change frequently, so shorter cache duration prevents using stale URLs
+    // DISABLED: Diagnostics show redirect URLs expire almost immediately (within seconds)
+    // Redirect URLs are single-use/time-limited and return 404 if reused
+    // Always use fresh redirects from response headers instead of cached ones
+    // Keeping cache structure for potential future use, but with very short expiration
     private val redirectUrlCache: LoadingCache<String, String?> = Caffeine.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(1))
+        .expireAfterWrite(Duration.ofSeconds(2)) // 2 seconds - redirect URLs expire almost immediately
         .maximumSize(1000L)
         .build(CacheLoader<String, String?> { originalUrl ->
             runBlocking {
@@ -707,13 +709,9 @@ class IptvRequestService(
         
         for (attempt in 0..maxRetries) {
             try {
-                // Check cache first for redirect URL - this avoids slow redirect resolution
-                val cachedRedirectUrl = getCachedRedirectUrl(url)
-                val targetUrl = cachedRedirectUrl ?: url
-                
-                if (cachedRedirectUrl != null) {
-                    logger.debug("Using cached redirect URL for file size fetch: originalUrl={}, cachedRedirectUrl={}", url.take(100), cachedRedirectUrl.take(100))
-                }
+                // Diagnostics show redirect URLs expire almost immediately (within seconds)
+                // Always use original URL and follow redirects fresh - never use cached redirects
+                val targetUrl = url
                 
                 val response = httpClient.get(targetUrl) {
                     headers {
@@ -724,19 +722,6 @@ class IptvRequestService(
                         requestTimeoutMillis = 5000 // 5 second timeout - fail fast for slow providers
                         connectTimeoutMillis = 2000 // 2 second connect timeout
                     }
-                }
-                
-                // If we used cached redirect and it failed, invalidate cache and retry with original URL
-                if (cachedRedirectUrl != null && !response.status.isSuccess() && response.status.value !in 300..399) {
-                    logger.debug("Cached redirect URL failed, invalidating cache and retrying with original URL: cachedRedirectUrl={}, status={}", cachedRedirectUrl.take(100), response.status.value)
-                    invalidateRedirectUrlCache(url)
-                    try {
-                        response.body<ByteReadChannel>()
-                    } catch (e: Exception) {
-                        // Ignore errors when consuming response body
-                    }
-                    // Retry with original URL
-                    continue
                 }
                 
                 // Check if this is a redirect response - redirects don't have content bodies
@@ -762,8 +747,8 @@ class IptvRequestService(
                             originalUri.resolve(redirectLocation).toString()
                         }
                         
-                        // Cache the redirect URL for future use
-                        cacheRedirectUrl(url, redirectUrl)
+                        // Do NOT cache redirect URL - diagnostics show they expire almost immediately
+                        // Cache would cause 404 errors on subsequent requests
                         
                         // Create new request to redirect URL with Range header
                         // Use shorter timeout for redirects (3 seconds) - if redirect URLs are slow,

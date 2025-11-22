@@ -111,6 +111,7 @@ dependencies {
     implementation("net.logstash.logback:logstash-logback-encoder:7.2")
     implementation("io.ktor:ktor-client-apache5:3.1.3")
     implementation("io.ktor:ktor-client-java:3.1.3")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation(libs.org.springframework.boot.spring.boot.starter.test)
     testImplementation(libs.org.mock.server.mockserver.netty.no.dependencies)
