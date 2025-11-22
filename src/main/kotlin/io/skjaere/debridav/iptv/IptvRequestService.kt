@@ -567,7 +567,8 @@ class IptvRequestService(
                         append(HttpHeaders.Range, "bytes=0-0")
                     }
                     timeout {
-                        requestTimeoutMillis = 10000 // 10 second timeout
+                        requestTimeoutMillis = 5000 // 5 second timeout - fail fast for slow providers
+                        connectTimeoutMillis = 2000 // 2 second connect timeout
                     }
                 }
                 
@@ -595,13 +596,16 @@ class IptvRequestService(
                         }
                         
                         // Create new request to redirect URL with Range header
+                        // Use shorter timeout for redirects (3 seconds) - if redirect URLs are slow,
+                        // we'll fall back to estimated size faster rather than blocking on slow providers
                         val redirectResponse = httpClient.get(redirectUrl) {
                             headers {
                                 append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
                                 append(HttpHeaders.Range, "bytes=0-0")
                             }
                             timeout {
-                                requestTimeoutMillis = 10000 // 10 second timeout
+                                requestTimeoutMillis = 3000 // 3 second timeout - fail fast for slow redirect URLs
+                                connectTimeoutMillis = 2000 // 2 second connect timeout
                             }
                         }
                         
