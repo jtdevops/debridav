@@ -426,17 +426,35 @@ class DebridLinkService(
     suspend fun refreshLinkOnError(file: RemotelyCachedEntity, failedLink: CachedFile): CachedFile? {
         return try {
             val debridFileContents = file.contents ?: return null
-            val client = debridClients.getClient(failedLink.provider!!)
+            
+            // Handle null provider
+            val provider = failedLink.provider ?: run {
+                logger.warn("Cannot refresh link for ${file.name}: provider is null")
+                return null
+            }
+            
+            // IPTV files don't use debrid clients - they're handled differently
+            if (provider == DebridProvider.IPTV) {
+                logger.debug("Skipping link refresh for IPTV file ${file.name} - IPTV links don't use debrid clients")
+                return null
+            }
+            
+            // Find matching debrid client
+            val client = debridClients.firstOrNull { it.getProvider() == provider }
+            if (client == null) {
+                logger.warn("Cannot refresh link for ${file.name}: no debrid client found for provider ${provider}")
+                return null
+            }
 
-            logger.info("Refreshing link on error for ${file.name} from ${failedLink.provider}")
+            logger.info("Refreshing link on error for ${file.name} from ${provider}")
 
             val freshLink = getFreshDebridLink(debridFileContents, client)
             if (freshLink is CachedFile) {
                 updateContentsOfDebridFile(file, debridFileContents, freshLink)
-                logger.info("Successfully refreshed link for ${file.name} from ${failedLink.provider}")
+                logger.info("Successfully refreshed link for ${file.name} from ${provider}")
                 freshLink
             } else {
-                logger.warn("Failed to refresh link for ${file.name} from ${failedLink.provider}: got ${freshLink.javaClass.simpleName}")
+                logger.warn("Failed to refresh link for ${file.name} from ${provider}: got ${freshLink.javaClass.simpleName}")
                 null
             }
         } catch (e: RuntimeException) {
