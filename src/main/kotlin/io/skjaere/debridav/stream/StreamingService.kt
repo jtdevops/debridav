@@ -534,7 +534,17 @@ class StreamingService(
                     
                     val originalUrl = source.cachedFile.link!!
                     
-                    // Check cache first for redirect URL - this avoids slow redirect resolution
+                    // Build the fresh redirect URL from the response header
+                    val freshRedirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                        redirectLocation
+                    } else {
+                        // Relative redirect - construct absolute URL using URI
+                        val originalUri = java.net.URI(originalUrl)
+                        originalUri.resolve(redirectLocation).toString()
+                    }
+                    
+                    // Check cache for redirect URL, but compare with fresh redirect
+                    // If they differ, the cached URL is stale (redirect URLs can be time-limited)
                     val cachedRedirectUrl = if (isIptv && iptvRequestService != null) {
                         runBlocking {
                             iptvRequestService.getCachedRedirectUrl(originalUrl)
@@ -543,22 +553,27 @@ class StreamingService(
                         null
                     }
                     
-                    // Make new request to redirect location with Range header preserved
-                    val redirectUrl = if (cachedRedirectUrl != null) {
-                        logger.debug("Using cached redirect URL for streaming: originalUrl={}, cachedRedirectUrl={}", originalUrl.take(100), cachedRedirectUrl.take(100))
+                    // Use cached redirect URL only if it matches the fresh redirect
+                    // If they differ, the cached URL is stale and should be invalidated
+                    val redirectUrl = if (cachedRedirectUrl != null && cachedRedirectUrl == freshRedirectUrl) {
+                        logger.debug("Using cached redirect URL for streaming (matches fresh redirect): originalUrl={}, redirectUrl={}", originalUrl.take(100), cachedRedirectUrl.take(100))
                         cachedRedirectUrl
-                    } else if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                        redirectLocation
                     } else {
-                        // Relative redirect - construct absolute URL using URI
-                        val originalUri = java.net.URI(originalUrl)
-                        originalUri.resolve(redirectLocation).toString()
+                        if (cachedRedirectUrl != null && cachedRedirectUrl != freshRedirectUrl) {
+                            logger.debug("Cached redirect URL differs from fresh redirect, invalidating cache: originalUrl={}, cachedUrl={}, freshUrl={}", 
+                                originalUrl.take(100), cachedRedirectUrl.take(100), freshRedirectUrl.take(100))
+                            if (isIptv && iptvRequestService != null) {
+                                iptvRequestService.invalidateRedirectUrlCache(originalUrl)
+                            }
+                        }
+                        logger.debug("Using fresh redirect URL from response header: originalUrl={}, redirectUrl={}", originalUrl.take(100), freshRedirectUrl.take(100))
+                        freshRedirectUrl
                     }
                     
-                    // Cache the redirect URL for future use (if IPTV and service available)
-                    if (isIptv && iptvRequestService != null && cachedRedirectUrl == null) {
+                    // Cache the fresh redirect URL for future use (if IPTV and service available)
+                    if (isIptv && iptvRequestService != null) {
                         try {
-                            iptvRequestService.cacheRedirectUrl(originalUrl, redirectUrl)
+                            iptvRequestService.cacheRedirectUrl(originalUrl, freshRedirectUrl)
                         } catch (e: Exception) {
                             // Ignore cache errors
                         }
@@ -568,6 +583,7 @@ class StreamingService(
                     val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
                     logger.trace("REDIRECT_REQUEST: Making request to redirect URL: redirectUrl={}, rangeHeader={}", redirectUrl, rangeHeader)
                     
+                    val requestStartTime = System.currentTimeMillis()
                     val redirectResponse = try {
                         httpClient.get(redirectUrl) {
                             headers {
@@ -578,24 +594,19 @@ class StreamingService(
                                 }
                             }
                             timeout {
-                                requestTimeoutMillis = 20_000_000
+                                // Use shorter timeout for redirect URLs - if they're slow, they're likely stale
+                                requestTimeoutMillis = 10_000 // 10 seconds - fail fast for slow/stale redirects
                                 socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
-                                connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                                connectTimeoutMillis = 2000 // 2 second connect timeout - fail fast
                             }
                         }
                     } catch (e: Exception) {
-                        // If cached redirect failed, invalidate cache and retry with redirectLocation from response
-                        if (isIptv && iptvRequestService != null && cachedRedirectUrl != null) {
-                            logger.debug("Cached redirect URL failed, invalidating cache and retrying with fresh redirect: cachedRedirectUrl={}, error={}", cachedRedirectUrl.take(100), e.message)
+                        // If we used cached redirect and it failed, retry with fresh redirect from response header
+                        if (isIptv && iptvRequestService != null && cachedRedirectUrl != null && redirectUrl == cachedRedirectUrl && redirectUrl != freshRedirectUrl) {
+                            logger.debug("Cached redirect URL failed, retrying with fresh redirect from response: cachedRedirectUrl={}, freshRedirectUrl={}, error={}", 
+                                cachedRedirectUrl.take(100), freshRedirectUrl.take(100), e.message)
                             iptvRequestService.invalidateRedirectUrlCache(originalUrl)
-                            // Retry with redirectLocation from the response header (not cached)
-                            val freshRedirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                                redirectLocation
-                            } else {
-                                val originalUri = java.net.URI(originalUrl)
-                                originalUri.resolve(redirectLocation).toString()
-                            }
-                            // Retry the request with fresh redirect URL
+                            // Retry with fresh redirect URL from response header
                             val retryResponse = httpClient.get(freshRedirectUrl) {
                                 headers {
                                     append(HttpHeaders.Range, rangeHeader)
@@ -604,9 +615,10 @@ class StreamingService(
                                     }
                                 }
                                 timeout {
-                                    requestTimeoutMillis = 20_000_000
+                                    // Use shorter timeout for retry - fail fast
+                                    requestTimeoutMillis = 10_000 // 10 seconds
                                     socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
-                                    connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                                    connectTimeoutMillis = 2000 // 2 second connect timeout
                                 }
                             }
                             // Cache the fresh redirect URL for next time
@@ -621,8 +633,16 @@ class StreamingService(
                         }
                     }
                     
-                    logger.trace("REDIRECT_RESPONSE_RECEIVED: Received response from redirect URL: redirectUrl={}, status={}, contentLength={}, contentType={}", 
-                        redirectUrl, redirectResponse.status.value, redirectResponse.headers["Content-Length"], redirectResponse.headers["Content-Type"])
+                    val requestDuration = System.currentTimeMillis() - requestStartTime
+                    logger.trace("REDIRECT_RESPONSE_RECEIVED: Received response from redirect URL: redirectUrl={}, status={}, contentLength={}, contentType={}, duration={}ms", 
+                        redirectUrl, redirectResponse.status.value, redirectResponse.headers["Content-Length"], redirectResponse.headers["Content-Type"], requestDuration)
+                    
+                    // If redirect URL took too long (>5 seconds), it might be stale - invalidate cache
+                    if (isIptv && iptvRequestService != null && requestDuration > 5000 && redirectUrl == cachedRedirectUrl) {
+                        logger.debug("Redirect URL took {}ms (slow), invalidating cache to force fresh redirect next time: redirectUrl={}", 
+                            requestDuration, redirectUrl.take(100))
+                        iptvRequestService.invalidateRedirectUrlCache(originalUrl)
+                    }
                     
                     // Recursively process the redirect response (but only once to avoid infinite loops)
                     if (redirectResponse.status.value in 300..399) {

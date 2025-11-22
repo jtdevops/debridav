@@ -52,9 +52,10 @@ class IptvRequestService(
         iptvConfigurationProperties.loginRateLimit.toMillis()
     
     // Cache for redirect URLs: original URL -> redirect URL
-    // Expires after 10 minutes to handle cases where redirect URLs change
+    // Expires after 1 minute - redirect URLs from streamq appear to be time-limited/session-based
+    // and change frequently, so shorter cache duration prevents using stale URLs
     private val redirectUrlCache: LoadingCache<String, String?> = Caffeine.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(10))
+        .expireAfterWrite(Duration.ofMinutes(1))
         .maximumSize(1000L)
         .build(CacheLoader<String, String?> { originalUrl ->
             runBlocking {
