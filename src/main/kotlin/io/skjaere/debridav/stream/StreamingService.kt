@@ -165,6 +165,34 @@ class StreamingService(
             val isArrRequest = debridavConfigProperties.shouldServeLocalVideoForArrs(httpRequestInfo)
             val shouldBypass = providerName != null && debridavConfigProperties.shouldBypassLocalVideoForIptvProvider(providerName)
             
+            // Check if file size is a default value and refetch if needed
+            // This is important for byte range headers even when using local video files
+            if (iptvRequestService != null && providerName != null) {
+                try {
+                    // Determine content type to check if file size is default
+                    val contentType = iptvRequestService.getContentTypeForRefId(iptvContent.iptvContentRefId)
+                        ?: io.skjaere.debridav.iptv.model.ContentType.MOVIE // Default to MOVIE if we can't determine
+                    
+                    val currentFileSize = iptvContent.size
+                    if (iptvRequestService.isDefaultFileSize(currentFileSize, contentType)) {
+                        logger.info("Detected default file size for IPTV content, attempting to refetch actual size: currentSize={}, contentType={}, provider={}", 
+                            currentFileSize, contentType, providerName)
+                        
+                        // Refetch file size from IPTV provider
+                        val newFileSize = iptvRequestService.refetchAndUpdateFileSize(iptvContent, remotelyCachedEntity)
+                        if (newFileSize != null && newFileSize != currentFileSize) {
+                            logger.info("Successfully refetched file size: oldSize={}, newSize={}", currentFileSize, newFileSize)
+                            // Update debridLink size as well
+                            debridLink.size = newFileSize
+                        } else {
+                            logger.debug("File size refetch did not change size or failed: currentSize={}, newSize={}", currentFileSize, newFileSize)
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to check/refetch default file size for IPTV content: ${e.message}", e)
+                }
+            }
+            
             if (isArrRequest && !shouldBypass) {
                 logger.debug("Skipping IPTV provider login call for ARR request (will use local video file, provider=$providerName)")
             } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null) {

@@ -893,6 +893,120 @@ class IptvRequestService(
     }
     
     /**
+     * Checks if a file size is a default/estimated value.
+     * Default values are 2GB for movies and 1GB for episodes.
+     * 
+     * @param fileSize The file size to check
+     * @param contentType The content type (MOVIE or SERIES)
+     * @return true if the file size matches the default value for the content type
+     */
+    fun isDefaultFileSize(fileSize: Long?, contentType: ContentType): Boolean {
+        if (fileSize == null) return false
+        val defaultSize = estimateIptvSize(contentType)
+        return fileSize == defaultSize
+    }
+    
+    /**
+     * Gets the content type for an IPTV content reference ID.
+     * 
+     * @param iptvContentRefId The IPTV content reference ID
+     * @return The content type, or null if not found
+     */
+    fun getContentTypeForRefId(iptvContentRefId: Long?): ContentType? {
+        if (iptvContentRefId == null) return null
+        return try {
+            val iptvContentEntity = iptvContentRepository.findById(iptvContentRefId).orElse(null)
+            iptvContentEntity?.contentType
+        } catch (e: Exception) {
+            logger.debug("Failed to get content type for refId $iptvContentRefId: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Attempts to refetch the actual file size from the IPTV provider and update it in the database.
+     * This is useful when a file has a default file size assigned and we need the actual size for byte range headers.
+     * 
+     * @param iptvContent The IPTV content entity to update
+     * @param remotelyCachedEntity The remotely cached entity containing the file
+     * @return The new file size if successfully fetched, null otherwise
+     */
+    @Transactional
+    suspend fun refetchAndUpdateFileSize(
+        iptvContent: DebridIptvContent,
+        remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity
+    ): Long? {
+        val iptvUrl = iptvContent.iptvUrl
+        val providerName = iptvContent.iptvProviderName
+        
+        if (iptvUrl == null || providerName == null) {
+            logger.debug("Cannot refetch file size: missing URL or provider name")
+            return null
+        }
+        
+        // Determine content type from the IPTV content entity
+        val contentType = try {
+            val iptvContentRefId = iptvContent.iptvContentRefId
+            if (iptvContentRefId == null) {
+                logger.debug("Cannot determine content type: iptvContentRefId is null")
+                ContentType.MOVIE // Default to MOVIE if we can't determine
+            } else {
+                val iptvContentEntity = iptvContentRepository.findById(iptvContentRefId).orElse(null)
+                if (iptvContentEntity == null) {
+                    logger.debug("IPTV content entity not found for refId: $iptvContentRefId")
+                    ContentType.MOVIE // Default to MOVIE if entity not found
+                } else {
+                    iptvContentEntity.contentType
+                }
+            }
+        } catch (e: Exception) {
+            logger.warn("Failed to determine content type for file size refetch: ${e.message}")
+            // Default to MOVIE if we can't determine
+            ContentType.MOVIE
+        }
+        
+        logger.info("Refetching file size for IPTV content: url={}, provider={}, contentType={}", 
+            iptvUrl.take(100), providerName, contentType)
+        
+        try {
+            val oldFileSize = iptvContent.size
+            val newFileSize = fetchActualFileSize(iptvUrl, contentType, providerName)
+            
+            // Only update if we got a different size
+            if (newFileSize != oldFileSize) {
+                // Update the DebridIptvContent entity
+                iptvContent.size = newFileSize
+                
+                // Update the RemotelyCachedEntity size
+                remotelyCachedEntity.size = newFileSize
+                
+                // Update IptvFile link size if present
+                iptvContent.debridLinks.firstOrNull()?.let { link ->
+                    if (link is IptvFile) {
+                        link.size = newFileSize
+                    }
+                }
+                
+                // Save the updated entity
+                databaseFileService.saveDbEntity(remotelyCachedEntity)
+                
+                logger.info("Successfully updated file size: oldSize={}, newSize={}, url={}", 
+                    oldFileSize, newFileSize, iptvUrl.take(100))
+                
+                return newFileSize
+            } else {
+                logger.debug("File size unchanged or still default: oldSize={}, newSize={}, url={}", 
+                    oldFileSize, newFileSize, iptvUrl.take(100))
+                return newFileSize
+            }
+        } catch (e: Exception) {
+            logger.warn("Failed to refetch file size from IPTV provider: url={}, provider={}, error={}", 
+                iptvUrl.take(100), providerName, e.message, e)
+            return null
+        }
+    }
+    
+    /**
      * Attempts to extract quality information from title.
      * Returns quality string like "1080p", "720p", "4K", etc. or null if not found.
      */
