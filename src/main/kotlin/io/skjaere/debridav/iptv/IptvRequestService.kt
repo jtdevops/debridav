@@ -84,8 +84,21 @@ class IptvRequestService(
         val titleToUse = magnetTitle ?: iptvContent.title
         
         // Check if this is a series that needs episode lookup
-        if (iptvContent.contentType == ContentType.SERIES && iptvContent.url.startsWith("SERIES_PLACEHOLDER:")) {
-            return handleSeriesContent(iptvContent, providerName, category, contentId, magnetTitle)
+        // For Xtream Codes providers, all series need episode fetching via get_series_info API
+        if (iptvContent.contentType == ContentType.SERIES) {
+            // Check if provider is Xtream Codes
+            val providerConfig = iptvConfigurationService.getProviderConfigurations()
+                .find { it.name == providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+            
+            if (providerConfig != null) {
+                // For Xtream Codes series, contentId is the series_id (stored in database)
+                // This is more reliable than parsing from URL and works regardless of URL format
+                val seriesId = contentId
+                logger.info("Detected Xtream Codes series, fetching episodes via get_series_info API: seriesId=$seriesId, contentId=$contentId, title=${iptvContent.title}, url=${iptvContent.url}")
+                return handleSeriesContent(iptvContent, providerName, category, seriesId, magnetTitle)
+            } else {
+                logger.debug("Series content detected but provider $providerName is not Xtream Codes, treating as regular content")
+            }
         }
         
         // For movies or series with direct URLs, resolve tokenized URL to actual URL
