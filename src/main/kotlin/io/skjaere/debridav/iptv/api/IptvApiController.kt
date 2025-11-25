@@ -100,7 +100,8 @@ class IptvApiController(
         
         logger.info("Searching IPTV content with title='{}', year={}, contentType={}, season={}, episode={}, useArticleVariations={}", 
             searchQuery.title, searchQuery.year, contentType, season, episode, searchQuery.useArticleVariations)
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations)
+        // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode)
         logger.info("Search returned {} results", results.size)
         if (results.isNotEmpty()) {
             logger.debug("First result sample: {}", results.first())
@@ -113,7 +114,9 @@ class IptvApiController(
      */
     private data class SearchQuery(
         val title: String,
-        val year: Int?,
+        val year: Int?, // Start year (for backward compatibility)
+        val startYear: Int? = null,
+        val endYear: Int? = null, // End year if it's a range (e.g., TV series)
         val useArticleVariations: Boolean = false // Whether to use article variations (The, A, An) in search
     )
     
@@ -145,12 +148,14 @@ class IptvApiController(
             }
             
             if (metadata != null) {
-                logger.info("Successfully resolved IMDB ID '$imdbId' to title: '${metadata.title}' (year: ${metadata.year})")
+                logger.info("Successfully resolved IMDB ID '$imdbId' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear})")
                 // Return title and year separately - we'll search by title only and filter by year
                 // Don't use article variations when metadata is provided (useArticleVariations = false)
                 return SearchQuery(
                     title = metadata.title,
-                    year = metadata.year,
+                    year = metadata.startYear, // Use start year for backward compatibility
+                    startYear = metadata.startYear,
+                    endYear = metadata.endYear,
                     useArticleVariations = false
                 )
             } else {
@@ -221,7 +226,9 @@ class IptvApiController(
         val success = iptvRequestService.addIptvContent(
             contentId = request.contentId,
             providerName = request.providerName,
-            category = request.category
+            category = request.category,
+            season = request.season,
+            episode = request.episode
         )
         
         return if (success) {
@@ -259,7 +266,9 @@ class IptvApiController(
     data class AddIptvContentRequest(
         val contentId: String,
         val providerName: String,
-        val category: String
+        val category: String,
+        val season: Int? = null, // Season number for series (e.g., 8)
+        val episode: Int? = null // Episode number within season (optional)
     )
 }
 

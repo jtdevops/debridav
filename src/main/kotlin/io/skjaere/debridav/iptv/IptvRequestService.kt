@@ -66,7 +66,14 @@ class IptvRequestService(
         })
 
     @Transactional
-    fun addIptvContent(contentId: String, providerName: String, category: String, magnetTitle: String? = null): Boolean {
+    fun addIptvContent(
+        contentId: String, 
+        providerName: String, 
+        category: String, 
+        magnetTitle: String? = null,
+        season: Int? = null, // Season number for series filtering
+        episode: Int? = null // Episode number within season (optional)
+    ): Boolean {
         logger.info("Adding IPTV content: contentId=$contentId, provider=$providerName, category=$category, magnetTitle=$magnetTitle")
         
         val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
@@ -94,8 +101,8 @@ class IptvRequestService(
                 // For Xtream Codes series, contentId is the series_id (stored in database)
                 // This is more reliable than parsing from URL and works regardless of URL format
                 val seriesId = contentId
-                logger.info("Detected Xtream Codes series, fetching episodes via get_series_info API: seriesId=$seriesId, contentId=$contentId, title=${iptvContent.title}, url=${iptvContent.url}")
-                return handleSeriesContent(iptvContent, providerName, category, seriesId, magnetTitle)
+                logger.info("Detected Xtream Codes series, fetching episodes via get_series_info API: seriesId=$seriesId, contentId=$contentId, title=${iptvContent.title}, url=${iptvContent.url}, season=$season, episode=$episode")
+                return handleSeriesContent(iptvContent, providerName, category, seriesId, magnetTitle, season, episode)
             } else {
                 logger.debug("Series content detected but provider $providerName is not Xtream Codes, treating as regular content")
             }
@@ -270,9 +277,11 @@ class IptvRequestService(
         providerName: String,
         category: String,
         seriesId: String,
-        magnetTitle: String? = null
+        magnetTitle: String? = null,
+        requestedSeason: Int? = null, // Season number to filter episodes
+        requestedEpisode: Int? = null // Episode number to filter (optional)
     ): Boolean {
-        logger.info("Handling series content: seriesId=$seriesId, title=${iptvContent.title}")
+        logger.info("Handling series content: seriesId=$seriesId, title=${iptvContent.title}, requestedSeason=$requestedSeason, requestedEpisode=$requestedEpisode")
         
         // Get provider configuration
         val providerConfig = iptvConfigurationService.getProviderConfigurations()
@@ -292,7 +301,13 @@ class IptvRequestService(
                 // Update last accessed time
                 cachedMetadata.lastAccessed = java.time.Instant.now()
                 iptvSeriesMetadataRepository.save(cachedMetadata)
-                cachedMetadata.getEpisodesAsXtreamSeriesEpisode()
+                val cachedEpisodes = cachedMetadata.getEpisodesAsXtreamSeriesEpisode()
+                // Log cached episode details at DEBUG level
+                logger.debug("Retrieved ${cachedEpisodes.size} episodes from cache for series $seriesId:")
+                cachedEpisodes.forEach { ep ->
+                    logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
+                }
+                cachedEpisodes
             } else {
                 logger.debug("Cache expired for series $seriesId (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
                 // Cache expired, fetch fresh data
@@ -311,24 +326,53 @@ class IptvRequestService(
         
         logger.info("Found ${episodes.size} episodes for series $seriesId")
         
-        // Try to parse season/episode from title to find specific episode
-        val episodeInfo = parseSeriesInfo(iptvContent.title)
-        val targetEpisode = if (episodeInfo?.season != null && episodeInfo.episode != null) {
-            episodes.find { ep ->
-                ep.season == episodeInfo.season && ep.episode == episodeInfo.episode
+        // Filter episodes by requested season/episode if provided
+        val episodesToCreate = if (requestedSeason != null) {
+            val seasonEpisodes = episodes.filter { ep ->
+                ep.season == requestedSeason
+            }
+            if (seasonEpisodes.isEmpty()) {
+                logger.warn("No episodes found for season $requestedSeason in series $seriesId")
+                return false
+            }
+            
+            // If specific episode requested, filter further
+            if (requestedEpisode != null) {
+                val specificEpisode = seasonEpisodes.find { ep ->
+                    ep.episode == requestedEpisode
+                }
+                if (specificEpisode != null) {
+                    logger.info("Found specific episode: season $requestedSeason, episode $requestedEpisode")
+                    listOf(specificEpisode)
+                } else {
+                    logger.warn("Episode $requestedEpisode not found in season $requestedSeason, creating all episodes from season")
+                    seasonEpisodes
+                }
+            } else {
+                logger.info("Creating all ${seasonEpisodes.size} episodes from season $requestedSeason")
+                seasonEpisodes
             }
         } else {
-            null
-        }
-        
-        // If we found a specific episode, create file for that episode only
-        // Otherwise, create files for all episodes (for now, we'll create the first one as a fallback)
-        val episodesToCreate = if (targetEpisode != null) {
-            listOf(targetEpisode)
-        } else {
-            // If no specific episode found, log warning and create first episode as fallback
-            logger.warn("Could not determine specific episode from title '${iptvContent.title}'. Creating file for first episode.")
-            listOf(episodes.first())
+            // Try to parse season/episode from title to find specific episode
+            val episodeInfo = parseSeriesInfo(iptvContent.title)
+            val targetEpisode = if (episodeInfo?.season != null && episodeInfo.episode != null) {
+                episodes.find { ep ->
+                    ep.season == episodeInfo.season && ep.episode == episodeInfo.episode
+                }
+            } else {
+                null
+            }
+            
+            // If we found a specific episode, create file for that episode only
+            // Otherwise, create files for all episodes (for now, we'll create the first one as a fallback)
+            if (targetEpisode != null) {
+                logger.info("Found episode from title parsing: season ${episodeInfo?.season}, episode ${episodeInfo?.episode}")
+                listOf(targetEpisode)
+            } else {
+                // If no specific episode found, log warning and create first episode as fallback
+                logger.warn("Could not determine specific episode from title '${iptvContent.title}'. Creating file for first episode.")
+                listOf(episodes.first())
+            }
         }
         
         val categoryPath = categoryService.findByName(category)?.downloadPath 
@@ -446,6 +490,12 @@ class IptvRequestService(
         }
         
         if (episodes.isNotEmpty()) {
+            // Log episode details at DEBUG level
+            logger.debug("Fetched ${episodes.size} episodes for series $seriesId:")
+            episodes.forEach { ep ->
+                logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
+            }
+            
             // Save or update cache
             val metadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
                 ?: IptvSeriesMetadataEntity().apply {
@@ -1039,7 +1089,7 @@ class IptvRequestService(
      * Radarr expects titles in format like: "Movie.Title.1990.1080p.BluRay.x264-GROUP"
      * We'll add quality and encoding info if available.
      */
-    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?, languageCodeToRemove: String? = null): String {
+    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?, languageCodeToRemove: String? = null, episode: String? = null): String {
         // STEP 1: Remove configured language prefixes if present (e.g., "EN| ", "EN - ", "NL| ")
         var cleanTitle = removeLanguagePrefixes(originalTitle)
         
@@ -1085,11 +1135,24 @@ class IptvRequestService(
         }
         // If year already exists in sanitizedTitle (in brackets or otherwise), don't add again
         
-        // STEP 9: Add quality (default to 1080p if not detected)
+        // STEP 9: Add episode info if provided (for series)
+        // Episode parameter can be in format "S08" or "S08E01"
+        if (episode != null && episode.isNotBlank()) {
+            // Normalize episode format - ensure it starts with S and is uppercase
+            val normalizedEpisode = episode.trim().uppercase()
+            // Validate format (should start with S followed by digits, optionally followed by E and more digits)
+            if (normalizedEpisode.matches(Regex("^S\\d+(?:E\\d+)?$"))) {
+                parts.add(normalizedEpisode)
+            } else {
+                logger.debug("Invalid episode format '$episode', skipping episode in title")
+            }
+        }
+        
+        // STEP 10: Add quality (default to 1080p if not detected)
         val finalQuality = quality ?: "1080p"
         parts.add(finalQuality)
         
-        // STEP 10: Add source and codec (common defaults for IPTV)
+        // STEP 11: Add source and codec (common defaults for IPTV)
         parts.add("BluRay")
         parts.add("x264")
         
@@ -1184,7 +1247,7 @@ class IptvRequestService(
         return title
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvSearchResult> {
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         return results.map { entity ->
             // Log initial content title
@@ -1216,7 +1279,8 @@ class IptvRequestService(
             
             // STEP 3: Format title for Radarr compatibility (includes quality, codec, etc.)
             // This will remove language code from beginning and handle duplicate years
-            var radarrTitle = formatTitleForRadarr(entity.title, year, quality, languageCode)
+            // Include episode info (e.g., "S08" or "S08E01") in title if provided (for series)
+            var radarrTitle = formatTitleForRadarr(entity.title, year, quality, languageCode, episode)
             
             // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
             val releaseGroupParts = mutableListOf("IPTV")

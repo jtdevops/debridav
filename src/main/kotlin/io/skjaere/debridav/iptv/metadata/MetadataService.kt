@@ -52,9 +52,13 @@ class MetadataService(
                 
                 if (responseValue == "True" && title != null) {
                     logger.debug("Successfully fetched metadata: title='$title', year='$year'")
+                    // Parse year range (e.g., "2006–2013" or "2006-2013")
+                    val (startYear, endYear) = parseYearRange(year)
                     MediaMetadata(
                         title = title,
-                        year = year?.toIntOrNull(),
+                        year = startYear, // Use start year for backward compatibility
+                        startYear = startYear,
+                        endYear = endYear,
                         imdbId = imdbId
                     )
                 } else {
@@ -71,9 +75,38 @@ class MetadataService(
         }
     }
 
+    /**
+     * Parses a year string that may be a single year or a range.
+     * Supports formats: "2006", "2006–2013", "2006-2013" (en-dash or hyphen)
+     * @return Pair of (startYear, endYear) where endYear is null if not a range
+     */
+    private fun parseYearRange(yearStr: String?): Pair<Int?, Int?> {
+        if (yearStr == null || yearStr.isBlank()) {
+            return Pair(null, null)
+        }
+        
+        // Try to match year range patterns (en-dash or hyphen)
+        val rangePattern = Regex("""(\d{4})\s*[–-]\s*(\d{4})""")
+        val rangeMatch = rangePattern.find(yearStr)
+        
+        if (rangeMatch != null) {
+            val startYear = rangeMatch.groupValues[1].toIntOrNull()
+            val endYear = rangeMatch.groupValues[2].toIntOrNull()
+            logger.debug("Parsed year range: startYear=$startYear, endYear=$endYear from '$yearStr'")
+            return Pair(startYear, endYear)
+        }
+        
+        // Single year
+        val singleYear = yearStr.trim().toIntOrNull()
+        logger.debug("Parsed single year: $singleYear from '$yearStr'")
+        return Pair(singleYear, null)
+    }
+
     data class MediaMetadata(
         val title: String,
-        val year: Int?,
+        val year: Int?, // Start year (for backward compatibility)
+        val startYear: Int? = null,
+        val endYear: Int? = null, // End year if it's a range (e.g., TV series)
         val imdbId: String
     )
 }

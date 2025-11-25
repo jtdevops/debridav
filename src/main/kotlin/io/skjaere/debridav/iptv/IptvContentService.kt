@@ -139,6 +139,7 @@ class IptvContentService(
         val filteredResults = uniqueResults.filter { it.providerName in configuredProviderNames }
         
         // Filter by year if provided, then sort by relevance and provider priority
+        // Note: For now, we only pass year (startYear) - year range support can be added later if needed
         val yearFiltered = filterByYear(filteredResults, year)
         return sortByRelevanceAndProviderPriority(yearFiltered, normalizedTitle, year, providerPriorityMap)
     }
@@ -267,18 +268,20 @@ class IptvContentService(
      * Year filtering is optional and follows these rules:
      * - If no year is provided, return all results
      * - If year is provided:
-     *   - Include results with matching year
+     *   - Include results with matching year OR results that fall within year range (if endYear provided)
      *   - Include results with no year
      *   - Exclude results with non-matching year ONLY if there are results with matching year or no year
      *   - If ALL results have non-matching years (and none have matching year or no year), return all results
      */
-    private fun filterByYear(results: List<IptvContentEntity>, year: Int?): List<IptvContentEntity> {
-        if (year == null) {
+    private fun filterByYear(results: List<IptvContentEntity>, year: Int?, startYear: Int? = null, endYear: Int? = null): List<IptvContentEntity> {
+        val searchStartYear = startYear ?: year
+        if (searchStartYear == null) {
             logger.debug("No year filter specified, returning all ${results.size} results")
             return results
         }
         
-        logger.debug("Filtering ${results.size} results by year: $year")
+        val yearRangeStr = if (endYear != null) "$searchStartYear–$endYear" else "$searchStartYear"
+        logger.debug("Filtering ${results.size} results by year: $yearRangeStr")
         
         // Categorize results by year match status
         val resultsWithMatchingYear = mutableListOf<IptvContentEntity>()
@@ -292,13 +295,19 @@ class IptvContentService(
                     resultsWithNoYear.add(entity)
                     logger.debug("Result '${entity.title}' has no year - will be included")
                 }
-                extractedYear == year -> {
+                extractedYear == searchStartYear -> {
+                    // Exact match
                     resultsWithMatchingYear.add(entity)
-                    logger.debug("Result '${entity.title}' (year: $extractedYear) matches filter year: $year - will be included")
+                    logger.debug("Result '${entity.title}' (year: $extractedYear) matches filter year: $searchStartYear - will be included")
+                }
+                endYear != null && extractedYear >= searchStartYear && extractedYear <= endYear -> {
+                    // Falls within year range (extractedYear is guaranteed to be non-null here since first branch handles null)
+                    resultsWithMatchingYear.add(entity)
+                    logger.debug("Result '${entity.title}' (year: $extractedYear) falls within year range $yearRangeStr - will be included")
                 }
                 else -> {
                     resultsWithNonMatchingYear.add(entity)
-                    logger.debug("Result '${entity.title}' (year: $extractedYear) does not match filter year: $year - may be excluded")
+                    logger.debug("Result '${entity.title}' (year: $extractedYear) does not match filter year: $yearRangeStr - may be excluded")
                 }
             }
         }
