@@ -22,7 +22,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
 import java.net.URLEncoder
@@ -629,21 +631,34 @@ class XtreamCodesClient(
             
             logger.debug("Parsing series episodes response (length: ${finalResponseBody.length} characters)")
             
-            // The response is a nested map: season number (string) -> episode number (string) -> episode data
-            // Example: { "1": { "1": { "id": "401553456", "title": "...", ... }, "2": {...} }, "2": {...} }
-            val seriesInfo: Map<String, Map<String, XtreamSeriesEpisode>> = json.decodeFromString(finalResponseBody)
+            // The response structure is:
+            // {
+            //   "seasons": [...],
+            //   "info": {...},
+            //   "episodes": {
+            //     "1": [{ "id": "...", "episode_num": 1, "season": 1, ... }, ...],
+            //     "2": [...],
+            //     ...
+            //   }
+            // }
+            // Parse the entire response as a map and extract episodes
+            val responseWrapper = json.decodeFromString<SeriesInfoResponseWrapper>(finalResponseBody)
             
-            // Flatten the nested map into a single list of episodes
-            val allEpisodes = seriesInfo.flatMap { (seasonStr, episodesMap) ->
-                val season = seasonStr.toIntOrNull()
-                episodesMap.map { (episodeStr, episode) ->
-                    val episodeNum = episodeStr.toIntOrNull()
-                    episode.copy(
-                        season = season ?: episode.season,
-                        episode = episodeNum ?: episode.episode
+            val allEpisodes = responseWrapper.episodes?.flatMap { (seasonStr, episodesList) ->
+                val seasonNum = seasonStr.toIntOrNull()
+                episodesList.map { episodeRaw ->
+                    // Convert raw episode to XtreamSeriesEpisode, using episode_num as episode number
+                    // Use season from map key if available, otherwise use season from episode object
+                    XtreamSeriesEpisode(
+                        id = episodeRaw.id,
+                        title = episodeRaw.title,
+                        container_extension = episodeRaw.container_extension,
+                        info = episodeRaw.info,
+                        season = seasonNum ?: episodeRaw.season,
+                        episode = episodeRaw.episode_num
                     )
                 }
-            }
+            } ?: emptyList()
             
             logger.debug("Successfully parsed ${allEpisodes.size} episodes for series $seriesId")
             return allEpisodes
@@ -1058,6 +1073,23 @@ class XtreamCodesClient(
         val rating: String? = null,
         val rating_5based: Double? = null,
         val duration: String? = null
+    )
+    
+    @Serializable
+    private data class XtreamSeriesEpisodeRaw(
+        val id: String,
+        @Serializable(with = IntOrStringSerializer::class)
+        val episode_num: Int? = null,
+        val title: String,
+        val container_extension: String? = null,
+        val info: XtreamEpisodeInfo? = null,
+        @Serializable(with = IntOrStringSerializer::class)
+        val season: Int? = null
+    )
+    
+    @Serializable
+    private data class SeriesInfoResponseWrapper(
+        val episodes: Map<String, List<XtreamSeriesEpisodeRaw>>? = null
     )
 }
 
