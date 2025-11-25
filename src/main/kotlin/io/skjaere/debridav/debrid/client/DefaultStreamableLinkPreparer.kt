@@ -96,28 +96,34 @@ class DefaultStreamableLinkPreparer(
             rateLimiter.executeSuspendFunction {
                 httpClient.prepareGet(debridLink.link!!) {
                 headers {
-                    // Always set Range headers - assume IPTV provider will preserve them through redirects
-                    range?.let { range ->
-                        getByteRange(range, debridLink.size!!)?.let { byteRange ->
-                            // Only apply byte range if chunking is not disabled
-                            if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
-                                logger.info(
-                                    "Applying byteRange $byteRange " +
-                                            "for ${debridLink.link}" +
-                                            " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
-                                )
+                    // TEMPORARY: Skip Range headers for IPTV URLs to test redirect following
+                    // Range headers prevent HttpRedirect plugin from following redirects
+                    if (!isIptv) {
+                        // Always set Range headers for non-IPTV URLs
+                        range?.let { range ->
+                            getByteRange(range, debridLink.size!!)?.let { byteRange ->
+                                // Only apply byte range if chunking is not disabled
+                                if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
+                                    logger.info(
+                                        "Applying byteRange $byteRange " +
+                                                "for ${debridLink.link}" +
+                                                " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
+                                    )
 
-                                if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                    append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
-                                }
-                            } else {
-                                logger.info("Byte range chunking disabled - using exact user range")
-                                // When chunking is disabled, use the exact range requested by user
-                                if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                    append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                    if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                        append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
+                                    }
+                                } else {
+                                    logger.info("Byte range chunking disabled - using exact user range")
+                                    // When chunking is disabled, use the exact range requested by user
+                                    if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                        append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        logger.debug("IPTV URL detected - skipping Range headers to allow redirect following: ${debridLink.link?.take(100)}")
                     }
 
                     // Use user agent from constructor if provided
@@ -126,10 +132,9 @@ class DefaultStreamableLinkPreparer(
                     }
                 }
                 
-                // For IPTV URLs, log that automatic redirect following is enabled
-                // HttpRedirect plugin will automatically follow redirects and preserve headers
+                // For IPTV URLs, log that we're skipping Range headers to allow redirect following
                 if (isIptv) {
-                    logger.debug("Detected IPTV URL, using automatic redirect following with Range headers: ${debridLink.link?.take(100)}")
+                    logger.debug("Detected IPTV URL, skipping Range headers to allow automatic redirect following: ${debridLink.link?.take(100)}")
                 }
                 
                 timeout {

@@ -542,14 +542,19 @@ class StreamingService(
                         originalUri.resolve(redirectLocationHeader).toString()
                     }
                     
-                    // Make new request to redirect URL with Range header preserved
-                    val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
-                    logger.trace("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}", redirectUrl.take(100), rangeHeader)
-                    
+                    // TEMPORARY: Skip Range headers for IPTV URLs to test redirect following
+                    // Make new request to redirect URL (with Range header only for non-IPTV)
                     val redirectResponse = try {
                         httpClient.get(redirectUrl) {
                             headers {
-                                append(HttpHeaders.Range, rangeHeader)
+                                // Skip Range headers for IPTV URLs to allow redirect following
+                                if (!isIptv) {
+                                    val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
+                                    append(HttpHeaders.Range, rangeHeader)
+                                    logger.trace("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}", redirectUrl.take(100), rangeHeader)
+                                } else {
+                                    logger.debug("REDIRECT_REQUEST: Making request to redirect URL without Range header (IPTV): redirectUrl={}", redirectUrl.take(100))
+                                }
                                 iptvConfigurationProperties?.userAgent?.let {
                                     append(HttpHeaders.UserAgent, it)
                                 }
@@ -561,8 +566,9 @@ class StreamingService(
                             }
                         }
                     } catch (e: Exception) {
-                        logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeHeader={}, exceptionClass={}", 
-                            redirectUrl.take(100), rangeHeader, e::class.simpleName, e)
+                        val rangeInfo = if (isIptv) "no-range-header" else "bytes=${source.range.start}-${source.range.last}"
+                        logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeInfo={}, exceptionClass={}", 
+                            redirectUrl.take(100), rangeInfo, e::class.simpleName, e)
                         logger.trace("REDIRECT_REQUEST_EXCEPTION_STACK_TRACE", e)
                         throw ReadFromHttpStreamException("Failed to make request to redirect URL: $redirectUrl", e)
                     }
