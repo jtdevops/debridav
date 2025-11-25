@@ -97,7 +97,7 @@ class DefaultStreamableLinkPreparer(
                 httpClient.prepareGet(debridLink.link!!) {
                 headers {
                     // Apply Range headers to the original URL (including IPTV URLs)
-                    // Range headers will NOT be applied to subsequent redirect URLs (handled in StreamingService)
+                    // Range headers will be re-applied to redirect URLs in StreamingService to ensure providers honor the requested range
                     range?.let { range ->
                         getByteRange(range, debridLink.size!!)?.let { byteRange ->
                             // Only apply byte range if chunking is not disabled
@@ -106,7 +106,7 @@ class DefaultStreamableLinkPreparer(
                                     "Applying byteRange $byteRange " +
                                             "for ${debridLink.link}" +
                                             " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) " +
-                                            if (isIptv) "(IPTV - Range header on original URL only)" else ""
+                                            if (isIptv) "(IPTV - Range header will be re-applied on redirect URLs)" else ""
                                 )
 
                                 if (!(range.start == 0L && range.finish == debridLink.size)) {
@@ -114,7 +114,7 @@ class DefaultStreamableLinkPreparer(
                                 }
                             } else {
                                 logger.info("Byte range chunking disabled - using exact user range" +
-                                        if (isIptv) " (IPTV - Range header on original URL only)" else "")
+                                        if (isIptv) " (IPTV - Range header will be re-applied on redirect URLs)" else "")
                                 // When chunking is disabled, use the exact range requested by user
                                 if (!(range.start == 0L && range.finish == debridLink.size)) {
                                     append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
@@ -130,7 +130,7 @@ class DefaultStreamableLinkPreparer(
                 }
                 
                 if (isIptv) {
-                    logger.debug("Detected IPTV URL - Range headers applied to original URL only, will be skipped on redirect URLs: ${debridLink.link?.take(100)}")
+                    logger.debug("Detected IPTV URL - Range headers applied to original URL, will be re-applied on redirect URLs: ${debridLink.link?.take(100)}")
                 }
                 
                 timeout {

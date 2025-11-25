@@ -519,11 +519,11 @@ class StreamingService(
                 requestedRange, expectedBytes, storedFileSize, httpContentLength, sizeMismatch, redirectLocation ?: "none", tlsVersion)
             
             // HttpRedirect plugin doesn't follow redirects when Range headers are present
-            // Manually follow redirects - Range headers are applied to original URL only, NOT to redirect URLs
+            // Manually follow redirects and re-apply Range headers to ensure the provider honors the requested range
             if (response.status.value in 300..399) {
                 val redirectLocationHeader = response.headers["Location"]
                 if (redirectLocationHeader != null) {
-                    logger.debug("REDIRECT_RESPONSE: Following redirect manually (Range headers on original URL only): path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}", 
+                    logger.debug("REDIRECT_RESPONSE: Following redirect manually and re-applying Range headers: path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}", 
                         source.cachedFile.path, source.cachedFile.link?.take(100), redirectLocationHeader, requestedRange, isIptv)
                     
                     // Consume and cancel the redirect response
@@ -543,14 +543,15 @@ class StreamingService(
                         originalUri.resolve(redirectLocationHeader).toString()
                     }
                     
-                    // Range headers are applied to the original URL only, NOT to redirect URLs
-                    // This allows redirects to be followed successfully while preserving the original Range intent
-                    // The provider should honor the Range header from the original request on the redirect URL
+                    // Apply Range headers to redirect URLs to ensure the provider honors the requested range
+                    // Some providers don't preserve Range headers through redirects, so we must re-apply them
                     // Use prepareGet().execute() to stream the response instead of buffering it
                     val redirectStatement = httpClient.prepareGet(redirectUrl) {
                         headers {
-                            // Do NOT apply Range headers to redirect URLs - Range headers are only on the original URL
-                            logger.debug("REDIRECT_REQUEST: Making request to redirect URL without Range header (Range headers only on original URL): redirectUrl={}, isIptv={}", redirectUrl.take(100), isIptv)
+                            // Apply Range headers to redirect URLs to preserve range requests (e.g., when skipping in video)
+                            val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
+                            append(HttpHeaders.Range, rangeHeader)
+                            logger.debug("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}, isIptv={}", redirectUrl.take(100), rangeHeader, isIptv)
                             iptvConfigurationProperties?.userAgent?.let {
                                 append(HttpHeaders.UserAgent, it)
                             }
