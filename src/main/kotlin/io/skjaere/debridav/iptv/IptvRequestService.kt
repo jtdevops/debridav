@@ -513,6 +513,19 @@ class IptvRequestService(
         return episodes
     }
     
+    /**
+     * Parses season number from episode string (e.g., "S08" -> 8, "S08E01" -> 8)
+     * @param episode Episode string in format "S##" or "S##E##"
+     * @return Season number if successfully parsed, null otherwise
+     */
+    private fun parseSeasonFromEpisode(episode: String): Int? {
+        val normalized = episode.trim().uppercase()
+        // Match S followed by digits, optionally followed by E and more digits
+        val pattern = Regex("^S(\\d+)(?:E\\d+)?$")
+        val match = pattern.find(normalized)
+        return match?.groupValues?.get(1)?.toIntOrNull()
+    }
+    
     private fun parseSeriesInfo(title: String): io.skjaere.debridav.iptv.model.EpisodeInfo? {
         // Try to parse series info from title
         // Pattern: Series Name S01E01 or Series Name - S01E01
@@ -1249,7 +1262,75 @@ class IptvRequestService(
     
     fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
-        return results.map { entity ->
+        
+        // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
+        val requestedSeason = episode?.let { parseSeasonFromEpisode(it) }
+        
+        // For series with episode parameter, fetch episodes to verify season availability and calculate accurate size
+        // Store episode count per entity for size calculation
+        val entityEpisodeCounts = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: episode count
+        
+        val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
+            logger.debug("Episode parameter provided (episode=$episode, parsed season=$requestedSeason), fetching episodes for series to verify availability")
+            results.filter { entity ->
+                // Only check Xtream Codes providers
+                val providerConfig = iptvConfigurationService.getProviderConfigurations()
+                    .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+                
+                if (providerConfig != null) {
+                    // Fetch episodes to verify season exists
+                    val episodes = try {
+                        val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(entity.providerName, entity.contentId)
+                        val episodesList = if (cachedMetadata != null) {
+                            val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
+                            if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
+                                logger.debug("Using cached episodes for series ${entity.contentId} during search (cache age: ${cacheAge.toHours()} hours)")
+                                cachedMetadata.getEpisodesAsXtreamSeriesEpisode()
+                            } else {
+                                // Cache expired, fetch fresh
+                                fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
+                            }
+                        } else {
+                            // No cache, fetch fresh
+                            fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
+                        }
+                        
+                        // Log episode details at DEBUG level
+                        logger.debug("Episodes for series ${entity.contentId} (${entity.title}):")
+                        episodesList.forEach { ep ->
+                            logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
+                        }
+                        
+                        episodesList
+                    } catch (e: Exception) {
+                        logger.warn("Failed to fetch episodes for series ${entity.contentId} during search: ${e.message}", e)
+                        emptyList()
+                    }
+                    
+                    // Check if requested season exists
+                    val hasSeason = episodes.any { it.season == requestedSeason }
+                    if (!hasSeason && episodes.isNotEmpty()) {
+                        val availableSeasons = episodes.mapNotNull { it.season }.distinct().sorted()
+                        logger.debug("Series ${entity.contentId} (${entity.title}) does not have season $requestedSeason. Available seasons: $availableSeasons")
+                    } else if (hasSeason) {
+                        val seasonEpisodes = episodes.filter { it.season == requestedSeason }
+                        val episodeCount = seasonEpisodes.size
+                        logger.debug("Series ${entity.contentId} (${entity.title}) has $episodeCount episodes in season $requestedSeason")
+                        // Store episode count for size calculation
+                        entityEpisodeCounts["${entity.providerName}_${entity.contentId}"] = episodeCount
+                    }
+                    hasSeason
+                } else {
+                    // Not Xtream Codes provider, include it (can't verify episodes)
+                    true
+                }
+            }
+        } else {
+            // No episode parameter or not a series, return all results
+            results
+        }
+        
+        return seriesWithEpisodes.map { entity ->
             // Log initial content title
             logger.debug("Generating magnet title - initial content title: {}", entity.title)
             
@@ -1317,8 +1398,31 @@ class IptvRequestService(
             // Create magnet URI for Radarr compatibility - use formatted title without extension
             val magnetUri = createIptvMagnetUri(infohash, radarrTitle, guid)
             
-            // Estimate size for Radarr compatibility
-            val estimatedSize = estimateIptvSize(entity.contentType)
+            // Calculate size for Radarr compatibility
+            // For series with episode parameter, calculate size based on number of episodes in the season
+            val estimatedSize = if (entity.contentType == ContentType.SERIES && requestedSeason != null) {
+                val episodeCount = entityEpisodeCounts["${entity.providerName}_${entity.contentId}"]
+                if (episodeCount != null && episodeCount > 0) {
+                    // Calculate size based on episode count and quality
+                    // Use per-episode estimates: ~120MB for 1080p, ~60MB for 720p, ~30MB for 480p
+                    // These are generous estimates to ensure Sonarr accepts the release
+                    val perEpisodeSize = when {
+                        quality?.contains("1080", ignoreCase = true) == true -> 120_000_000L // ~120MB per episode for 1080p
+                        quality?.contains("720", ignoreCase = true) == true -> 60_000_000L // ~60MB per episode for 720p
+                        quality?.contains("480", ignoreCase = true) == true -> 30_000_000L // ~30MB per episode for 480p
+                        else -> 120_000_000L // Default to 120MB for 1080p
+                    }
+                    val calculatedSize = episodeCount * perEpisodeSize
+                    logger.debug("Calculated size for series ${entity.contentId}: $episodeCount episodes × ${perEpisodeSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                    calculatedSize
+                } else {
+                    // Fallback to default estimate
+                    estimateIptvSize(entity.contentType)
+                }
+            } else {
+                // For movies or series without episode parameter, use default estimate
+                estimateIptvSize(entity.contentType)
+            }
             
             IptvSearchResult(
                 contentId = entity.contentId,
