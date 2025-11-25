@@ -20,8 +20,7 @@ data class IptvConfigurationProperties(
     val includeProviderInMagnetTitle: Boolean = false, // Include provider name in magnet title after -IPTV (e.g., -IPTV-mega-NL) for debugging
     val maxSearchResults: Int = 0, // Maximum number of search results to return (0 = unlimited, default: unlimited)
     val redirectHandlingMode: RedirectHandlingMode = RedirectHandlingMode.AUTOMATIC, // How to handle HTTP redirects: AUTOMATIC (use Ktor's HttpRedirect plugin) or MANUAL (preserve Range headers)
-    val loginRateLimit: Duration = Duration.ofMinutes(1), // Rate limit for IPTV provider login/credential verification calls (default: 1 minute)
-    val enableRedirectDiagnostics: Boolean = false // Enable redirect diagnostics for IPTV URLs (runs comprehensive tests when adding IPTV content)
+    val loginRateLimit: Duration = Duration.ofMinutes(1) // Rate limit for IPTV provider login/credential verification calls (default: 1 minute)
 ) {
     init {
         // Validate searchFuzziness regardless of enabled state

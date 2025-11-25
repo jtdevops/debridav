@@ -12,7 +12,6 @@ import io.skjaere.debridav.iptv.IptvContentRepository
 import io.skjaere.debridav.iptv.IptvContentService
 import io.skjaere.debridav.iptv.IptvRequestService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
-import io.skjaere.debridav.iptv.diagnostics.IptvRedirectDiagnosticsService
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.util.VideoFileExtensions
 import jakarta.transaction.Transactional
@@ -39,8 +38,7 @@ class TorrentService(
     private val debridFileRepository: DebridFileContentsRepository,
     private val iptvContentRepository: IptvContentRepository,
     private val iptvConfigurationProperties: IptvConfigurationProperties,
-    private val iptvContentService: IptvContentService?,
-    private val iptvRedirectDiagnosticsService: IptvRedirectDiagnosticsService?
+    private val iptvContentService: IptvContentService?
 ) {
     private val logger = LoggerFactory.getLogger(TorrentService::class.java)
 
@@ -133,21 +131,6 @@ class TorrentService(
         
         // Extract title from magnet URL if available, otherwise use IPTV content title
         val magnetTitle = magnet?.let { getNameFromMagnet(it) }
-        
-        // Run diagnostics if enabled (before adding IPTV content)
-        if (iptvConfigurationProperties.enableRedirectDiagnostics && 
-            iptvRedirectDiagnosticsService != null && 
-            iptvContentService != null &&
-            !iptvContent.url.startsWith("SERIES_PLACEHOLDER:")) {
-            try {
-                val resolvedUrl = iptvContentService.resolveIptvUrl(iptvContent.url, providerName)
-                logger.info("IPTV_REDIRECT_DIAGNOSTICS: Running diagnostics for IPTV content: provider=$providerName, contentId=$contentId")
-                val diagnosticReport = iptvRedirectDiagnosticsService.runDiagnostics(resolvedUrl)
-                logger.info("IPTV_REDIRECT_DIAGNOSTICS: Diagnostics completed\n{}", diagnosticReport.summary)
-            } catch (e: Exception) {
-                logger.warn("IPTV_REDIRECT_DIAGNOSTICS: Failed to run diagnostics: ${e.message}", e)
-            }
-        }
         
         // Add IPTV content (creates the virtual file)
         val success = runBlocking {
