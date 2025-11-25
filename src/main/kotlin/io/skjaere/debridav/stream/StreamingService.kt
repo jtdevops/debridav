@@ -516,317 +516,17 @@ class StreamingService(
                 source.cachedFile.path, source.cachedFile.link?.take(100), response.status.value, 
                 requestedRange, expectedBytes, storedFileSize, httpContentLength, sizeMismatch, redirectLocation ?: "none", tlsVersion)
             
-            // Check if this is a redirect response - redirects don't have content bodies
-            // Check configuration to determine redirect handling mode
-            val shouldHandleRedirectManually = iptvConfigurationProperties?.redirectHandlingMode == 
-                io.skjaere.debridav.iptv.configuration.RedirectHandlingMode.MANUAL
-            
+            // HttpRedirect plugin should handle redirects automatically
+            // If we see a redirect response here, log it but assume the provider will preserve Range headers
             if (response.status.value in 300..399) {
                 val redirectLocation = response.headers["Location"]
-                if (redirectLocation != null) {
-                    if (shouldHandleRedirectManually) {
-                        logger.info("REDIRECT_RESPONSE: Following redirect manually to preserve Range header: path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}", 
-                            source.cachedFile.path, source.cachedFile.link?.take(100), redirectLocation, requestedRange, isIptv)
-                    
-                    // Manually follow redirect while preserving Range header
-                    // Close the current response first
-                    response.cancel()
-                    
-                    val originalUrl = source.cachedFile.link!!
-                    
-                    // Build the fresh redirect URL from the response header
-                    val freshRedirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                        redirectLocation
-                    } else {
-                        // Relative redirect - construct absolute URL using URI
-                        val originalUri = java.net.URI(originalUrl)
-                        originalUri.resolve(redirectLocation).toString()
-                    }
-                    
-                    // Diagnostics show redirect URLs expire almost immediately (within seconds)
-                    // Redirect URLs are single-use/time-limited and return 404 if reused
-                    // Always use fresh redirects from response headers - never use cached redirects
-                    val redirectUrl = freshRedirectUrl
-                    logger.debug("Using fresh redirect URL from response header (redirect URLs expire immediately): originalUrl={}, redirectUrl={}", 
-                        originalUrl.take(100), redirectUrl.take(100))
-                    
-                    // Do NOT cache redirect URLs - they expire almost immediately and cause 404 errors
-                    // Cache invalidation is not needed since we're not using cached redirects
-                    
-                    // Create new request to redirect URL with Range header preserved
-                    val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
-                    logger.trace("REDIRECT_REQUEST: Making request to redirect URL: redirectUrl={}, rangeHeader={}", redirectUrl, rangeHeader)
-                    
-                    val requestStartTime = System.currentTimeMillis()
-                    val redirectResponse = try {
-                        httpClient.get(redirectUrl) {
-                            headers {
-                                append(HttpHeaders.Range, rangeHeader)
-                                // Use IPTV user agent if available, otherwise use default
-                                iptvConfigurationProperties?.userAgent?.let {
-                                    append(HttpHeaders.UserAgent, it)
-                                }
-                            }
-                            timeout {
-                                // Use shorter timeout for redirect URLs - if they're slow, they're likely stale
-                                requestTimeoutMillis = 10_000 // 10 seconds - fail fast for slow/stale redirects
-                                socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
-                                connectTimeoutMillis = 2000 // 2 second connect timeout - fail fast
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Redirect URLs expire almost immediately - if request fails, it's likely expired
-                        // Log error and throw exception - retrying with same URL won't help
-                        logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeHeader={}, exceptionClass={}", 
-                            redirectUrl, rangeHeader, e::class.simpleName, e)
-                        logger.trace("REDIRECT_REQUEST_EXCEPTION_STACK_TRACE", e)
-                        throw ReadFromHttpStreamException("Failed to make request to redirect URL: $redirectUrl", e)
-                    }
-                    
-                    val requestDuration = System.currentTimeMillis() - requestStartTime
-                    logger.trace("REDIRECT_RESPONSE_RECEIVED: Received response from redirect URL: redirectUrl={}, status={}, contentLength={}, contentType={}, duration={}ms", 
-                        redirectUrl, redirectResponse.status.value, redirectResponse.headers["Content-Length"], redirectResponse.headers["Content-Type"], requestDuration)
-                    
-                    // Note: We always use fresh redirects from response headers - no cache invalidation needed
-                    
-                    // Recursively process the redirect response (but only once to avoid infinite loops)
-                    if (redirectResponse.status.value in 300..399) {
-                        logger.warn("REDIRECT_CHAIN: Redirect chain detected, stopping at second redirect: path={}, redirectLocation={}, status={}", 
-                            source.cachedFile.path, redirectLocation, redirectResponse.status.value)
-                        redirectResponse.cancel()
-                        throw ReadFromHttpStreamException("Redirect chain detected - multiple redirects not supported. Last location: ${redirectResponse.headers["Location"] ?: redirectLocation}", 
-                            RuntimeException("Multiple redirects detected"))
-                    }
-                    
-                    // Process the redirect response as if it was the original response
-                    logger.trace("REDIRECT_PROCESSING: Starting to process redirect response body: redirectUrl={}, status={}", redirectUrl, redirectResponse.status.value)
-                    
-                    return@execute try {
-                        redirectResponse.body<ByteReadChannel>().toInputStream().use { inputStream ->
-                            logger.trace("REDIRECT_INPUT_STREAM_CREATED: Successfully created input stream from redirect response: redirectUrl={}", redirectUrl)
-                            
-                            val actualProvider = if (debridClients.none { it.getProvider() == source.cachedFile.provider }) {
-                                null
-                            } else {
-                                source.cachedFile.provider
-                            }
-                            val streamingContext = InputStreamingContext(
-                                ResettableCountingInputStream(inputStream), 
-                                actualProvider, 
-                                source.cachedFile.path!!
-                            )
-                            activeInputStreams.add(streamingContext)
-                            try {
-                                logger.trace("REDIRECT_STREAMING_START: Starting to stream from redirect URL: redirectUrl={}, expectedBytes={}", redirectUrl, expectedBytes)
-                                withContext(Dispatchers.IO) {
-                                    pipeHttpInputStreamToOutputChannel(
-                                        streamingContext, byteRangeInfo, source, started, isIptv, expectedBytes
-                                    )
-                                }
-                                logger.trace("REDIRECT_STREAMING_COMPLETE: Successfully completed streaming from redirect URL: redirectUrl={}", redirectUrl)
-                            } catch (e: CancellationException) {
-                                logger.trace("REDIRECT_STREAMING_CANCELLED: Streaming cancelled: redirectUrl={}", redirectUrl)
-                                close(e)
-                                throw e
-                            } catch (e: EOFException) {
-                            val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                            val storedFileSize = source.cachedFile.size ?: -1L
-                            val httpContentLength = redirectResponse.headers["Content-Length"]?.toLongOrNull() ?: -1L
-                            val fullFileSize = if (storedFileSize > 0) storedFileSize else httpContentLength
-                            // For byte range requests, httpContentLength is the range size, not the full file size
-                            // This mismatch is expected and normal for range requests
-                            val sizeMismatch = if (storedFileSize > 0 && httpContentLength > 0 && storedFileSize != httpContentLength) {
-                                if (httpContentLength < storedFileSize) {
-                                    "EXPECTED_RANGE: storedSize=$storedFileSize != httpContentLength=$httpContentLength (range request)"
-                                } else {
-                                    "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
-                                }
-                            } else {
-                                "OK"
-                            }
-                            
-                            logger.trace("STREAMING_EOF: EOFException during stream read (after redirect): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
-                                source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName)
-                            throw e
-                        } catch (e: Exception) {
-                            val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                            logger.trace("STREAMING_EXCEPTION: Exception during stream read (after redirect): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                                source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, redirectResponse.status.value, e::class.simpleName, e)
-                            // Explicitly log stack trace to ensure it appears
-                            logger.trace("STREAMING_EXCEPTION_STACK_TRACE (after redirect)", e)
-                            logger.error("An error occurred during reading from stream after redirect", e)
-                            throw ReadFromHttpStreamException("An error occurred during reading from stream after redirect", e)
-                        } finally {
-                            logger.trace("REDIRECT_CLEANUP: Cleaning up redirect response: redirectUrl={}", redirectUrl)
-                            redirectResponse.cancel()
-                            activeInputStreams.removeStream(streamingContext)
-                        }
-                            }  // closes use block
-                        } catch (e: Exception) {
-                            // Check if this is a client abort (expected when client disconnects)
-                            if (isClientAbortException(e)) {
-                                logger.debug("REDIRECT_BODY_EXCEPTION: Client disconnected (expected): redirectUrl={}, exceptionClass={}", 
-                                    redirectUrl, e::class.simpleName)
-                            } else {
-                                logger.trace("REDIRECT_BODY_EXCEPTION: Exception creating input stream from redirect response body: redirectUrl={}, exceptionClass={}", 
-                                    redirectUrl, e::class.simpleName, e)
-                                logger.trace("REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
-                            }
-                            redirectResponse.cancel()
-                            throw ReadFromHttpStreamException("Failed to create input stream from redirect response: $redirectUrl", e)
-                        }
-                    } else {
-                        // Automatic redirect handling: HttpRedirect plugin should have handled it
-                        // However, if we see a redirect response here, it means the plugin didn't follow it
-                        // (likely because Range headers prevent automatic redirect following)
-                        // Fall back to manual handling - this is expected behavior, so log at DEBUG level
-                        logger.debug("REDIRECT_RESPONSE: Automatic redirect handling skipped (HttpRedirect plugin doesn't follow redirects with Range headers), using manual handling: path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}", 
-                            source.cachedFile.path, source.cachedFile.link?.take(100), redirectLocation, requestedRange, isIptv)
-                        
-                        // Manually follow redirect while preserving Range header
-                        // Close the current response first
-                        response.cancel()
-                        
-                        // Make new request to redirect location with Range header preserved
-                        val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                            redirectLocation
-                        } else {
-                            // Relative redirect - construct absolute URL using URI
-                            val originalUri = java.net.URI(source.cachedFile.link!!)
-                            originalUri.resolve(redirectLocation).toString()
-                        }
-                        
-                        // Create new request to redirect URL with Range header preserved
-                        val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
-                        logger.trace("REDIRECT_REQUEST: Making request to redirect URL (fallback from automatic): redirectUrl={}, rangeHeader={}", redirectUrl, rangeHeader)
-                        
-                        val redirectResponse = try {
-                            httpClient.get(redirectUrl) {
-                                headers {
-                                    append(HttpHeaders.Range, rangeHeader)
-                                    // Use IPTV user agent if available, otherwise use default
-                                    iptvConfigurationProperties?.userAgent?.let {
-                                        append(HttpHeaders.UserAgent, it)
-                                    }
-                                }
-                                timeout {
-                                    requestTimeoutMillis = 20_000_000
-                                    socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
-                                    connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
-                                }
-                            }
-                        } catch (e: Exception) {
-                            logger.trace("REDIRECT_REQUEST_EXCEPTION: Exception making request to redirect URL: redirectUrl={}, rangeHeader={}, exceptionClass={}", 
-                                redirectUrl, rangeHeader, e::class.simpleName, e)
-                            logger.trace("REDIRECT_REQUEST_EXCEPTION_STACK_TRACE", e)
-                            throw ReadFromHttpStreamException("Failed to make request to redirect URL: $redirectUrl", e)
-                        }
-                        
-                        logger.trace("REDIRECT_RESPONSE_RECEIVED: Received response from redirect URL (fallback): redirectUrl={}, status={}, contentLength={}, contentType={}", 
-                            redirectUrl, redirectResponse.status.value, redirectResponse.headers["Content-Length"], redirectResponse.headers["Content-Type"])
-                        
-                        // Recursively process the redirect response (but only once to avoid infinite loops)
-                        if (redirectResponse.status.value in 300..399) {
-                            logger.warn("REDIRECT_CHAIN: Redirect chain detected, stopping at second redirect: path={}, redirectLocation={}, status={}", 
-                                source.cachedFile.path, redirectLocation, redirectResponse.status.value)
-                            redirectResponse.cancel()
-                            throw ReadFromHttpStreamException("Redirect chain detected - multiple redirects not supported. Last location: ${redirectResponse.headers["Location"] ?: redirectLocation}", 
-                                RuntimeException("Multiple redirects detected"))
-                        }
-                        
-                        // Process the redirect response as if it was the original response
-                        logger.trace("REDIRECT_PROCESSING: Starting to process redirect response body (fallback): redirectUrl={}, status={}", redirectUrl, redirectResponse.status.value)
-                        
-                        return@execute try {
-                            redirectResponse.body<ByteReadChannel>().toInputStream().use { inputStream ->
-                                logger.trace("REDIRECT_INPUT_STREAM_CREATED: Successfully created input stream from redirect response (fallback): redirectUrl={}", redirectUrl)
-                                
-                                val actualProvider = if (debridClients.none { it.getProvider() == source.cachedFile.provider }) {
-                                    null
-                                } else {
-                                    source.cachedFile.provider
-                                }
-                                val streamingContext = InputStreamingContext(
-                                    ResettableCountingInputStream(inputStream), 
-                                    actualProvider, 
-                                    source.cachedFile.path!!
-                                )
-                                activeInputStreams.add(streamingContext)
-                                try {
-                                    logger.trace("REDIRECT_STREAMING_START: Starting to stream from redirect URL (fallback): redirectUrl={}, expectedBytes={}", redirectUrl, expectedBytes)
-                                    withContext(Dispatchers.IO) {
-                                        pipeHttpInputStreamToOutputChannel(
-                                            streamingContext, byteRangeInfo, source, started, isIptv, expectedBytes
-                                        )
-                                    }
-                                    logger.trace("REDIRECT_STREAMING_COMPLETE: Successfully completed streaming from redirect URL (fallback): redirectUrl={}", redirectUrl)
-                                } catch (e: CancellationException) {
-                                    logger.trace("REDIRECT_STREAMING_CANCELLED: Streaming cancelled (fallback): redirectUrl={}", redirectUrl)
-                                    close(e)
-                                    throw e
-                                } catch (e: EOFException) {
-                                    val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                                    val storedFileSize = source.cachedFile.size ?: -1L
-                                    val httpContentLength = redirectResponse.headers["Content-Length"]?.toLongOrNull() ?: -1L
-                                    val fullFileSize = if (storedFileSize > 0) storedFileSize else httpContentLength
-                                    // For byte range requests, httpContentLength is the range size, not the full file size
-                                    // This mismatch is expected and normal for range requests
-                                    val sizeMismatch = if (storedFileSize > 0 && httpContentLength > 0 && storedFileSize != httpContentLength) {
-                                        if (httpContentLength < storedFileSize) {
-                                            "EXPECTED_RANGE: storedSize=$storedFileSize != httpContentLength=$httpContentLength (range request)"
-                                        } else {
-                                            "MISMATCH: storedSize=$storedFileSize != httpContentLength=$httpContentLength"
-                                        }
-                                    } else {
-                                        "OK"
-                                    }
-                                    
-                                    logger.trace("STREAMING_EOF: EOFException during stream read (after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
-                                        source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, redirectResponse.status.value, e::class.simpleName)
-                                    throw e
-                                } catch (e: Exception) {
-                                    // Check if this is a client abort (expected when client disconnects)
-                                    if (isClientAbortException(e)) {
-                                        val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                                        logger.debug("STREAMING_EXCEPTION: Client disconnected (expected, after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                                            source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, redirectResponse.status.value, e::class.simpleName)
-                                    } else {
-                                        val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                                        logger.trace("STREAMING_EXCEPTION: Exception during stream read (after redirect fallback): path={}, redirectUrl={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                                            source.cachedFile.path, redirectUrl.take(100), requestedRange, expectedBytes, actualBytesRead, redirectResponse.status.value, e::class.simpleName, e)
-                                        // Explicitly log stack trace to ensure it appears
-                                        logger.trace("STREAMING_EXCEPTION_STACK_TRACE (after redirect fallback)", e)
-                                        logger.error("An error occurred during reading from stream after redirect fallback", e)
-                                    }
-                                    throw ReadFromHttpStreamException("An error occurred during reading from stream after redirect fallback", e)
-                                } finally {
-                                    logger.trace("REDIRECT_CLEANUP: Cleaning up redirect response (fallback): redirectUrl={}", redirectUrl)
-                                    redirectResponse.cancel()
-                                    activeInputStreams.removeStream(streamingContext)
-                                }
-                                }  // closes use block
-                            } catch (e: Exception) {
-                                // Check if this is a client abort (expected when client disconnects)
-                                if (isClientAbortException(e)) {
-                                    logger.debug("REDIRECT_BODY_EXCEPTION: Client disconnected (expected): redirectUrl={}, exceptionClass={}", 
-                                        redirectUrl, e::class.simpleName)
-                                } else {
-                                    logger.trace("REDIRECT_BODY_EXCEPTION: Exception creating input stream from redirect response body (fallback): redirectUrl={}, exceptionClass={}", 
-                                        redirectUrl, e::class.simpleName, e)
-                                    logger.trace("REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
-                                }
-                                redirectResponse.cancel()
-                                throw ReadFromHttpStreamException("Failed to create input stream from redirect response: $redirectUrl", e)
-                            }
-                    }
-                } else {
-                    // No redirect location - throw error
-                    logger.warn("REDIRECT_RESPONSE: Received redirect status {} but no Location header: path={}, originalLink={}, requestedRange={}", 
-                        response.status.value, source.cachedFile.path, source.cachedFile.link?.take(100), requestedRange)
-                    throw ReadFromHttpStreamException("Received redirect response (${response.status.value}) but no Location header found", 
-                        RuntimeException("Redirect response without Location header"))
-                }
+                logger.warn("REDIRECT_RESPONSE: Received redirect response (HttpRedirect plugin should have handled this automatically): path={}, originalLink={}, redirectLocation={}, requestedRange={}, isIptv={}. This may indicate HttpRedirect plugin doesn't follow redirects with Range headers.", 
+                    source.cachedFile.path, source.cachedFile.link?.take(100), redirectLocation, requestedRange, isIptv)
+                // Continue processing - assume redirect was handled or will be handled
             }
+            
+            // Process the response normally - HttpRedirect plugin should have handled any redirects automatically
+            // If redirect wasn't followed, we'll see it in the response status above
             
             try {
                 response.body<ByteReadChannel>().toInputStream().use { inputStream ->
@@ -870,43 +570,33 @@ class StreamingService(
                             "OK"
                         }
                         
-                        logger.trace("STREAMING_EOF: EOFException during stream read: path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
-                            source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
-                            requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, response.status.value, e::class.simpleName)
-                        // Let it propagate to outer handler for proper handling
+                        logger.trace("STREAMING_EOF: EOFException during stream read: path={}, link={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, storedFileSize={}, httpContentLength={}, fullFileSize={}, sizeMismatch={}, httpStatus={}, exceptionClass={}", 
+                            source.cachedFile.path, source.cachedFile.link?.take(100), requestedRange, expectedBytes, actualBytesRead, storedFileSize, httpContentLength, fullFileSize, sizeMismatch, response.status.value, e::class.simpleName)
                         throw e
                     } catch (e: Exception) {
-                        // Check if this is a client abort (expected when client disconnects)
-                        if (isClientAbortException(e)) {
-                            val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                            logger.debug("STREAMING_EXCEPTION: Client disconnected (expected): path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                                source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
-                                requestedRange, expectedBytes, actualBytesRead, response.status.value, e::class.simpleName)
-                        } else {
-                            // TRACE level logging for streaming exceptions with full stack trace
-                            val actualBytesRead = streamingContext.inputStream.getTotalCount()
-                            logger.trace("STREAMING_EXCEPTION: Exception during stream read: path={}, link={}, provider={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
-                                source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider,
-                                requestedRange, expectedBytes, actualBytesRead, response.status.value, e::class.simpleName, e)
-                            // Explicitly log stack trace to ensure it appears
-                            logger.trace("STREAMING_EXCEPTION_STACK_TRACE", e)
-                            logger.error("An error occurred during reading from stream", e)
-                        }
+                        val actualBytesRead = streamingContext.inputStream.getTotalCount()
+                        logger.trace("STREAMING_EXCEPTION: Exception during stream read: path={}, link={}, requestedRange={}, expectedBytes={}, actualBytesRead={}, httpStatus={}, exceptionClass={}", 
+                            source.cachedFile.path, source.cachedFile.link?.take(100), requestedRange, expectedBytes, actualBytesRead, response.status.value, e::class.simpleName, e)
+                        // Explicitly log stack trace to ensure it appears
+                        logger.trace("STREAMING_EXCEPTION_STACK_TRACE", e)
+                        logger.error("An error occurred during reading from stream", e)
                         throw ReadFromHttpStreamException("An error occurred during reading from stream", e)
                     } finally {
-                        response.cancel()
                         activeInputStreams.removeStream(streamingContext)
                     }
                 }
             } catch (e: Exception) {
-                // Skip logging for CancellationException and EOFException as they're expected during normal streaming
-                if (e !is CancellationException && e !is EOFException) {
-                    logger.trace("NON_REDIRECT_BODY_EXCEPTION: Exception creating input stream from response body: status={}, exceptionClass={}", 
-                        response.status.value, e::class.simpleName, e)
-                    logger.trace("NON_REDIRECT_BODY_EXCEPTION_STACK_TRACE", e)
+                // Check if this is a client abort (expected when client disconnects)
+                if (isClientAbortException(e)) {
+                    logger.debug("BODY_EXCEPTION: Client disconnected (expected): link={}, exceptionClass={}", 
+                        source.cachedFile.link?.take(100), e::class.simpleName)
+                } else {
+                    logger.trace("BODY_EXCEPTION: Exception creating input stream from response body: link={}, exceptionClass={}", 
+                        source.cachedFile.link?.take(100), e::class.simpleName, e)
+                    logger.trace("BODY_EXCEPTION_STACK_TRACE", e)
                 }
                 response.cancel()
-                throw ReadFromHttpStreamException("Failed to create input stream from response", e)
+                throw ReadFromHttpStreamException("Failed to create input stream from response: ${source.cachedFile.link}", e)
             }
         }
     }
