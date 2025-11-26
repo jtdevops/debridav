@@ -431,14 +431,6 @@ class IptvRequestService(
             // Sanitize folder name and remove extension for folder
             val sanitizedFolderName = sanitizeFileName(folderNameWithExtension.removeSuffix(".$mediaExtension"))
             
-            // Build filename: just episode number (S##E##) + extension
-            val fileName = if (episode.season != null && episode.episode != null) {
-                "S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)}.$mediaExtension"
-            } else {
-                // Fallback if no episode info: use episode ID
-                "${episode.id}.$mediaExtension"
-            }
-            
             // Full episode title for metadata (used in DebridIptvContent)
             val episodeTitle = if (magnetTitle != null && episode.season != null && episode.episode != null) {
                 // Check if magnet title has season but no episode number
@@ -513,7 +505,10 @@ class IptvRequestService(
             
             debridIptvContent.debridLinks.add(iptvFile)
             
-            // Create folder structure: folder name = magnet title (sanitized), file name = episode number only
+            // Build filename: use full episode title (sanitized)
+            val fileName = sanitizeFileName(episodeTitle)
+            
+            // Create folder structure: folder name = magnet title (sanitized), file name = full episode title
             val filePath = "$categoryPath/$sanitizedFolderName/$fileName"
             
             // Generate hash from episode content ID (series episodes use seriesId_episodeId format)
@@ -1248,8 +1243,8 @@ class IptvRequestService(
         }
         
         if (titleYear != null && !yearAlreadyInTitle) {
-            // Year not found in sanitized title, add it as standalone
-            parts.add(titleYear.toString())
+            // Year not found in sanitized title, add it in round brackets
+            parts.add("($titleYear)")
         }
         // If year already exists in sanitizedTitle (in brackets or otherwise), don't add again
         
