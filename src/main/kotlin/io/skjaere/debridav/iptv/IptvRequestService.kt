@@ -293,7 +293,7 @@ class IptvRequestService(
         
         // Try to get episodes from cache first
         val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
-        val episodes = if (cachedMetadata != null) {
+        val (seriesInfo, episodes) = if (cachedMetadata != null) {
             // Check if cache is still valid (not expired)
             val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
             if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
@@ -307,7 +307,8 @@ class IptvRequestService(
                 cachedEpisodes.forEach { ep ->
                     logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
                 }
-                cachedEpisodes
+                // Note: Series info is not cached, so we return null for it
+                Pair(null, cachedEpisodes)
             } else {
                 logger.debug("Cache expired for series $seriesId (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
                 // Cache expired, fetch fresh data
@@ -484,14 +485,17 @@ class IptvRequestService(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
         providerName: String,
         seriesId: String
-    ): List<XtreamCodesClient.XtreamSeriesEpisode> {
-        val episodes = runBlocking {
+    ): Pair<io.skjaere.debridav.iptv.client.XtreamCodesClient.SeriesInfo?, List<XtreamCodesClient.XtreamSeriesEpisode>> {
+        val (seriesInfo, episodes) = runBlocking {
             xtreamCodesClient.getSeriesEpisodes(providerConfig, seriesId)
         }
         
         if (episodes.isNotEmpty()) {
             // Log episode details at DEBUG level
-            logger.debug("Fetched ${episodes.size} episodes for series $seriesId:")
+            logger.debug("Fetched ${episodes.size} episodes for series $seriesId")
+            if (seriesInfo != null) {
+                logger.debug("Series info: name='${seriesInfo.name}', releaseDate='${seriesInfo.releaseDate}', release_date='${seriesInfo.release_date}'")
+            }
             episodes.forEach { ep ->
                 logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
             }
@@ -510,7 +514,17 @@ class IptvRequestService(
             logger.debug("Cached ${episodes.size} episodes for series $seriesId")
         }
         
-        return episodes
+        return Pair(seriesInfo, episodes)
+    }
+    
+    /**
+     * Extracts year from releaseDate string (e.g., "2006-10-01" -> 2006)
+     */
+    private fun extractYearFromReleaseDate(releaseDate: String?): Int? {
+        if (releaseDate == null || releaseDate.isBlank()) return null
+        // Try to extract year from date formats like "2006-10-01" or "2006"
+        val yearMatch = Regex("^(\\d{4})").find(releaseDate)
+        return yearMatch?.groupValues?.get(1)?.toIntOrNull()
     }
     
     /**
@@ -1260,7 +1274,7 @@ class IptvRequestService(
         return title
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null): List<IptvSearchResult> {
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
@@ -1269,6 +1283,8 @@ class IptvRequestService(
         // For series with episode parameter, fetch episodes to verify season availability and calculate accurate size
         // Store episode count per entity for size calculation
         val entityEpisodeCounts = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: episode count
+        // Store series year from info per entity for magnet title
+        val entitySeriesYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: series year from info
         
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
             logger.debug("Episode parameter provided (episode=$episode, parsed season=$requestedSeason), fetching episodes for series to verify availability")
@@ -1278,14 +1294,15 @@ class IptvRequestService(
                     .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
                 
                 if (providerConfig != null) {
-                    // Fetch episodes to verify season exists
-                    val episodes = try {
+                    // Fetch episodes to verify season exists and get series info for year comparison
+                    val (seriesInfo, episodes) = try {
                         val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(entity.providerName, entity.contentId)
-                        val episodesList = if (cachedMetadata != null) {
+                        if (cachedMetadata != null) {
                             val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
                             if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
                                 logger.debug("Using cached episodes for series ${entity.contentId} during search (cache age: ${cacheAge.toHours()} hours)")
-                                cachedMetadata.getEpisodesAsXtreamSeriesEpisode()
+                                // Note: Series info is not cached, so we return null for it
+                                Pair(null, cachedMetadata.getEpisodesAsXtreamSeriesEpisode())
                             } else {
                                 // Cache expired, fetch fresh
                                 fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
@@ -1294,17 +1311,55 @@ class IptvRequestService(
                             // No cache, fetch fresh
                             fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
                         }
-                        
-                        // Log episode details at DEBUG level
-                        logger.debug("Episodes for series ${entity.contentId} (${entity.title}):")
-                        episodesList.forEach { ep ->
-                            logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
-                        }
-                        
-                        episodesList
                     } catch (e: Exception) {
                         logger.warn("Failed to fetch episodes for series ${entity.contentId} during search: ${e.message}", e)
-                        emptyList()
+                        Pair(null, emptyList())
+                    }
+                    
+                    // Extract year from series info and compare with requested year range
+                    val seriesYear = seriesInfo?.let { info ->
+                        extractYearFromReleaseDate(info.release_date ?: info.releaseDate)
+                    }
+                    
+                    // Store series year for magnet title generation
+                    if (seriesYear != null) {
+                        entitySeriesYears["${entity.providerName}_${entity.contentId}"] = seriesYear
+                        logger.debug("Stored series year $seriesYear from info for series ${entity.contentId} (${entity.title})")
+                    }
+                    
+                    // Check year match: Compare series year (startYear from info) with OMDB startYear
+                    // The series year from info is the startYear that should match the OMDB startYear
+                    val yearMatches = if (startYear != null) {
+                        when {
+                            seriesYear == null -> {
+                                // No year in series info, include it (can't verify)
+                                logger.debug("Series ${entity.contentId} (${entity.title}) has no release date, including in results")
+                                true
+                            }
+                            else -> {
+                                // Compare series year (from info) with OMDB startYear
+                                // Allow some flexibility: exact match or within 1 year (for rounding differences)
+                                val matches = seriesYear == startYear || (seriesYear >= startYear && seriesYear <= (startYear + 1))
+                                if (!matches) {
+                                    logger.debug("Series ${entity.contentId} (${entity.title}) year $seriesYear (from info) does not match OMDB startYear $startYear")
+                                } else {
+                                    logger.debug("Series ${entity.contentId} (${entity.title}) year $seriesYear (from info) matches OMDB startYear $startYear")
+                                }
+                                matches
+                            }
+                        }
+                    } else {
+                        true // No year filtering requested
+                    }
+                    
+                    if (!yearMatches) {
+                        return@filter false
+                    }
+                    
+                    // Log episode details at DEBUG level
+                    logger.debug("Episodes for series ${entity.contentId} (${entity.title}, year=$seriesYear):")
+                    episodes.forEach { ep ->
+                        logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
                     }
                     
                     // Check if requested season exists
@@ -1361,7 +1416,9 @@ class IptvRequestService(
             // STEP 3: Format title for Radarr compatibility (includes quality, codec, etc.)
             // This will remove language code from beginning and handle duplicate years
             // Include episode info (e.g., "S08" or "S08E01") in title if provided (for series)
-            var radarrTitle = formatTitleForRadarr(entity.title, year, quality, languageCode, episode)
+            // Use series year from info if available, otherwise fall back to year parameter
+            val yearForTitle = entitySeriesYears["${entity.providerName}_${entity.contentId}"] ?: year
+            var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode)
             
             // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
             val releaseGroupParts = mutableListOf("IPTV")

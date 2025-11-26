@@ -571,18 +571,18 @@ class XtreamCodesClient(
     }
 
     /**
-     * Gets series episodes from the Xtream Codes provider using get_series_info API
-     * Returns a list of episodes for the given series_id
+     * Gets series episodes and info from the Xtream Codes provider using get_series_info API
+     * Returns a Pair containing the series info and a list of episodes for the given series_id
      * Uses local file caching if configured (files named: {provider}_series_info_{seriesId}.json)
      */
-    suspend fun getSeriesEpisodes(providerConfig: IptvProviderConfiguration, seriesId: String): List<XtreamSeriesEpisode> {
+    suspend fun getSeriesEpisodes(providerConfig: IptvProviderConfiguration, seriesId: String): Pair<SeriesInfo?, List<XtreamSeriesEpisode>> {
         require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
             "Provider ${providerConfig.name} is not an Xtream Codes provider"
         }
         
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
-        val username = providerConfig.xtreamUsername ?: return emptyList()
-        val password = providerConfig.xtreamPassword ?: return emptyList()
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return Pair(null, emptyList())
+        val username = providerConfig.xtreamUsername ?: return Pair(null, emptyList())
+        val password = providerConfig.xtreamPassword ?: return Pair(null, emptyList())
         
         try {
             val apiUrl = "$baseUrl/player_api.php"
@@ -616,7 +616,7 @@ class XtreamCodesClient(
                 
                 if (response.status != HttpStatusCode.OK) {
                     logger.error("Failed to fetch series episodes from Xtream Codes: ${response.status}")
-                    return emptyList()
+                    return Pair(null, emptyList())
                 }
                 
                 val body = response.body<String>()
@@ -644,6 +644,7 @@ class XtreamCodesClient(
             // Parse the entire response as a map and extract episodes
             val responseWrapper = json.decodeFromString<SeriesInfoResponseWrapper>(finalResponseBody)
             
+            val seriesInfo = responseWrapper.info
             val allEpisodes = responseWrapper.episodes?.flatMap { (seasonStr, episodesList) ->
                 val seasonNum = seasonStr.toIntOrNull()
                 episodesList.map { episodeRaw ->
@@ -661,10 +662,10 @@ class XtreamCodesClient(
             } ?: emptyList()
             
             logger.debug("Successfully parsed ${allEpisodes.size} episodes for series $seriesId")
-            return allEpisodes
+            return Pair(seriesInfo, allEpisodes)
         } catch (e: Exception) {
             logger.error("Error fetching series episodes from Xtream Codes provider ${providerConfig.name} for series_id=$seriesId", e)
-            return emptyList()
+            return Pair(null, emptyList())
         }
     }
 
@@ -1070,6 +1071,7 @@ class XtreamCodesClient(
         val director: String? = null,
         val genre: String? = null,
         val releaseDate: String? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
         val rating: String? = null,
         val rating_5based: Double? = null,
         val duration: String? = null
@@ -1088,7 +1090,15 @@ class XtreamCodesClient(
     )
     
     @Serializable
+    data class SeriesInfo(
+        val name: String? = null,
+        val releaseDate: String? = null,
+        val release_date: String? = null
+    )
+    
+    @Serializable
     private data class SeriesInfoResponseWrapper(
+        val info: SeriesInfo? = null,
         val episodes: Map<String, List<XtreamSeriesEpisodeRaw>>? = null
     )
 }

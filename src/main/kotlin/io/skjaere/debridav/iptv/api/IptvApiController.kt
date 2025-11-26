@@ -98,10 +98,10 @@ class IptvApiController(
             return ResponseEntity.ok(emptyList())
         }
         
-        logger.info("Searching IPTV content with title='{}', year={}, contentType={}, season={}, episode={}, useArticleVariations={}", 
-            searchQuery.title, searchQuery.year, contentType, season, episode, searchQuery.useArticleVariations)
+        logger.info("Searching IPTV content with title='{}', year={}, startYear={}, endYear={}, contentType={}, season={}, episode={}, useArticleVariations={}", 
+            searchQuery.title, searchQuery.year, searchQuery.startYear, searchQuery.endYear, contentType, season, episode, searchQuery.useArticleVariations)
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear)
         logger.info("Search returned {} results", results.size)
         if (results.isNotEmpty()) {
             logger.debug("First result sample: {}", results.first())
