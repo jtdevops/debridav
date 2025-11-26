@@ -146,19 +146,30 @@ class TorrentService(
         }
         
         // Generate hash for database lookup (use original format, not hex)
-        // The database stores hashCode().toString() format
-        val finalHash = "${providerName}_${contentId}".hashCode().toString()
+        // For series, use seriesId + season to create a unique hash for the season torrent
+        // For movies/single episodes, use providerName_contentId
+        val finalHash = if (season != null) {
+            // Series: use seriesId + season for hash (one torrent per season)
+            "${providerName}_${contentId}_S${String.format("%02d", season)}".hashCode().toString()
+        } else {
+            // Movie or single episode: use providerName_contentId
+            "${providerName}_${contentId}".hashCode().toString()
+        }
         
-        // Retrieve the created file and create a Torrent entity for it
-        val createdFiles = debridFileRepository.getByHash(finalHash)
+        // Retrieve all created files for this IPTV content
+        // For series, this will get all episode files for the season (already filtered during creation)
+        // For movies/single episodes, this will get the single file
+        val createdFiles = debridFileRepository.findByIptvContentRefId(iptvContent.id!!)
             .filterIsInstance<RemotelyCachedEntity>()
         
         if (createdFiles.isEmpty()) {
-            logger.error("IPTV file not found after creation: hash=$finalHash")
+            logger.error("IPTV files not found after creation: iptvContentRefId=${iptvContent.id}")
             return false
         }
         
-        val file = createdFiles.first()
+        // All files retrieved should be from the requested season (if series) since
+        // handleSeriesContent already filters episodes by season before creating files
+        val filesToInclude = createdFiles
         
         // Create or update Torrent entity
         val torrent = torrentRepository.getByHashIgnoreCase(finalHash) ?: Torrent()
@@ -172,7 +183,7 @@ class TorrentService(
         }
         
         torrent.category = categoryService.findByName(category)
-?: run { categoryService.createCategory(category) }
+            ?: run { categoryService.createCategory(category) }
         // Use magnet title if available, otherwise use IPTV content title
         // Remove any media file extension from the title to use as folder name
         val titleToUse = magnet?.let { getNameFromMagnet(it) } ?: iptvContent.title
@@ -191,13 +202,14 @@ class TorrentService(
         // For IPTV files, savePath should match the pattern used by regular torrents
         // Regular torrents use: ${downloadPath}/${torrent.name} (folder path only)
         // Use fileSystemPath() to convert ltree path to human-readable path (e.g., /downloads/Twisters...)
-        val directoryPath = file.directory?.fileSystemPath() ?: debridavConfigurationProperties.downloadPath
+        // All files should be in the same directory, so use the first file's directory
+        val directoryPath = filesToInclude.first().directory?.fileSystemPath() ?: debridavConfigurationProperties.downloadPath
         // savePath should be the folder path (not including filename), matching regular torrents
         torrent.savePath = directoryPath
-        torrent.files = mutableListOf(file)
+        torrent.files = filesToInclude.toMutableList()
         
         torrentRepository.save(torrent)
-        logger.info("Successfully created Torrent entity for IPTV content: ${torrent.name}")
+        logger.info("Successfully created Torrent entity for IPTV content: ${torrent.name} with ${filesToInclude.size} file(s)")
         
         return true
     }

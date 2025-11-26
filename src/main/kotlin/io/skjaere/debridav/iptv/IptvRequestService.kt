@@ -307,12 +307,17 @@ class IptvRequestService(
                 logger.debug("Parsing episodes from cached JSON response for series $seriesId")
                 val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, seriesId, cachedMetadata.responseJson)
                 
-                // Log cached episode details at DEBUG level
-                logger.debug("Retrieved ${cachedEpisodes.size} episodes from cache for series $seriesId")
+                // Log cached episode details at DEBUG level - filter by requested season if provided
+                val episodesToLog = if (requestedSeason != null) {
+                    cachedEpisodes.filter { it.season == requestedSeason }
+                } else {
+                    cachedEpisodes
+                }
+                logger.debug("Retrieved ${cachedEpisodes.size} episodes from cache for series $seriesId${if (requestedSeason != null) " (showing ${episodesToLog.size} episodes from season $requestedSeason)" else ""}")
                 if (cachedSeriesInfo != null) {
                     logger.debug("Retrieved series info from cache: name='${cachedSeriesInfo.name}', releaseDate='${cachedSeriesInfo.releaseDate}', release_date='${cachedSeriesInfo.release_date}'")
                 }
-                cachedEpisodes.forEach { ep ->
+                episodesToLog.forEach { ep ->
                     logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
                 }
                 Pair(cachedSeriesInfo, cachedEpisodes)
@@ -395,36 +400,84 @@ class IptvRequestService(
             val extension = episode.container_extension ?: "mp4"
             val episodeUrl = "$baseUrl/series/$username/$password/${episode.id}.$extension"
             
-            // Use magnet title if available, otherwise construct episode title from IPTV content
-            val episodeTitleBase = if (magnetTitle != null) {
-                // Use magnet title directly if provided (it should already be episode-specific)
-                magnetTitle
-            } else {
-                // Construct episode title from IPTV content
-                if (episode.season != null && episode.episode != null) {
-                    "${iptvContent.title} - S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)} - ${episode.title}"
-                } else {
-                    "${iptvContent.title} - ${episode.title}"
-                }
-            }
-            
             // Extract media file extension from the episode URL
             val mediaExtension = extractMediaExtensionFromUrl(episodeUrl) ?: extension
+            
+            // Determine folder name: use magnet title if available, otherwise use IPTV content title
+            val folderNameBase = if (magnetTitle != null) {
+                // Use magnet title as-is for folder name (without episode number)
+                magnetTitle
+            } else {
+                // Use IPTV content title for folder name
+                iptvContent.title
+            }
             
             // Check if IPTV content title starts with any configured language prefix
             // If not, extract language code and append it after .IPTV
             val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
             
-            // Build episode filename: insert language code between .IPTV and media extension if needed
-            val episodeTitle = if (languageCode != null && episodeTitleBase.endsWith(".IPTV", ignoreCase = true)) {
+            // Build folder name: insert language code between .IPTV and media extension if needed
+            val folderNameWithExtension = if (languageCode != null && folderNameBase.endsWith(".IPTV", ignoreCase = true)) {
                 // Insert language code between .IPTV and media extension
-                "${episodeTitleBase.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
+                "${folderNameBase.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
             } else if (languageCode != null) {
                 // Language code but no .IPTV suffix, append it before extension
-                "$episodeTitleBase-$languageCode.$mediaExtension"
+                "$folderNameBase-$languageCode.$mediaExtension"
             } else {
                 // No language code, just append extension
-                "$episodeTitleBase.$mediaExtension"
+                "$folderNameBase.$mediaExtension"
+            }
+            
+            // Sanitize folder name and remove extension for folder
+            val sanitizedFolderName = sanitizeFileName(folderNameWithExtension.removeSuffix(".$mediaExtension"))
+            
+            // Build filename: just episode number (S##E##) + extension
+            val fileName = if (episode.season != null && episode.episode != null) {
+                "S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)}.$mediaExtension"
+            } else {
+                // Fallback if no episode info: use episode ID
+                "${episode.id}.$mediaExtension"
+            }
+            
+            // Full episode title for metadata (used in DebridIptvContent)
+            val episodeTitle = if (magnetTitle != null && episode.season != null && episode.episode != null) {
+                // Check if magnet title has season but no episode number
+                val seasonPattern = Regex("S(\\d+)")
+                val episodePattern = Regex("E(\\d+)")
+                val hasSeason = seasonPattern.containsMatchIn(magnetTitle)
+                val hasEpisode = episodePattern.containsMatchIn(magnetTitle)
+                
+                if (hasSeason && !hasEpisode) {
+                    // Magnet title has season but no episode, insert episode number after season
+                    val episodeNumber = String.format("E%02d", episode.episode)
+                    val titleWithEpisode = seasonPattern.replace(magnetTitle) { matchResult ->
+                        "${matchResult.value}$episodeNumber"
+                    }
+                    // Add extension
+                    if (languageCode != null && titleWithEpisode.endsWith(".IPTV", ignoreCase = true)) {
+                        "${titleWithEpisode.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
+                    } else if (languageCode != null) {
+                        "$titleWithEpisode-$languageCode.$mediaExtension"
+                    } else {
+                        "$titleWithEpisode.$mediaExtension"
+                    }
+                } else {
+                    // Magnet title already has episode or no season, use as-is with extension
+                    if (languageCode != null && magnetTitle.endsWith(".IPTV", ignoreCase = true)) {
+                        "${magnetTitle.removeSuffix(".IPTV")}.IPTV-$languageCode.$mediaExtension"
+                    } else if (languageCode != null) {
+                        "$magnetTitle-$languageCode.$mediaExtension"
+                    } else {
+                        "$magnetTitle.$mediaExtension"
+                    }
+                }
+            } else {
+                // Construct episode title from IPTV content
+                if (episode.season != null && episode.episode != null) {
+                    "${iptvContent.title} - S${String.format("%02d", episode.season)}E${String.format("%02d", episode.episode)} - ${episode.title}.$mediaExtension"
+                } else {
+                    "${iptvContent.title} - ${episode.title}.$mediaExtension"
+                }
             }
             
             // Log episode URL information
@@ -460,12 +513,8 @@ class IptvRequestService(
             
             debridIptvContent.debridLinks.add(iptvFile)
             
-            // Create folder structure: folder name without media extension, file inside with full name including extension
-            val sanitizedTitle = sanitizeFileName(episodeTitle)
-            // Remove the media extension (last extension) for folder name
-            val folderName = sanitizedTitle.removeSuffix(".$mediaExtension")
-            val fileName = sanitizedTitle
-            val filePath = "$categoryPath/$folderName/$fileName"
+            // Create folder structure: folder name = magnet title (sanitized), file name = episode number only
+            val filePath = "$categoryPath/$sanitizedFolderName/$fileName"
             
             // Generate hash from episode content ID (series episodes use seriesId_episodeId format)
             // Use original format for database compatibility
@@ -536,13 +585,10 @@ class IptvRequestService(
         val (seriesInfo, episodes) = parseSeriesEpisodesFromJson(providerConfig, seriesId, responseJson)
         
         if (episodes.isNotEmpty()) {
-            // Log episode details at DEBUG level
+            // Log summary only - individual episode details are logged later when filtered by season
             logger.debug("Fetched ${episodes.size} episodes for series $seriesId")
             if (seriesInfo != null) {
                 logger.debug("Series info: name='${seriesInfo.name}', releaseDate='${seriesInfo.releaseDate}', release_date='${seriesInfo.release_date}'")
-            }
-            episodes.forEach { ep ->
-                logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
             }
             
             // Save or update cache with raw JSON response

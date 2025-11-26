@@ -2,6 +2,8 @@ package io.skjaere.debridav.repository
 
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
+import io.skjaere.debridav.fs.DebridIptvContent
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 import jakarta.transaction.Transactional
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
@@ -68,6 +70,15 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
 
     @Query("select rce from RemotelyCachedEntity rce where lower(rce.hash) = lower(:hash)")
     fun getByHash(hash: String): List<DbEntity>
+    
+    @Query("""
+        select rce from RemotelyCachedEntity rce 
+        where rce.contents.id in (
+            select dic.id from DebridIptvContent dic 
+            where dic.iptvContentRefId = :iptvContentRefId
+        )
+    """)
+    fun findByIptvContentRefId(iptvContentRefId: Long): List<RemotelyCachedEntity>
 
     @Query(
         """
