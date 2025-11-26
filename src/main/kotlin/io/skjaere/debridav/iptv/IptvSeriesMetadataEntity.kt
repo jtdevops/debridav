@@ -1,7 +1,5 @@
 package io.skjaere.debridav.iptv
 
-import io.hypersistence.utils.hibernate.type.json.JsonBinaryType
-import io.skjaere.debridav.iptv.client.XtreamCodesClient
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.GeneratedValue
@@ -10,42 +8,7 @@ import jakarta.persistence.Id
 import jakarta.persistence.Index
 import jakarta.persistence.Table
 import jakarta.persistence.UniqueConstraint
-import org.hibernate.annotations.Type
 import java.time.Instant
-
-/**
- * Storage DTO for episode information (compatible with Jackson/JsonBinaryType)
- */
-data class EpisodeStorageDto(
-    val id: String,
-    val title: String,
-    val containerExtension: String? = null,
-    val season: Int? = null,
-    val episode: Int? = null
-) {
-    fun toXtreamSeriesEpisode(): XtreamCodesClient.XtreamSeriesEpisode {
-        return XtreamCodesClient.XtreamSeriesEpisode(
-            id = id,
-            title = title,
-            container_extension = containerExtension,
-            info = null, // Info not stored in cache to reduce size
-            season = season,
-            episode = episode
-        )
-    }
-    
-    companion object {
-        fun fromXtreamSeriesEpisode(ep: XtreamCodesClient.XtreamSeriesEpisode): EpisodeStorageDto {
-            return EpisodeStorageDto(
-                id = ep.id,
-                title = ep.title,
-                containerExtension = ep.container_extension,
-                season = ep.season,
-                episode = ep.episode
-            )
-        }
-    }
-}
 
 @Entity
 @Table(
@@ -69,28 +32,13 @@ open class IptvSeriesMetadataEntity {
     @Column(name = "series_id", nullable = false, length = 512)
     open var seriesId: String = ""
     
-    @Type(JsonBinaryType::class)
-    @Column(name = "episodes", columnDefinition = "jsonb", nullable = false)
-    open var episodes: List<EpisodeStorageDto> = emptyList()
+    @Column(name = "response_json", columnDefinition = "TEXT", nullable = false)
+    open var responseJson: String = ""
     
     @Column(name = "last_accessed", nullable = false)
     open var lastAccessed: Instant = Instant.now()
     
     @Column(name = "created_at", nullable = false)
     open var createdAt: Instant = Instant.now()
-    
-    /**
-     * Helper method to get episodes as XtreamSeriesEpisode list
-     */
-    fun getEpisodesAsXtreamSeriesEpisode(): List<XtreamCodesClient.XtreamSeriesEpisode> {
-        return episodes.map { it.toXtreamSeriesEpisode() }
-    }
-    
-    /**
-     * Helper method to set episodes from XtreamSeriesEpisode list
-     */
-    fun setEpisodesFromXtreamSeriesEpisode(episodesList: List<XtreamCodesClient.XtreamSeriesEpisode>) {
-        episodes = episodesList.map { EpisodeStorageDto.fromXtreamSeriesEpisode(it) }
-    }
 }
 

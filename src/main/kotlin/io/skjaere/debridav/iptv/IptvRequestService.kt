@@ -10,6 +10,7 @@ import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.head
 import io.ktor.client.request.headers
+import io.ktor.client.request.parameter
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.ByteReadChannel
@@ -74,7 +75,7 @@ class IptvRequestService(
         season: Int? = null, // Season number for series filtering
         episode: Int? = null // Episode number within season (optional)
     ): Boolean {
-        logger.info("Adding IPTV content: contentId=$contentId, provider=$providerName, category=$category, magnetTitle=$magnetTitle")
+        logger.info("Adding IPTV content: contentId=$contentId, provider=$providerName, category=$category, magnetTitle=$magnetTitle, season=$season, episode=$episode")
         
         val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
             ?: run {
@@ -301,14 +302,20 @@ class IptvRequestService(
                 // Update last accessed time
                 cachedMetadata.lastAccessed = java.time.Instant.now()
                 iptvSeriesMetadataRepository.save(cachedMetadata)
-                val cachedEpisodes = cachedMetadata.getEpisodesAsXtreamSeriesEpisode()
+                
+                // Parse from cached JSON response
+                logger.debug("Parsing episodes from cached JSON response for series $seriesId")
+                val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, seriesId, cachedMetadata.responseJson)
+                
                 // Log cached episode details at DEBUG level
-                logger.debug("Retrieved ${cachedEpisodes.size} episodes from cache for series $seriesId:")
+                logger.debug("Retrieved ${cachedEpisodes.size} episodes from cache for series $seriesId")
+                if (cachedSeriesInfo != null) {
+                    logger.debug("Retrieved series info from cache: name='${cachedSeriesInfo.name}', releaseDate='${cachedSeriesInfo.releaseDate}', release_date='${cachedSeriesInfo.release_date}'")
+                }
                 cachedEpisodes.forEach { ep ->
                     logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
                 }
-                // Note: Series info is not cached, so we return null for it
-                Pair(null, cachedEpisodes)
+                Pair(cachedSeriesInfo, cachedEpisodes)
             } else {
                 logger.debug("Cache expired for series $seriesId (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
                 // Cache expired, fetch fresh data
@@ -479,6 +486,19 @@ class IptvRequestService(
     }
     
     /**
+     * Parses series episodes from cached JSON response
+     */
+    private fun parseSeriesEpisodesFromJson(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        seriesId: String,
+        jsonString: String
+    ): Pair<io.skjaere.debridav.iptv.client.XtreamCodesClient.SeriesInfo?, List<XtreamCodesClient.XtreamSeriesEpisode>> {
+        return runBlocking {
+            xtreamCodesClient.getSeriesEpisodes(providerConfig, seriesId, cachedJson = jsonString)
+        }
+    }
+    
+    /**
      * Fetches episodes from API and caches them in the database
      */
     private fun fetchAndCacheEpisodes(
@@ -486,9 +506,34 @@ class IptvRequestService(
         providerName: String,
         seriesId: String
     ): Pair<io.skjaere.debridav.iptv.client.XtreamCodesClient.SeriesInfo?, List<XtreamCodesClient.XtreamSeriesEpisode>> {
-        val (seriesInfo, episodes) = runBlocking {
-            xtreamCodesClient.getSeriesEpisodes(providerConfig, seriesId)
+        // Fetch the raw JSON response first
+        val responseJson = runBlocking {
+            val apiUrl = "${providerConfig.xtreamBaseUrl}/player_api.php"
+            try {
+                val response = httpClient.get(apiUrl) {
+                    parameter("username", providerConfig.xtreamUsername ?: "")
+                    parameter("password", providerConfig.xtreamPassword ?: "")
+                    parameter("action", "get_series_info")
+                    parameter("series_id", seriesId)
+                }
+                if (response.status.isSuccess()) {
+                    response.body<String>()
+                } else {
+                    logger.error("Failed to fetch series episodes: ${response.status}")
+                    null
+                }
+            } catch (e: Exception) {
+                logger.error("Error fetching series episodes JSON: ${e.message}", e)
+                null
+            }
         }
+        
+        if (responseJson == null) {
+            return Pair(null, emptyList())
+        }
+        
+        // Parse the JSON response
+        val (seriesInfo, episodes) = parseSeriesEpisodesFromJson(providerConfig, seriesId, responseJson)
         
         if (episodes.isNotEmpty()) {
             // Log episode details at DEBUG level
@@ -500,7 +545,7 @@ class IptvRequestService(
                 logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
             }
             
-            // Save or update cache
+            // Save or update cache with raw JSON response
             val metadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
                 ?: IptvSeriesMetadataEntity().apply {
                     this.providerName = providerName
@@ -508,10 +553,10 @@ class IptvRequestService(
                     this.createdAt = java.time.Instant.now()
                 }
             
-            metadata.setEpisodesFromXtreamSeriesEpisode(episodes)
+            metadata.responseJson = responseJson
             metadata.lastAccessed = java.time.Instant.now()
             iptvSeriesMetadataRepository.save(metadata)
-            logger.debug("Cached ${episodes.size} episodes for series $seriesId")
+            logger.debug("Cached raw JSON response for series $seriesId (${episodes.size} episodes)")
         }
         
         return Pair(seriesInfo, episodes)
@@ -1301,8 +1346,19 @@ class IptvRequestService(
                             val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
                             if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
                                 logger.debug("Using cached episodes for series ${entity.contentId} during search (cache age: ${cacheAge.toHours()} hours)")
-                                // Note: Series info is not cached, so we return null for it
-                                Pair(null, cachedMetadata.getEpisodesAsXtreamSeriesEpisode())
+                                
+                                // Update last accessed time before using cached data
+                                cachedMetadata.lastAccessed = java.time.Instant.now()
+                                iptvSeriesMetadataRepository.save(cachedMetadata)
+                                
+                                // Parse from cached JSON response
+                                logger.debug("Parsing episodes from cached JSON response for series ${entity.contentId}")
+                                val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                                
+                                if (cachedSeriesInfo != null) {
+                                    logger.debug("Retrieved series info from cache: name='${cachedSeriesInfo.name}', releaseDate='${cachedSeriesInfo.releaseDate}', release_date='${cachedSeriesInfo.release_date}'")
+                                }
+                                Pair(cachedSeriesInfo, cachedEpisodes)
                             } else {
                                 // Cache expired, fetch fresh
                                 fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
@@ -1356,12 +1412,6 @@ class IptvRequestService(
                         return@filter false
                     }
                     
-                    // Log episode details at DEBUG level
-                    logger.debug("Episodes for series ${entity.contentId} (${entity.title}, year=$seriesYear):")
-                    episodes.forEach { ep ->
-                        logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
-                    }
-                    
                     // Check if requested season exists
                     val hasSeason = episodes.any { it.season == requestedSeason }
                     if (!hasSeason && episodes.isNotEmpty()) {
@@ -1370,7 +1420,12 @@ class IptvRequestService(
                     } else if (hasSeason) {
                         val seasonEpisodes = episodes.filter { it.season == requestedSeason }
                         val episodeCount = seasonEpisodes.size
-                        logger.debug("Series ${entity.contentId} (${entity.title}) has $episodeCount episodes in season $requestedSeason")
+                        logger.debug("Series ${entity.contentId} (${entity.title}, year=$seriesYear) has $episodeCount episodes in season $requestedSeason")
+                        // Log episode details at DEBUG level - only for the requested season
+                        logger.debug("Episodes for series ${entity.contentId} (${entity.title}), season $requestedSeason:")
+                        seasonEpisodes.forEach { ep ->
+                            logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
+                        }
                         // Store episode count for size calculation
                         entityEpisodeCounts["${entity.providerName}_${entity.contentId}"] = episodeCount
                     }

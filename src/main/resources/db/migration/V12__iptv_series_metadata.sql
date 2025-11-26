@@ -6,7 +6,7 @@ CREATE TABLE iptv_series_metadata
     id            BIGINT NOT NULL,
     provider_name VARCHAR(255) NOT NULL,
     series_id     VARCHAR(512) NOT NULL,
-    episodes      JSONB NOT NULL,
+    response_json TEXT NOT NULL,
     last_accessed TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     created_at    TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     CONSTRAINT pk_iptv_series_metadata PRIMARY KEY (id)

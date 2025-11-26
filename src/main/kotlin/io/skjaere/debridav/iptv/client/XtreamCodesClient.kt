@@ -575,7 +575,7 @@ class XtreamCodesClient(
      * Returns a Pair containing the series info and a list of episodes for the given series_id
      * Uses local file caching if configured (files named: {provider}_series_info_{seriesId}.json)
      */
-    suspend fun getSeriesEpisodes(providerConfig: IptvProviderConfiguration, seriesId: String): Pair<SeriesInfo?, List<XtreamSeriesEpisode>> {
+    suspend fun getSeriesEpisodes(providerConfig: IptvProviderConfiguration, seriesId: String, cachedJson: String? = null): Pair<SeriesInfo?, List<XtreamSeriesEpisode>> {
         require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
             "Provider ${providerConfig.name} is not an Xtream Codes provider"
         }
@@ -601,7 +601,7 @@ class XtreamCodesClient(
                 null
             }
             
-            val finalResponseBody = responseBody ?: run {
+            val finalResponseBody = cachedJson ?: responseBody ?: run {
                 val seriesStreamsRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_series_info&series_id=$seriesId"
                 logger.debug("Fetching series episodes from Xtream Codes provider ${providerConfig.name}: $seriesStreamsRequestUrl")
                 
@@ -627,6 +627,10 @@ class XtreamCodesClient(
                 }
                 
                 body
+            }
+            
+            if (cachedJson != null) {
+                logger.debug("Using cached JSON response for series $seriesId (length: ${cachedJson.length} characters)")
             }
             
             logger.debug("Parsing series episodes response (length: ${finalResponseBody.length} characters)")

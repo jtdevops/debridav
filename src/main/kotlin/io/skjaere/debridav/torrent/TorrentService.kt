@@ -132,9 +132,12 @@ class TorrentService(
         // Extract title from magnet URL if available, otherwise use IPTV content title
         val magnetTitle = magnet?.let { getNameFromMagnet(it) }
         
+        // Extract season/episode from magnet title (e.g., "Dexter.(US).2006.S08.1080p..." -> season=8)
+        val (season, episode) = extractSeasonEpisodeFromTitle(magnetTitle)
+        
         // Add IPTV content (creates the virtual file)
         val success = runBlocking {
-            iptvRequestService.addIptvContent(contentId, providerName, category, magnetTitle)
+            iptvRequestService.addIptvContent(contentId, providerName, category, magnetTitle, season, episode)
         }
         
         if (!success) {
@@ -290,6 +293,35 @@ class TorrentService(
         }
     }
 
+    /**
+     * Extracts season and episode numbers from a title string.
+     * Looks for patterns like "S08", "S08E01", "S8", "S8E1", etc.
+     * Returns Pair(season, episode) where episode can be null if only season is found.
+     */
+    private fun extractSeasonEpisodeFromTitle(title: String?): Pair<Int?, Int?> {
+        if (title == null) return Pair(null, null)
+        
+        // Pattern: S{season}E{episode} or S{season}
+        // Examples: S08E01, S8E1, S08, S8
+        val pattern = Regex("""S(\d+)(?:E(\d+))?""", RegexOption.IGNORE_CASE)
+        val match = pattern.find(title)
+        
+        if (match != null) {
+            val seasonStr = match.groupValues[1]
+            val episodeStr = match.groupValues.getOrNull(2)
+            
+            val season = seasonStr.toIntOrNull()
+            val episode = episodeStr?.toIntOrNull()
+            
+            if (season != null) {
+                logger.debug("Extracted season=$season, episode=$episode from title: $title")
+                return Pair(season, episode)
+            }
+        }
+        
+        return Pair(null, null)
+    }
+    
     private fun getTorrentNameFromDebridFileContent(debridFileContents: DebridFileContents): String {
         val contentPath = debridFileContents.originalPath
         val updatedTorrentName = if (contentPath!!.contains("/")) {
