@@ -175,7 +175,7 @@ class StreamingService(
                     
                     val currentFileSize = iptvContent.size
                     if (iptvRequestService.isDefaultFileSize(currentFileSize, contentType)) {
-                        logger.info("Detected default file size for IPTV content, attempting to refetch actual size: currentSize={}, contentType={}, provider={}", 
+                        logger.info("Detected default file size for IPTV content, attempting to refetch actual size: currentSize={}, contentType={}, iptvProvider={}", 
                             currentFileSize, contentType, providerName)
                         
                         // Refetch file size from IPTV provider
@@ -194,7 +194,7 @@ class StreamingService(
             }
             
             if (isArrRequest && !shouldBypass) {
-                logger.debug("Skipping IPTV provider login call for ARR request (will use local video file, provider=$providerName)")
+                logger.debug("Skipping IPTV provider login call for ARR request (will use local video file, iptvProvider=$providerName)")
             } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null) {
                 try {
                     // Rate limiting: max 1 call per minute per provider
@@ -281,9 +281,16 @@ class StreamingService(
         // Use the original range for normal streaming
         val appliedRange = originalRange
         
+        // Determine provider label for logging - use DebridProvider.IPTV for IPTV content, otherwise use debrid provider
+        val providerLabel = if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent || debridLink.provider == io.skjaere.debridav.debrid.DebridProvider.IPTV) {
+            io.skjaere.debridav.debrid.DebridProvider.IPTV.toString()
+        } else {
+            debridLink.provider?.toString() ?: "null"
+        }
+        
         logger.debug("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes, provider={}, source={}", 
             remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
-            appliedRange.finish - appliedRange.start + 1, debridLink.provider, httpRequestInfo.sourceInfo)
+            appliedRange.finish - appliedRange.start + 1, providerLabel, httpRequestInfo.sourceInfo)
         
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
         

@@ -125,7 +125,7 @@ class TorrentService(
         // Get IPTV content entity to retrieve title
         val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
         if (iptvContent == null) {
-            logger.error("IPTV content not found: provider=$providerName, contentId=$contentId")
+            logger.error("IPTV content not found: iptvProvider=$providerName, contentId=$contentId")
             return false
         }
         
@@ -141,7 +141,7 @@ class TorrentService(
         }
         
         if (!success) {
-            logger.error("Failed to add IPTV content: provider=$providerName, contentId=$contentId")
+            logger.error("Failed to add IPTV content: iptvProvider=$providerName, contentId=$contentId")
             return false
         }
         

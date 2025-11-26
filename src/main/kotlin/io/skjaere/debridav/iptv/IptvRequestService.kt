@@ -75,16 +75,16 @@ class IptvRequestService(
         season: Int? = null, // Season number for series filtering
         episode: Int? = null // Episode number within season (optional)
     ): Boolean {
-        logger.info("Adding IPTV content: contentId=$contentId, provider=$providerName, category=$category, magnetTitle=$magnetTitle, season=$season, episode=$episode")
+        logger.info("Adding IPTV content: contentId=$contentId, iptvProvider=$providerName, category=$category, magnetTitle=$magnetTitle, season=$season, episode=$episode")
         
         val iptvContent = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
             ?: run {
-                logger.warn("IPTV content not found: provider=$providerName, contentId=$contentId")
+                logger.warn("IPTV content not found: iptvProvider=$providerName, contentId=$contentId")
                 return false
             }
         
         if (!iptvContent.isActive) {
-            logger.warn("IPTV content is inactive: provider=$providerName, contentId=$contentId")
+            logger.warn("IPTV content is inactive: iptvProvider=$providerName, contentId=$contentId")
             return false
         }
         
@@ -1141,7 +1141,7 @@ class IptvRequestService(
             ContentType.MOVIE
         }
         
-        logger.info("Refetching file size for IPTV content: url={}, provider={}, contentType={}", 
+        logger.info("Refetching file size for IPTV content: url={}, iptvProvider={}, contentType={}", 
             iptvUrl.take(100), providerName, contentType)
         
         try {
@@ -1176,7 +1176,7 @@ class IptvRequestService(
                 return newFileSize
             }
         } catch (e: Exception) {
-            logger.warn("Failed to refetch file size from IPTV provider: url={}, provider={}, error={}", 
+            logger.warn("Failed to refetch file size from IPTV provider: url={}, iptvProvider={}, error={}", 
                 iptvUrl.take(100), providerName, e.message, e)
             return null
         }

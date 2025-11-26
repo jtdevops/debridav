@@ -259,7 +259,7 @@ class IptvApiController(
         @RequestParam providerName: String
     ): ResponseEntity<String> {
         // TODO: Implement deletion if needed
-        logger.info("IPTV delete request: provider=$providerName, contentId=$contentId")
+        logger.info("IPTV delete request: iptvProvider=$providerName, contentId=$contentId")
         return ResponseEntity.ok("ok")
     }
 
