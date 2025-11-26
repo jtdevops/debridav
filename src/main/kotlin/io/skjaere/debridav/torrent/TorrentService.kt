@@ -12,6 +12,7 @@ import io.skjaere.debridav.iptv.IptvContentRepository
 import io.skjaere.debridav.iptv.IptvContentService
 import io.skjaere.debridav.iptv.IptvRequestService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
+import io.skjaere.debridav.iptv.model.ContentType
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.util.VideoFileExtensions
 import jakarta.transaction.Transactional
@@ -145,41 +146,90 @@ class TorrentService(
             return false
         }
         
-        // Generate hash for database lookup (use original format, not hex)
-        // For series, use seriesId + season to create a unique hash for the season torrent
-        // For movies/single episodes, use providerName_contentId
-        val finalHash = if (season != null) {
-            // Series: use seriesId + season for hash (one torrent per season)
-            "${providerName}_${contentId}_S${String.format("%02d", season)}".hashCode().toString()
+        // Retrieve all created files for this IPTV content
+        // For series, this will get all episode files for the season (already filtered during creation)
+        // For movies/single episodes, this will get the single file
+        val allCreatedFiles = debridFileRepository.findByIptvContentRefId(iptvContent.id!!)
+            .filterIsInstance<RemotelyCachedEntity>()
+        
+        if (allCreatedFiles.isEmpty()) {
+            logger.error("IPTV files not found after creation: iptvContentRefId=${iptvContent.id}")
+            return false
+        }
+        
+        // Filter files to only include the requested episode if a specific episode was requested
+        // When a specific episode is requested (e.g., S07E02), we should only include files for that episode
+        // to avoid replacing files from other episodes in the same season
+        val filesToInclude = if (episode != null && season != null) {
+            // Extract episode identifier from magnet title (e.g., "S07E02" from "Dexter.(US).(2006).S07E02...")
+            val episodePattern = Regex("S${String.format("%02d", season)}E${String.format("%02d", episode)}")
+            val filteredFiles = allCreatedFiles.filter { file ->
+                val fileName = file.name ?: ""
+                episodePattern.containsMatchIn(fileName)
+            }
+            if (filteredFiles.isEmpty()) {
+                logger.warn("No files found matching episode S${String.format("%02d", season)}E${String.format("%02d", episode)}. Using all files as fallback.")
+                allCreatedFiles
+            } else {
+                logger.debug("Filtered to ${filteredFiles.size} file(s) for episode S${String.format("%02d", season)}E${String.format("%02d", episode)}")
+                filteredFiles
+            }
+        } else {
+            // No specific episode requested, include all files (for season or movie)
+            allCreatedFiles
+        }
+        
+        // Generate hash based on actual episodes included in the torrent
+        // This ensures each unique combination of episodes gets a unique hash
+        val finalHash = if (season != null && iptvContent.contentType == ContentType.SERIES) {
+            // Extract episode identifiers from file names (e.g., "S07E01", "S07E02", etc.)
+            val episodePattern = Regex("S(\\d{2})E(\\d{2})")
+            val episodeIdentifiers = filesToInclude.mapNotNull { file ->
+                val fileName = file.name ?: ""
+                episodePattern.find(fileName)?.value
+            }.sorted().distinct()
+            
+            if (episodeIdentifiers.isEmpty()) {
+                // Fallback: use season-based hash if we can't extract episodes
+                logger.warn("Could not extract episode identifiers from file names, using season-based hash")
+                "${providerName}_${contentId}_S${String.format("%02d", season)}".hashCode().toString()
+            } else {
+                // Create hash from sorted list of episode identifiers
+                // Format: providerName_contentId_S07E01_S07E02_S07E03...
+                val episodeString = episodeIdentifiers.joinToString("_")
+                val hashString = "${providerName}_${contentId}_$episodeString"
+                logger.debug("Generated hash from episodes: $episodeString -> hash string: $hashString")
+                hashString.hashCode().toString()
+            }
         } else {
             // Movie or single episode: use providerName_contentId
             "${providerName}_${contentId}".hashCode().toString()
         }
         
-        // Retrieve all created files for this IPTV content
-        // For series, this will get all episode files for the season (already filtered during creation)
-        // For movies/single episodes, this will get the single file
-        val createdFiles = debridFileRepository.findByIptvContentRefId(iptvContent.id!!)
-            .filterIsInstance<RemotelyCachedEntity>()
-        
-        if (createdFiles.isEmpty()) {
-            logger.error("IPTV files not found after creation: iptvContentRefId=${iptvContent.id}")
-            return false
-        }
-        
-        // All files retrieved should be from the requested season (if series) since
-        // handleSeriesContent already filters episodes by season before creating files
-        val filesToInclude = createdFiles
-        
         // Create or update Torrent entity
+        // With episode-specific hashing, each unique combination of episodes gets its own torrent
         val torrent = torrentRepository.getByHashIgnoreCase(finalHash) ?: Torrent()
         
-        // If reusing an existing torrent, clean up old files first
+        // If torrent already exists with the same hash, check if files need to be updated
+        // This handles the case where the same episode combination is requested again
         if (torrent.id != null) {
-            torrent.files.forEach { oldFile ->
-                fileService.deleteFile(oldFile)
+            // Check if all files already exist in the torrent
+            // RemotelyCachedEntity doesn't have a path property, only name
+            val existingFileNames = torrent.files.mapNotNull { it.name }.toSet()
+            val newFiles = filesToInclude.filter { file ->
+                val fileName = file.name ?: ""
+                fileName !in existingFileNames
             }
-            torrent.files.clear()
+            if (newFiles.isEmpty()) {
+                logger.debug("All files already exist in torrent with hash $finalHash, skipping add")
+                return true
+            }
+            // Some files are missing, add them (shouldn't happen with episode-specific hashes, but handle it)
+            logger.debug("Adding ${newFiles.size} missing file(s) to existing torrent (${torrent.files.size} existing files)")
+            torrent.files.addAll(newFiles)
+            torrentRepository.save(torrent)
+            logger.info("Successfully added ${newFiles.size} file(s) to existing torrent: ${torrent.name} (total: ${torrent.files.size} files)")
+            return true
         }
         
         torrent.category = categoryService.findByName(category)
