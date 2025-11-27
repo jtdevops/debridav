@@ -1193,11 +1193,68 @@ class IptvRequestService(
     }
     
     /**
+     * Extracts resolution from video width and height, rounding to closest standard resolution.
+     * Returns "1080p", "720p", or "480p" based on height.
+     */
+    private fun extractResolutionFromVideo(width: Int?, height: Int?): String? {
+        if (height == null) return null
+        
+        // Round to closest standard resolution based on height
+        return when {
+            height >= 1080 -> "1080p"
+            height >= 720 -> "720p"
+            height >= 480 -> "480p"
+            else -> "480p" // Default to 480p for lower resolutions
+        }
+    }
+    
+    /**
+     * Extracts file size from video tags (NUMBER_OF_BYTES-eng).
+     * Returns file size in bytes, or null if not found.
+     */
+    private fun extractFileSizeFromVideoTags(tags: Map<String, String>?): Long? {
+        if (tags == null) return null
+        
+        // Try different tag key variations
+        val sizeKeys = listOf(
+            "NUMBER_OF_BYTES-eng",
+            "NUMBER_OF_BYTES",
+            "NUMBER_OF_BYTES-ENG"
+        )
+        
+        for (key in sizeKeys) {
+            val bytesStr = tags[key]
+            if (bytesStr != null) {
+                val bytes = bytesStr.toLongOrNull()
+                if (bytes != null && bytes > 0) {
+                    return bytes
+                }
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * Maps video codec name to magnet title codec format.
+     * Returns "x265" for HEVC/H.265, "x264" for H.264, or "x264" as default.
+     */
+    private fun mapCodecToMagnetFormat(codecName: String?): String {
+        if (codecName == null) return "x264"
+        
+        return when (codecName.lowercase()) {
+            "hevc", "h.265", "h265" -> "x265"
+            "h264", "h.264", "avc" -> "x264"
+            else -> "x264" // Default to x264
+        }
+    }
+    
+    /**
      * Formats title for Radarr compatibility.
      * Radarr expects titles in format like: "Movie.Title.1990.1080p.BluRay.x264-GROUP"
      * We'll add quality and encoding info if available.
      */
-    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?, languageCodeToRemove: String? = null, episode: String? = null): String {
+    private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?, languageCodeToRemove: String? = null, episode: String? = null, codec: String? = null): String {
         // STEP 1: Remove configured language prefixes if present (e.g., "EN| ", "EN - ", "NL| ")
         var cleanTitle = removeLanguagePrefixes(originalTitle)
         
@@ -1260,9 +1317,10 @@ class IptvRequestService(
         val finalQuality = quality ?: "1080p"
         parts.add(finalQuality)
         
-        // STEP 11: Add source and codec (common defaults for IPTV)
+        // STEP 11: Add source and codec (use detected codec or default to x264)
         parts.add("BluRay")
-        parts.add("x264")
+        val finalCodec = codec ?: "x264"
+        parts.add(finalCodec)
         
         // STEP 11: Join parts with dots, then add release group with dash (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV")
         val baseTitle = parts.joinToString(".")
@@ -1366,6 +1424,12 @@ class IptvRequestService(
         val entityEpisodeCounts = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: episode count
         // Store series year from info per entity for magnet title
         val entitySeriesYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: series year from info
+        // Store S01E01 file size per entity for accurate size calculation
+        val entityS01E01FileSizes = mutableMapOf<String, Long>() // Key: "${providerName}_${contentId}", Value: S01E01 file size in bytes
+        // Store resolution per entity from S01E01 video metadata
+        val entityResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
+        // Store codec per entity from S01E01 video metadata
+        val entityCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
         
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
             logger.debug("Episode parameter provided (episode=$episode, parsed season=$requestedSeason), fetching episodes for series to verify availability")
@@ -1448,6 +1512,39 @@ class IptvRequestService(
                         return@filter false
                     }
                     
+                    // Find S01E01 to extract file size, resolution, and codec (should always exist)
+                    val s01e01 = episodes.find { it.season == 1 && it.episode == 1 }
+                    if (s01e01 != null) {
+                        // Extract file size from video tags
+                        val s01e01FileSize = s01e01.info?.video?.tags?.let { tags ->
+                            extractFileSizeFromVideoTags(tags)
+                        }
+                        if (s01e01FileSize != null) {
+                            entityS01E01FileSizes["${entity.providerName}_${entity.contentId}"] = s01e01FileSize
+                            logger.debug("Extracted S01E01 file size for series ${entity.contentId}: ${s01e01FileSize / 1_000_000}MB")
+                        }
+                        
+                        // Extract resolution from video metadata
+                        val resolution = s01e01.info?.video?.let { video ->
+                            extractResolutionFromVideo(video.width, video.height)
+                        }
+                        if (resolution != null) {
+                            entityResolutions["${entity.providerName}_${entity.contentId}"] = resolution
+                            logger.debug("Extracted resolution from S01E01 for series ${entity.contentId}: $resolution (width=${s01e01.info?.video?.width}, height=${s01e01.info?.video?.height})")
+                        }
+                        
+                        // Extract codec from video metadata
+                        val codec = s01e01.info?.video?.codec_name?.let { codecName ->
+                            mapCodecToMagnetFormat(codecName)
+                        }
+                        if (codec != null) {
+                            entityCodecs["${entity.providerName}_${entity.contentId}"] = codec
+                            logger.debug("Extracted codec from S01E01 for series ${entity.contentId}: $codec (codec_name=${s01e01.info?.video?.codec_name})")
+                        }
+                    } else {
+                        logger.debug("S01E01 not found for series ${entity.contentId}, will use default estimates")
+                    }
+                    
                     // Check if requested season exists
                     val hasSeason = episodes.any { it.season == requestedSeason }
                     if (!hasSeason && episodes.isNotEmpty()) {
@@ -1488,6 +1585,15 @@ class IptvRequestService(
             // Try to extract quality from title
             var quality = extractQualityFromTitle(entity.title)
             
+            // For series, try to get resolution from S01E01 metadata first (more accurate than title)
+            if (entity.contentType == ContentType.SERIES) {
+                val resolutionFromMetadata = entityResolutions["${entity.providerName}_${entity.contentId}"]
+                if (resolutionFromMetadata != null) {
+                    quality = resolutionFromMetadata
+                    logger.debug("Using resolution from S01E01 metadata for series ${entity.contentId}: $resolutionFromMetadata")
+                }
+            }
+            
             // STEP 1: Identify language code early - check if IPTV content title starts with any configured language prefix
             // If not, extract language code and adjust quality if needed
             val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
@@ -1509,7 +1615,13 @@ class IptvRequestService(
             // Include episode info (e.g., "S08" or "S08E01") in title if provided (for series)
             // Use series year from info if available, otherwise fall back to year parameter
             val yearForTitle = entitySeriesYears["${entity.providerName}_${entity.contentId}"] ?: year
-            var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode)
+            // Get codec from S01E01 metadata if available (for series)
+            val codecForTitle = if (entity.contentType == ContentType.SERIES) {
+                entityCodecs["${entity.providerName}_${entity.contentId}"]
+            } else {
+                null
+            }
+            var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode, codecForTitle)
             
             // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
             val releaseGroupParts = mutableListOf("IPTV")
@@ -1551,18 +1663,27 @@ class IptvRequestService(
             val estimatedSize = if (entity.contentType == ContentType.SERIES && requestedSeason != null) {
                 val episodeCount = entityEpisodeCounts["${entity.providerName}_${entity.contentId}"]
                 if (episodeCount != null && episodeCount > 0) {
-                    // Calculate size based on episode count and quality
-                    // Use per-episode estimates: ~120MB for 1080p, ~60MB for 720p, ~30MB for 480p
-                    // These are generous estimates to ensure Sonarr accepts the release
-                    val perEpisodeSize = when {
-                        quality?.contains("1080", ignoreCase = true) == true -> 120_000_000L // ~120MB per episode for 1080p
-                        quality?.contains("720", ignoreCase = true) == true -> 60_000_000L // ~60MB per episode for 720p
-                        quality?.contains("480", ignoreCase = true) == true -> 30_000_000L // ~30MB per episode for 480p
-                        else -> 120_000_000L // Default to 120MB for 1080p
+                    // Try to use S01E01 file size for accurate calculation
+                    val s01e01FileSize = entityS01E01FileSizes["${entity.providerName}_${entity.contentId}"]
+                    if (s01e01FileSize != null && s01e01FileSize > 0) {
+                        // Use S01E01 file size as base and multiply by episode count
+                        val calculatedSize = episodeCount * s01e01FileSize
+                        logger.debug("Calculated size for series ${entity.contentId} using S01E01 file size: $episodeCount episodes × ${s01e01FileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        calculatedSize
+                    } else {
+                        // Fallback to per-episode estimates based on quality
+                        // Use per-episode estimates: ~120MB for 1080p, ~60MB for 720p, ~30MB for 480p
+                        // These are generous estimates to ensure Sonarr accepts the release
+                        val perEpisodeSize = when {
+                            quality?.contains("1080", ignoreCase = true) == true -> 120_000_000L // ~120MB per episode for 1080p
+                            quality?.contains("720", ignoreCase = true) == true -> 60_000_000L // ~60MB per episode for 720p
+                            quality?.contains("480", ignoreCase = true) == true -> 30_000_000L // ~30MB per episode for 480p
+                            else -> 120_000_000L // Default to 120MB for 1080p
+                        }
+                        val calculatedSize = episodeCount * perEpisodeSize
+                        logger.debug("Calculated size for series ${entity.contentId} using quality-based estimates: $episodeCount episodes × ${perEpisodeSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        calculatedSize
                     }
-                    val calculatedSize = episodeCount * perEpisodeSize
-                    logger.debug("Calculated size for series ${entity.contentId}: $episodeCount episodes × ${perEpisodeSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
-                    calculatedSize
                 } else {
                     // Fallback to default estimate
                     estimateIptvSize(entity.contentType)

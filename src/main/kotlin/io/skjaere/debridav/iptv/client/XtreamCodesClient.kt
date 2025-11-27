@@ -1126,7 +1126,17 @@ class XtreamCodesClient(
         @Serializable(with = StringOrNumberSerializer::class)
         val rating: String? = null,
         val rating_5based: Double? = null,
-        val duration: String? = null
+        val duration: String? = null,
+        val video: XtreamVideoInfo? = null,
+        val bitrate: Int? = null
+    )
+    
+    @Serializable
+    data class XtreamVideoInfo(
+        val width: Int? = null,
+        val height: Int? = null,
+        val codec_name: String? = null,
+        val tags: Map<String, String>? = null
     )
     
     @Serializable
