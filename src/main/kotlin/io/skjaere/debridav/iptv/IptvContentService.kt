@@ -79,10 +79,11 @@ class IptvContentService(
                     
                     if (filteredPrefixedResults.isNotEmpty()) {
                         logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$titleVariation', returning early")
-                        // Filter by year if provided, then sort by relevance and provider priority
+                        // Filter by year if provided, then filter spin-offs, then sort by relevance and provider priority
                         // Use original normalized title (without prefix) for scoring relevance
                         val yearFiltered = filterByYear(filteredPrefixedResults, year)
-                        return sortByRelevanceAndProviderPriority(yearFiltered, normalizedTitle, year, providerPriorityMap)
+                        val spinOffFiltered = filterSpinOffs(yearFiltered, normalizedTitle)
+                        return sortByRelevanceAndProviderPriority(spinOffFiltered, normalizedTitle, year, providerPriorityMap)
                     }
                 }
             }
@@ -138,10 +139,11 @@ class IptvContentService(
         // Filter to only include content from currently configured providers
         val filteredResults = uniqueResults.filter { it.providerName in configuredProviderNames }
         
-        // Filter by year if provided, then sort by relevance and provider priority
+        // Filter by year if provided, then filter spin-offs, then sort by relevance and provider priority
         // Note: For now, we only pass year (startYear) - year range support can be added later if needed
         val yearFiltered = filterByYear(filteredResults, year)
-        return sortByRelevanceAndProviderPriority(yearFiltered, normalizedTitle, year, providerPriorityMap)
+        val spinOffFiltered = filterSpinOffs(yearFiltered, normalizedTitle)
+        return sortByRelevanceAndProviderPriority(spinOffFiltered, normalizedTitle, year, providerPriorityMap)
     }
     
     /**
@@ -261,6 +263,102 @@ class IptvContentService(
             // Get priority for this provider, default to Int.MAX_VALUE if not found (shouldn't happen)
             providerPriorityMap[entity.providerName] ?: Int.MAX_VALUE
         }
+    }
+    
+    /**
+     * Filters out spin-off titles that contain non-alphanumeric characters like ':' or '-' after the main title.
+     * Spin-offs are typically indicated by these characters (e.g., "Dexter: New Blood", "Dexter - Resurrection").
+     * 
+     * Filtering rules:
+     * - If there are results without spin-off indicators, exclude those with spin-off indicators
+     * - If ALL results have spin-off indicators, return all results (don't filter everything out)
+     * - Language prefixes are stripped before checking for spin-off indicators
+     */
+    private fun filterSpinOffs(results: List<IptvContentEntity>, searchTitle: String): List<IptvContentEntity> {
+        if (results.isEmpty()) {
+            return results
+        }
+        
+        logger.debug("Filtering ${results.size} results for spin-offs (search title: '$searchTitle')")
+        
+        // Characters that typically indicate spin-offs when appearing after the main title
+        val spinOffIndicators = listOf(':', '-', '–', '—')
+        
+        // Categorize results by spin-off status
+        val resultsWithoutSpinOffs = mutableListOf<IptvContentEntity>()
+        val resultsWithSpinOffs = mutableListOf<IptvContentEntity>()
+        
+        results.forEach { entity ->
+            // Remove language prefixes before checking for spin-off indicators
+            val titleWithoutPrefix = removeLanguagePrefixesForSpinOffCheck(entity.title)
+            
+            // Check if title contains spin-off indicators after the main title
+            // Look for patterns like "Title: Subtitle" or "Title - Subtitle"
+            val hasSpinOffIndicator = spinOffIndicators.any { indicator ->
+                // Check if indicator appears after the main title (not at the very beginning)
+                val indicatorIndex = titleWithoutPrefix.indexOf(indicator)
+                if (indicatorIndex > 0) {
+                    // Make sure it's not part of a year pattern like "(2006-2013)" or "2006-2013"
+                    val beforeIndicator = titleWithoutPrefix.substring(0, indicatorIndex).trim()
+                    val afterIndicator = titleWithoutPrefix.substring(indicatorIndex + 1).trim()
+                    
+                    // Skip if it's a year range pattern (e.g., "2006-2013" or "(2006-2013)")
+                    val yearRangePattern = Regex("""\d{4}[-–—]\d{4}""")
+                    if (yearRangePattern.containsMatchIn(titleWithoutPrefix)) {
+                        false
+                    } else {
+                        // Check if there's meaningful content after the indicator (not just whitespace)
+                        afterIndicator.isNotBlank() && afterIndicator.length > 2
+                    }
+                } else {
+                    false
+                }
+            }
+            
+            if (hasSpinOffIndicator) {
+                resultsWithSpinOffs.add(entity)
+                logger.debug("Result '${entity.title}' detected as spin-off (contains spin-off indicator)")
+            } else {
+                resultsWithoutSpinOffs.add(entity)
+                logger.debug("Result '${entity.title}' is not a spin-off")
+            }
+        }
+        
+        // Determine which results to return
+        val filtered = when {
+            // If we have results without spin-offs, exclude those with spin-offs
+            resultsWithoutSpinOffs.isNotEmpty() -> {
+                logger.info("Spin-off filter: Found ${resultsWithoutSpinOffs.size} results without spin-offs and ${resultsWithSpinOffs.size} results with spin-offs. Excluding spin-offs.")
+                resultsWithoutSpinOffs
+            }
+            // If ALL results have spin-off indicators, return all results (don't filter everything out)
+            else -> {
+                logger.info("Spin-off filter: All ${results.size} results have spin-off indicators. Returning all results.")
+                results
+            }
+        }
+        
+        logger.info("Spin-off filter returned ${filtered.size} results (from ${results.size} total)")
+        return filtered
+    }
+    
+    /**
+     * Removes language prefixes from title for spin-off detection.
+     * Handles patterns like "EN| ", "EN - ", "NL| ", etc.
+     */
+    private fun removeLanguagePrefixesForSpinOffCheck(title: String): String {
+        // First try configured language prefixes
+        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        for (prefix in languagePrefixes) {
+            val cleanedPrefix = stripQuotes(prefix)
+            if (title.startsWith(cleanedPrefix, ignoreCase = false)) {
+                return title.removePrefix(cleanedPrefix).trimStart()
+            }
+        }
+        
+        // Fallback to regex pattern for language codes
+        val languagePrefixPattern = Regex("^[A-Z]{2,}\\s*[|\\-]\\s+", RegexOption.IGNORE_CASE)
+        return languagePrefixPattern.replace(title, "").trimStart()
     }
     
     /**
