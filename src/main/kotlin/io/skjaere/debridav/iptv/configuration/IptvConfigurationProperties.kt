@@ -13,8 +13,10 @@ data class IptvConfigurationProperties(
     val searchFuzziness: Double = 0.8,
     val responseSaveFolder: String? = null,
     val useLocalResponses: Boolean = false,
-    val seriesMetadataCacheTtl: Duration = Duration.ofDays(7), // Default: 7 days
+    val seriesMetadataCacheTtl: Duration = Duration.ofHours(168), // Default: 7 days (168 hours)
     val seriesMetadataPurgeInterval: Duration = Duration.ofHours(24), // Default: purge check every 24 hours
+    val imdbMetadataCacheTtl: Duration = Duration.ofHours(8760), // Default: 365 days (8760 hours) - IMDB data rarely changes
+    val imdbMetadataPurgeInterval: Duration = Duration.ofHours(24), // Default: purge check every 24 hours
     val languagePrefixes: List<String> = emptyList(), // Language prefixes to try when searching (e.g., "EN - ", "EN| ", "EN | ")
     val userAgent: String = "TiviMate/5.2.0 (Android)", // User-Agent string for IPTV media requests (default: TiviMate)
     val includeProviderInMagnetTitle: Boolean = false, // Include provider name in magnet title after -IPTV (e.g., -IPTV-mega-NL) for debugging
