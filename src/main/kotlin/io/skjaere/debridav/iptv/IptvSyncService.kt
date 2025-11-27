@@ -32,7 +32,8 @@ class IptvSyncService(
     private val iptvCategoryRepository: IptvCategoryRepository,
     private val iptvSyncHashRepository: IptvSyncHashRepository,
     private val httpClient: HttpClient,
-    private val responseFileService: IptvResponseFileService
+    private val responseFileService: IptvResponseFileService,
+    private val iptvLoginRateLimitService: IptvLoginRateLimitService
 ) {
     private val logger = LoggerFactory.getLogger(IptvSyncService::class.java)
     private val m3uParser = M3uParser()
@@ -95,11 +96,19 @@ class IptvSyncService(
         logger.info("Syncing IPTV provider: ${providerConfig.name}")
 
         // For Xtream Codes providers, verify account is active before syncing
+        // Apply rate limiting to prevent excessive API calls (shared across all services)
         if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
-            val isAccountActive = xtreamCodesClient.verifyAccount(providerConfig)
-            if (!isAccountActive) {
-                logger.error("Account verification failed for provider ${providerConfig.name}. Skipping sync.")
-                return
+            if (iptvLoginRateLimitService.shouldRateLimit(providerConfig.name)) {
+                val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerConfig.name)
+                logger.debug("Skipping IPTV provider login call for ${providerConfig.name} (rate limited, last call was ${timeSinceLastCall}ms ago)")
+            } else {
+                val isAccountActive = xtreamCodesClient.verifyAccount(providerConfig)
+                // Update timestamp after call
+                iptvLoginRateLimitService.recordLoginCall(providerConfig.name)
+                if (!isAccountActive) {
+                    logger.error("Account verification failed for provider ${providerConfig.name}. Skipping sync.")
+                    return
+                }
             }
         }
 

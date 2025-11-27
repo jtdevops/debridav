@@ -117,6 +117,7 @@ class StreamingService(
     private val iptvConfigurationService: io.skjaere.debridav.iptv.configuration.IptvConfigurationService?,
     private val iptvResponseFileService: io.skjaere.debridav.iptv.util.IptvResponseFileService?,
     private val iptvRequestService: io.skjaere.debridav.iptv.IptvRequestService?,
+    private val iptvLoginRateLimitService: io.skjaere.debridav.iptv.IptvLoginRateLimitService?,
     prometheusRegistry: PrometheusRegistry
 ) {
     
@@ -142,10 +143,6 @@ class StreamingService(
     private val activeDownloads = ConcurrentHashMap<String, DownloadTrackingContext>()
     private val completedDownloads = ConcurrentLinkedQueue<DownloadTrackingContext>()
     
-    // Rate limiting for IPTV provider login calls per provider
-    private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
-    private val IPTV_LOGIN_RATE_LIMIT_MS: Long get() = 
-        iptvConfigurationProperties?.loginRateLimit?.toMillis() ?: 60_000L // Default: 1 minute
 
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -195,14 +192,11 @@ class StreamingService(
             
             if (isArrRequest && !shouldBypass) {
                 logger.debug("Skipping IPTV provider login call for ARR request (will use local video file, iptvProvider=$providerName)")
-            } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null) {
+            } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null && iptvLoginRateLimitService != null) {
                 try {
-                    // Rate limiting: max 1 call per minute per provider
-                    val now = System.currentTimeMillis()
-                    val lastCallTime = iptvLoginCallTimestamps[providerName] ?: 0L
-                    val timeSinceLastCall = now - lastCallTime
-                    
-                    if (timeSinceLastCall < IPTV_LOGIN_RATE_LIMIT_MS) {
+                    // Rate limiting: shared across all services per provider
+                    if (iptvLoginRateLimitService.shouldRateLimit(providerName)) {
+                        val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
                         logger.debug("Skipping IPTV provider login call for $providerName (rate limited, last call was ${timeSinceLastCall}ms ago)")
                     } else {
                         val providerConfigs = iptvConfigurationService.getProviderConfigurations()
@@ -213,7 +207,7 @@ class StreamingService(
                             val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService, userAgent)
                             val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
                             // Update timestamp after successful call
-                            iptvLoginCallTimestamps[providerName] = now
+                            iptvLoginRateLimitService.recordLoginCall(providerName)
                             if (!loginSuccess) {
                                 logger.warn("IPTV provider login verification failed for $providerName, but continuing with stream attempt")
                             }

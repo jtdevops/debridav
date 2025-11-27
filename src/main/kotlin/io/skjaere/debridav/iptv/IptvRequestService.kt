@@ -29,7 +29,6 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class IptvRequestService(
@@ -42,15 +41,11 @@ class IptvRequestService(
     private val iptvConfigurationProperties: io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties,
     private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
     private val httpClient: HttpClient,
-    private val responseFileService: IptvResponseFileService
+    private val responseFileService: IptvResponseFileService,
+    private val iptvLoginRateLimitService: IptvLoginRateLimitService
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
-    
-    // Rate limiting for IPTV provider login calls per provider
-    private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
-    private val IPTV_LOGIN_RATE_LIMIT_MS: Long get() = 
-        iptvConfigurationProperties.loginRateLimit.toMillis()
     
     // Cache for redirect URLs: original URL -> redirect URL
     // DISABLED: Diagnostics show redirect URLs expire almost immediately (within seconds)
@@ -855,14 +850,11 @@ class IptvRequestService(
      */
     private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Long {
         // Make an initial login/test call to the provider before fetching file size
-        // Rate limiting: max 1 call per minute per provider
+        // Rate limiting: shared across all services per provider
         if (providerName != null) {
             try {
-                val now = System.currentTimeMillis()
-                val lastCallTime = iptvLoginCallTimestamps[providerName] ?: 0L
-                val timeSinceLastCall = now - lastCallTime
-                
-                if (timeSinceLastCall < IPTV_LOGIN_RATE_LIMIT_MS) {
+                if (iptvLoginRateLimitService.shouldRateLimit(providerName)) {
+                    val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
                     logger.debug("Skipping IPTV provider login call for $providerName before fetching file size (rate limited, last call was ${timeSinceLastCall}ms ago)")
                 } else {
                     val providerConfigs = iptvConfigurationService.getProviderConfigurations()
@@ -871,7 +863,7 @@ class IptvRequestService(
                         logger.debug("Making initial login call to IPTV provider $providerName before fetching file size")
                         val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
                         // Update timestamp after successful call
-                        iptvLoginCallTimestamps[providerName] = now
+                        iptvLoginRateLimitService.recordLoginCall(providerName)
                         if (!loginSuccess) {
                             logger.warn("IPTV provider login verification failed for $providerName, but continuing with file size fetch")
                         }

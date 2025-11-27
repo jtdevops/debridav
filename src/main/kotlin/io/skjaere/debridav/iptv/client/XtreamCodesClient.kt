@@ -155,16 +155,8 @@ class XtreamCodesClient(
             }
             
             val finalVodStreamsBody = responseBody ?: run {
-                // Make an initial login/test call to the provider before fetching VOD streams
-                try {
-                    logger.debug("Making initial login call to IPTV provider ${providerConfig.name} before fetching VOD streams")
-                    val loginSuccess = verifyAccount(providerConfig)
-                    if (!loginSuccess) {
-                        logger.warn("IPTV provider login verification failed for ${providerConfig.name}, but continuing with VOD streams fetch")
-                    }
-                } catch (e: Exception) {
-                    logger.warn("Failed to make initial login call to IPTV provider ${providerConfig.name} before fetching VOD streams: ${e.message}, continuing with fetch attempt", e)
-                }
+                // Note: Removed internal verifyAccount call here to ensure rate limiting is handled at service layer
+                // Rate limiting should be applied by the calling service (IptvRequestService, IptvSyncService, etc.)
                 val vodStreamsRequestUrl = "$vodStreamsUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_vod_streams"
                 logger.debug("Fetching VOD streams from Xtream Codes provider ${providerConfig.name}: $vodStreamsRequestUrl")
                 
@@ -403,16 +395,8 @@ class XtreamCodesClient(
             }
             
             val finalSeriesStreamsBody = responseBody ?: run {
-                // Make an initial login/test call to the provider before fetching series streams
-                try {
-                    logger.debug("Making initial login call to IPTV provider ${providerConfig.name} before fetching series streams")
-                    val loginSuccess = verifyAccount(providerConfig)
-                    if (!loginSuccess) {
-                        logger.warn("IPTV provider login verification failed for ${providerConfig.name}, but continuing with series streams fetch")
-                    }
-                } catch (e: Exception) {
-                    logger.warn("Failed to make initial login call to IPTV provider ${providerConfig.name} before fetching series streams: ${e.message}, continuing with fetch attempt", e)
-                }
+                // Note: Removed internal verifyAccount call here to ensure rate limiting is handled at service layer
+                // Rate limiting should be applied by the calling service (IptvRequestService, IptvSyncService, etc.)
                 val seriesStreamsRequestUrl = "$seriesStreamsUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_series"
                 logger.debug("Fetching series streams from Xtream Codes provider ${providerConfig.name}: $seriesStreamsRequestUrl")
                 
