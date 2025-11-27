@@ -777,8 +777,14 @@ class XtreamCodesClient(
                 val body = response.body<String>()
                 
                 // Save response if configured
+                // If saveResponse returns false, it means the response was empty and skipped
+                // In this case, we should return null to indicate the response shouldn't be used
                 if (responseFileService.shouldSaveResponses()) {
-                    responseFileService.saveResponse(providerConfig, endpointType, body)
+                    val saved = responseFileService.saveResponse(providerConfig, endpointType, body)
+                    if (!saved) {
+                        logger.warn("Skipping sync for endpoint $endpointType from provider ${providerConfig.name} - response was empty or significantly smaller than cached")
+                        return null
+                    }
                 }
                 
                 return body

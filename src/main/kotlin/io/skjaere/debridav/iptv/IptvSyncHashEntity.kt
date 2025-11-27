@@ -34,6 +34,15 @@ open class IptvSyncHashEntity {
     @Column(name = "content_hash", nullable = false, length = 64) // SHA-256 produces 64 hex characters
     open var contentHash: String = ""
     
+    @Column(name = "file_size", nullable = true)
+    open var fileSize: Long? = null // Size of the cached response file in bytes
+    
+    @Column(name = "sync_status", nullable = false, length = 20)
+    open var syncStatus: String = "COMPLETED" // IN_PROGRESS, COMPLETED, FAILED
+    
+    @Column(name = "sync_started_at", nullable = true)
+    open var syncStartedAt: Instant? = null // When sync started (for detecting interrupted syncs)
+    
     @Column(name = "last_checked", nullable = false)
     open var lastChecked: Instant = Instant.now()
 }

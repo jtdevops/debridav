@@ -50,6 +50,10 @@ class IptvSyncService(
         }
 
         logger.info("Starting IPTV content sync")
+        
+        // Check for interrupted syncs from previous run
+        checkAndResumeInterruptedSyncs()
+        
         val providerConfigs = iptvConfigurationService.getProviderConfigurations()
 
         if (providerConfigs.isEmpty()) {
@@ -66,19 +70,25 @@ class IptvSyncService(
                     return@forEach
                 }
                 
-                // Check per-provider timing instead of global timing
-                // This allows new providers to sync immediately even if other providers were synced recently
-                val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
-                if (mostRecentSync != null) {
-                    val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
-                    
-                    if (timeSinceLastSync < syncInterval) {
-                        val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
-                        logger.debug("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
-                        return@forEach
-                    }
+                // Check for interrupted syncs for this provider - if found, resync immediately
+                val interruptedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusInProgress(providerConfig.name)
+                if (interruptedSyncs.isNotEmpty()) {
+                    logger.info("Provider ${providerConfig.name} has ${interruptedSyncs.size} interrupted sync(s), will resync immediately")
                 } else {
-                    logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
+                    // Check per-provider timing instead of global timing
+                    // This allows new providers to sync immediately even if other providers were synced recently
+                    val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
+                    if (mostRecentSync != null) {
+                        val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
+                        
+                        if (timeSinceLastSync < syncInterval) {
+                            val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
+                            logger.debug("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
+                            return@forEach
+                        }
+                    } else {
+                        logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
+                    }
                 }
                 
                 try {
@@ -92,6 +102,23 @@ class IptvSyncService(
         logger.info("IPTV content sync completed")
     }
 
+    /**
+     * Checks for interrupted syncs from previous application run and marks them for resync
+     */
+    private fun checkAndResumeInterruptedSyncs() {
+        val interruptedSyncs = iptvSyncHashRepository.findBySyncStatusInProgress()
+        if (interruptedSyncs.isNotEmpty()) {
+            logger.warn("Found ${interruptedSyncs.size} interrupted sync(s) from previous run. Will resync these providers.")
+            interruptedSyncs.forEach { syncHash ->
+                logger.info("Resetting sync status for provider ${syncHash.providerName}, endpoint ${syncHash.endpointType} " +
+                        "(sync started at ${syncHash.syncStartedAt})")
+                syncHash.syncStatus = "FAILED"
+                syncHash.syncStartedAt = null
+                iptvSyncHashRepository.save(syncHash)
+            }
+        }
+    }
+    
     private suspend fun syncProvider(providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration) {
         logger.info("Syncing IPTV provider: ${providerConfig.name}")
 
@@ -113,6 +140,8 @@ class IptvSyncService(
         }
 
         try {
+            // Mark sync as in progress for all endpoints
+            markSyncInProgress(providerConfig.name, providerConfig.type)
             val contentItems = when (providerConfig.type) {
                 io.skjaere.debridav.iptv.IptvProvider.M3U -> {
                     // Check hash first for M3U
@@ -176,9 +205,72 @@ class IptvSyncService(
                 // Completion is logged in syncXtreamCodesContent if changes were made
                 // If no changes, it's already logged there
             }
+            
+            // Mark sync as completed
+            markSyncCompleted(providerConfig.name, providerConfig.type)
         } catch (e: Exception) {
             logger.error("Sync failed for provider ${providerConfig.name}, hash not updated. Will retry on next sync.", e)
+            // Mark sync as failed
+            markSyncFailed(providerConfig.name, providerConfig.type)
             throw e // Re-throw to be caught by outer try-catch
+        }
+    }
+    
+    /**
+     * Marks sync as in progress for all endpoints of a provider
+     */
+    private fun markSyncInProgress(providerName: String, providerType: io.skjaere.debridav.iptv.IptvProvider) {
+        val endpoints = when (providerType) {
+            io.skjaere.debridav.iptv.IptvProvider.M3U -> listOf("m3u")
+            io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> listOf("vod_categories", "vod_streams", "series_categories", "series_streams")
+        }
+        
+        val now = Instant.now()
+        endpoints.forEach { endpointType ->
+            val hashEntity = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerName, endpointType)
+            if (hashEntity != null) {
+                hashEntity.syncStatus = "IN_PROGRESS"
+                hashEntity.syncStartedAt = now
+                iptvSyncHashRepository.save(hashEntity)
+            }
+        }
+    }
+    
+    /**
+     * Marks sync as completed for all endpoints of a provider
+     */
+    private fun markSyncCompleted(providerName: String, providerType: io.skjaere.debridav.iptv.IptvProvider) {
+        val endpoints = when (providerType) {
+            io.skjaere.debridav.iptv.IptvProvider.M3U -> listOf("m3u")
+            io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> listOf("vod_categories", "vod_streams", "series_categories", "series_streams")
+        }
+        
+        endpoints.forEach { endpointType ->
+            val hashEntity = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerName, endpointType)
+            if (hashEntity != null) {
+                hashEntity.syncStatus = "COMPLETED"
+                hashEntity.syncStartedAt = null
+                iptvSyncHashRepository.save(hashEntity)
+            }
+        }
+    }
+    
+    /**
+     * Marks sync as failed for all endpoints of a provider
+     */
+    private fun markSyncFailed(providerName: String, providerType: io.skjaere.debridav.iptv.IptvProvider) {
+        val endpoints = when (providerType) {
+            io.skjaere.debridav.iptv.IptvProvider.M3U -> listOf("m3u")
+            io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> listOf("vod_categories", "vod_streams", "series_categories", "series_streams")
+        }
+        
+        endpoints.forEach { endpointType ->
+            val hashEntity = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerName, endpointType)
+            if (hashEntity != null) {
+                hashEntity.syncStatus = "FAILED"
+                hashEntity.syncStartedAt = null
+                iptvSyncHashRepository.save(hashEntity)
+            }
         }
     }
 
@@ -210,8 +302,12 @@ class IptvSyncService(
                     val body = response.body<String>()
                     
                     // Save response if configured
+                    // If saveResponse returns false (empty response), log warning but continue with sync
                     if (responseFileService.shouldSaveResponses()) {
-                        responseFileService.saveResponse(providerConfig, "m3u", body)
+                        val saved = responseFileService.saveResponse(providerConfig, "m3u", body)
+                        if (!saved) {
+                            logger.warn("M3U playlist response was empty or significantly smaller than cached for provider ${providerConfig.name}, but continuing with sync")
+                        }
                     }
                     
                     body
@@ -227,8 +323,12 @@ class IptvSyncService(
                     val fileContent = file.readText()
                     
                     // Save response if configured (copy to response folder)
+                    // If saveResponse returns false (empty response), log warning but continue with sync
                     if (responseFileService.shouldSaveResponses()) {
-                        responseFileService.saveResponse(providerConfig, "m3u", fileContent)
+                        val saved = responseFileService.saveResponse(providerConfig, "m3u", fileContent)
+                        if (!saved) {
+                            logger.warn("M3U playlist file content was empty or significantly smaller than cached for provider ${providerConfig.name}, but continuing with sync")
+                        }
                     }
                     
                     fileContent
@@ -269,7 +369,24 @@ class IptvSyncService(
                     }
                 }
                 if (response.status == HttpStatusCode.OK) {
-                    response.body<String>()
+                    val body = response.body<String>()
+                    
+                    // Save response if configured
+                    // If saveResponse returns false (empty response), treat as unchanged to avoid overwriting cached data
+                    if (responseFileService.shouldSaveResponses()) {
+                        val saved = responseFileService.saveResponse(providerConfig, "m3u", body)
+                        if (!saved) {
+                            logger.info("M3U playlist response was empty or significantly smaller than cached for provider ${providerConfig.name}, treating as unchanged")
+                            val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, "m3u")
+                            if (storedHash != null) {
+                                storedHash.lastChecked = Instant.now()
+                                iptvSyncHashRepository.save(storedHash)
+                            }
+                            return HashCheckResult(shouldSync = false, changedEndpoints = emptyMap(), endpointType = "m3u")
+                        }
+                    }
+                    
+                    body
                 } else {
                     logger.error("Failed to fetch M3U playlist for hash check: ${response.status}")
                     return HashCheckResult(shouldSync = true, changedEndpoints = emptyMap(), endpointType = "m3u")
@@ -373,7 +490,19 @@ class IptvSyncService(
             }
             
             // Fetch from API
-            xtreamCodesClient.getSingleEndpointResponse(providerConfig, endpointType)
+            // getSingleEndpointResponse returns null if response was empty and skipped
+            val fetchedBody = xtreamCodesClient.getSingleEndpointResponse(providerConfig, endpointType)
+            if (fetchedBody == null) {
+                // Response was empty and saveResponse skipped it, treat as unchanged
+                logger.info("Endpoint $endpointType returned empty response for provider ${providerConfig.name}, skipping sync (keeping cached data)")
+                val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, endpointType)
+                if (storedHash != null) {
+                    storedHash.lastChecked = Instant.now()
+                    iptvSyncHashRepository.save(storedHash)
+                }
+                return null to null
+            }
+            fetchedBody
         }
         
         if (responseBody == null) {
@@ -551,6 +680,8 @@ class IptvSyncService(
         
         hashEntity.contentHash = newHash
         hashEntity.lastChecked = Instant.now()
+        hashEntity.syncStatus = "COMPLETED"
+        hashEntity.syncStartedAt = null
         iptvSyncHashRepository.save(hashEntity)
     }
 
