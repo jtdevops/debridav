@@ -722,51 +722,11 @@ class IptvRequestService(
     
     /**
      * Resolves the redirect URL for a given original URL.
-     * Tries HEAD request first for speed (no body transfer).
-     * Falls back to GET with Range header (bytes=0-0) if HEAD is rejected (e.g., 405 Method Not Allowed).
+     * Uses GET request with Range header (bytes=0-0) to avoid HEAD method issues with some providers.
      * Returns null if no redirect or if request fails.
      */
     private suspend fun resolveRedirectUrl(originalUrl: String): String? {
-        // Try HEAD request first (faster, no body transfer)
-        val headResponse = try {
-            httpClient.head(originalUrl) {
-                headers {
-                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
-                }
-                timeout {
-                    requestTimeoutMillis = 5000 // 5 second timeout
-                    connectTimeoutMillis = 2000 // 2 second connect timeout
-                }
-            }
-        } catch (e: Exception) {
-            logger.debug("HEAD request failed for {}, will try GET fallback: {}", originalUrl.take(100), e.message)
-            null
-        }
-        
-        // Check if HEAD request was successful and returned a redirect
-        if (headResponse != null) {
-            if (headResponse.status.value in 300..399) {
-                val redirectLocation = headResponse.headers["Location"]
-                if (redirectLocation != null) {
-                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                        redirectLocation
-                    } else {
-                        // Relative redirect - construct absolute URL
-                        val originalUri = java.net.URI(originalUrl)
-                        originalUri.resolve(redirectLocation).toString()
-                    }
-                    logger.debug("Resolved redirect URL via HEAD: originalUrl={}, redirectUrl={}", originalUrl.take(100), redirectUrl.take(100))
-                    return redirectUrl
-                }
-            } else if (headResponse.status.isSuccess()) {
-                // HEAD succeeded but no redirect - URL doesn't redirect
-                logger.debug("HEAD request succeeded but no redirect for: {}", originalUrl.take(100))
-                return null
-            }
-            // If HEAD returned an error status (like 405 Method Not Allowed), fall through to GET
-        }
-        
-        // Fallback to GET with Range header if HEAD failed or was rejected
+        // Use GET with Range header (bytes=0-0) instead of HEAD
         // Some providers don't support HEAD requests, so we use GET with minimal data transfer
         return try {
             val getResponse = httpClient.get(originalUrl) {
@@ -797,7 +757,7 @@ class IptvRequestService(
                         val originalUri = java.net.URI(originalUrl)
                         originalUri.resolve(redirectLocation).toString()
                     }
-                    logger.debug("Resolved redirect URL via GET fallback: originalUrl={}, redirectUrl={}", originalUrl.take(100), redirectUrl.take(100))
+                    logger.debug("Resolved redirect URL via GET with Range header: originalUrl={}, redirectUrl={}", originalUrl.take(100), redirectUrl.take(100))
                     redirectUrl
                 } else {
                     null
@@ -812,7 +772,7 @@ class IptvRequestService(
                 null
             }
         } catch (e: Exception) {
-            logger.debug("Failed to resolve redirect URL via GET fallback for {}: {}", originalUrl.take(100), e.message)
+            logger.debug("Failed to resolve redirect URL via GET with Range header for {}: {}", originalUrl.take(100), e.message)
             null
         }
     }
@@ -1249,6 +1209,48 @@ class IptvRequestService(
     }
     
     /**
+     * Calculates file size from duration and bitrate.
+     * Formula: file_size_bytes = (bitrate_kbps * 1000 * duration_seconds) / 8
+     * 
+     * @param durationSecs Duration in seconds
+     * @param bitrate Bitrate in kilobits per second (kbps)
+     * @return File size in bytes, or null if calculation cannot be performed
+     */
+    private fun calculateFileSizeFromDurationAndBitrate(durationSecs: Int?, bitrate: Int?): Long? {
+        if (durationSecs == null || bitrate == null || durationSecs <= 0 || bitrate <= 0) {
+            return null
+        }
+        
+        // Convert bitrate from kbps to bytes per second, then multiply by duration
+        // bitrate is in kbps (kilobits per second)
+        // 1 kbps = 1000 bits per second = 125 bytes per second
+        // File size = (bitrate_kbps * 1000 bits/kbps * duration_secs) / 8 bits/byte
+        val fileSizeBytes = (bitrate.toLong() * 1000L * durationSecs.toLong()) / 8L
+        
+        // Sanity check: file size should be reasonable (between 1MB and 10GB for a single episode)
+        if (fileSizeBytes < 1_000_000L || fileSizeBytes > 10_000_000_000L) {
+            return null
+        }
+        
+        return fileSizeBytes
+    }
+    
+    /**
+     * Builds episode URL for Xtream Codes provider.
+     * Format: {baseUrl}/series/{username}/{password}/{episode_id}.{extension}
+     */
+    private fun buildEpisodeUrl(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        episode: io.skjaere.debridav.iptv.client.XtreamCodesClient.XtreamSeriesEpisode
+    ): String? {
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
+        val username = providerConfig.xtreamUsername ?: return null
+        val password = providerConfig.xtreamPassword ?: return null
+        val extension = episode.container_extension ?: "mp4"
+        return "$baseUrl/series/$username/$password/${episode.id}.$extension"
+    }
+    
+    /**
      * Maps video codec name to magnet title codec format.
      * Returns "x265" for HEVC/H.265, "x264" for H.264, or "x264" as default.
      */
@@ -1532,29 +1534,60 @@ class IptvRequestService(
                     
                     // Find reference episode to extract file size, resolution, and codec
                     // Prefer first episode of requested season, fallback to S01E01
-                    val referenceEpisode = if (requestedSeason != null) {
-                        // Try to find first episode of requested season (e.g., S07E01)
-                        episodes.find { it.season == requestedSeason && it.episode == 1 } 
-                            ?: episodes.find { it.season == 1 && it.episode == 1 } // Fallback to S01E01
-                    } else {
-                        // No season requested, use S01E01
-                        episodes.find { it.season == 1 && it.episode == 1 }
-                    }
+                    // Note: requestedSeason is guaranteed to be non-null here (checked at line 1454)
+                    val referenceEpisode = episodes.find { it.season == requestedSeason && it.episode == 1 } 
+                        ?: episodes.find { it.season == 1 && it.episode == 1 } // Fallback to S01E01
                     
                     if (referenceEpisode != null) {
-                        val episodeLabel = if (referenceEpisode.season == requestedSeason && requestedSeason != null) {
+                        val episodeLabel = if (referenceEpisode.season == requestedSeason) {
                             "S${String.format("%02d", referenceEpisode.season)}E01"
                         } else {
                             "S01E01"
                         }
                         
-                        // Extract file size from video tags
-                        val referenceFileSize = referenceEpisode.info?.video?.tags?.let { tags ->
+                        // Extract file size from video tags first
+                        var referenceFileSize = referenceEpisode.info?.video?.tags?.let { tags ->
                             extractFileSizeFromVideoTags(tags)
                         }
-                        if (referenceFileSize != null) {
+                        
+                        // If file size not found in tags, try to calculate from duration and bitrate
+                        if (referenceFileSize == null) {
+                            referenceFileSize = calculateFileSizeFromDurationAndBitrate(
+                                referenceEpisode.info?.duration_secs,
+                                referenceEpisode.info?.bitrate
+                            )
+                            if (referenceFileSize != null) {
+                                logger.debug("Calculated $episodeLabel file size from duration and bitrate for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB (duration=${referenceEpisode.info?.duration_secs}s, bitrate=${referenceEpisode.info?.bitrate}kbps)")
+                            }
+                        } else {
+                            logger.debug("Extracted $episodeLabel file size from video tags for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB")
+                        }
+                        
+                        // If still not found, try to fetch from episode URL
+                        if (referenceFileSize == null) {
+                            val episodeUrl = buildEpisodeUrl(providerConfig, referenceEpisode)
+                            if (episodeUrl != null) {
+                                try {
+                                    logger.debug("File size not found in video tags or duration/bitrate for $episodeLabel, fetching from episode URL: ${episodeUrl.take(100)}")
+                                    val fetchedSize = runBlocking {
+                                        fetchActualFileSize(episodeUrl, ContentType.SERIES, entity.providerName)
+                                    }
+                                    // Only use if it's not the default estimated size
+                                    if (!isDefaultFileSize(fetchedSize, ContentType.SERIES)) {
+                                        referenceFileSize = fetchedSize
+                                        logger.debug("Fetched $episodeLabel file size from URL for series ${entity.contentId}: ${fetchedSize / 1_000_000}MB")
+                                    } else {
+                                        referenceFileSize = null
+                                    }
+                                } catch (e: Exception) {
+                                    logger.debug("Failed to fetch file size from URL for $episodeLabel: ${e.message}")
+                                    referenceFileSize = null
+                                }
+                            }
+                        }
+                        
+                        if (referenceFileSize != null && referenceFileSize > 0) {
                             entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = referenceFileSize
-                            logger.debug("Extracted $episodeLabel file size for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB")
                         }
                         
                         // Extract resolution from video metadata
@@ -1599,6 +1632,64 @@ class IptvRequestService(
                             entityRequestedEpisodeNumbers["${entity.providerName}_${entity.contentId}"] = requestedEpisodeNumber
                         }
                     }
+                    
+                    // If a specific episode was requested (e.g., S07E04), try to fetch its file size
+                    if (requestedEpisodeNumber != null && hasSeason) {
+                        val requestedEpisode = episodes.find { 
+                            it.season == requestedSeason && it.episode == requestedEpisodeNumber 
+                        }
+                        if (requestedEpisode != null) {
+                            val requestedEpisodeLabel = "S${String.format("%02d", requestedSeason)}E${String.format("%02d", requestedEpisodeNumber)}"
+                            
+                            // Try to extract file size from video tags first
+                            var requestedFileSize = requestedEpisode.info?.video?.tags?.let { tags ->
+                                extractFileSizeFromVideoTags(tags)
+                            }
+                            
+                            // If file size not found in tags, try to calculate from duration and bitrate
+                            if (requestedFileSize == null) {
+                                requestedFileSize = calculateFileSizeFromDurationAndBitrate(
+                                    requestedEpisode.info?.duration_secs,
+                                    requestedEpisode.info?.bitrate
+                                )
+                                if (requestedFileSize != null) {
+                                    logger.debug("Calculated $requestedEpisodeLabel file size from duration and bitrate for series ${entity.contentId}: ${requestedFileSize / 1_000_000}MB (duration=${requestedEpisode.info?.duration_secs}s, bitrate=${requestedEpisode.info?.bitrate}kbps)")
+                                    // Store as reference file size for this specific episode
+                                    entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = requestedFileSize
+                                }
+                            } else {
+                                logger.debug("Extracted $requestedEpisodeLabel file size from video tags for series ${entity.contentId}: ${requestedFileSize / 1_000_000}MB")
+                                // Store as reference file size for this specific episode
+                                entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = requestedFileSize
+                            }
+                            
+                            // If still not found, try to fetch from episode URL
+                            if (requestedFileSize == null) {
+                                val episodeUrl = buildEpisodeUrl(providerConfig, requestedEpisode)
+                                if (episodeUrl != null) {
+                                    try {
+                                        logger.debug("File size not found in video tags or duration/bitrate for $requestedEpisodeLabel, fetching from episode URL: ${episodeUrl.take(100)}")
+                                        val fetchedSize = runBlocking {
+                                            fetchActualFileSize(episodeUrl, ContentType.SERIES, entity.providerName)
+                                        }
+                                        // Only use if it's not the default estimated size
+                                        if (!isDefaultFileSize(fetchedSize, ContentType.SERIES)) {
+                                            requestedFileSize = fetchedSize
+                                            logger.debug("Fetched $requestedEpisodeLabel file size from URL for series ${entity.contentId}: ${fetchedSize / 1_000_000}MB")
+                                            // Store as reference file size for this specific episode
+                                            entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = fetchedSize
+                                        } else {
+                                            requestedFileSize = null
+                                        }
+                                    } catch (e: Exception) {
+                                        logger.debug("Failed to fetch file size from URL for $requestedEpisodeLabel: ${e.message}")
+                                        requestedFileSize = null
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
                     hasSeason
                 } else {
                     // Not Xtream Codes provider, include it (can't verify episodes)
@@ -1717,7 +1808,8 @@ class IptvRequestService(
                     if (referenceFileSize != null && referenceFileSize > 0) {
                         // Use reference episode file size as base and multiply by episode count
                         val calculatedSize = episodeCount * referenceFileSize
-                        val episodeLabel = if (requestedSeason != null) "S${String.format("%02d", requestedSeason)}E01" else "S01E01"
+                        // Note: requestedSeason is guaranteed to be non-null here (checked at line 1796)
+                        val episodeLabel = "S${String.format("%02d", requestedSeason)}E01"
                         if (requestedEpisode != null) {
                             logger.debug("Calculated size for series ${entity.contentId} episode S${requestedSeason}E${requestedEpisode} using $episodeLabel file size: $episodeCount episode × ${referenceFileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
                         } else {

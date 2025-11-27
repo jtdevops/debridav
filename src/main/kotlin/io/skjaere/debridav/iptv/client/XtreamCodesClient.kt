@@ -1127,6 +1127,7 @@ class XtreamCodesClient(
         val rating: String? = null,
         val rating_5based: Double? = null,
         val duration: String? = null,
+        val duration_secs: Int? = null,
         val video: XtreamVideoInfo? = null,
         val bitrate: Int? = null
     )
