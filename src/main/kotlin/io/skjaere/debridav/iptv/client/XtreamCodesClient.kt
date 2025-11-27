@@ -3,8 +3,10 @@ package io.skjaere.debridav.iptv.client
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.get
+import io.ktor.client.request.headers
 import io.ktor.client.request.parameter
 import io.ktor.client.statement.HttpResponse
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
 import io.skjaere.debridav.iptv.model.ContentType
@@ -31,7 +33,8 @@ import java.net.URLEncoder
 
 class XtreamCodesClient(
     private val httpClient: HttpClient,
-    private val responseFileService: IptvResponseFileService
+    private val responseFileService: IptvResponseFileService,
+    private val userAgent: String? = null
 ) {
     private val logger = LoggerFactory.getLogger(XtreamCodesClient::class.java)
     private val json = Json { ignoreUnknownKeys = true }
@@ -58,6 +61,11 @@ class XtreamCodesClient(
             val response: HttpResponse = httpClient.get(apiUrl) {
                 parameter("username", username)
                 parameter("password", password)
+                userAgent?.let {
+                    headers {
+                        append(HttpHeaders.UserAgent, it)
+                    }
+                }
             }
             
             logger.debug("Received response status ${response.status} for account verification")
@@ -164,6 +172,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_vod_streams")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 
                 logger.debug("Received response status ${response.status} for VOD streams request")
@@ -244,6 +257,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_vod_categories")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 
                 logger.debug("Received response status ${categoriesResponse.status} for VOD categories request")
@@ -402,6 +420,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_series")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 
                 logger.debug("Received response status ${response.status} for series streams request")
@@ -482,6 +505,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_series_categories")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 
                 logger.debug("Received response status ${categoriesResponse.status} for series categories request")
@@ -610,6 +638,11 @@ class XtreamCodesClient(
                     parameter("password", password)
                     parameter("action", "get_series_info")
                     parameter("series_id", seriesId)
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 
                 logger.debug("Received response status ${response.status} for series episodes request")
@@ -749,6 +782,11 @@ class XtreamCodesClient(
                 parameter("username", username)
                 parameter("password", password)
                 parameter("action", action)
+                userAgent?.let {
+                    headers {
+                        append(HttpHeaders.UserAgent, it)
+                    }
+                }
             }
             
             if (response.status == HttpStatusCode.OK) {
@@ -813,6 +851,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_vod_streams")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 if (response.status == HttpStatusCode.OK) {
                     response.body<String>()
@@ -834,6 +877,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_series")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 if (response.status == HttpStatusCode.OK) {
                     response.body<String>()
@@ -855,6 +903,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_vod_categories")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 if (response.status == HttpStatusCode.OK) {
                     response.body<String>()
@@ -876,6 +929,11 @@ class XtreamCodesClient(
                     parameter("username", username)
                     parameter("password", password)
                     parameter("action", "get_series_categories")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
                 }
                 if (response.status == HttpStatusCode.OK) {
                     response.body<String>()

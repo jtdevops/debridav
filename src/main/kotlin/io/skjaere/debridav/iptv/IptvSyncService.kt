@@ -3,7 +3,9 @@ package io.skjaere.debridav.iptv
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.get
+import io.ktor.client.request.headers
 import io.ktor.client.statement.HttpResponse
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.skjaere.debridav.iptv.client.XtreamCodesClient
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
@@ -34,7 +36,7 @@ class IptvSyncService(
 ) {
     private val logger = LoggerFactory.getLogger(IptvSyncService::class.java)
     private val m3uParser = M3uParser()
-    private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService)
+    private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
 
     @Scheduled(
         initialDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('iptv.initial-sync-delay', 'PT30S')).toMillis()}",
@@ -190,7 +192,11 @@ class IptvSyncService(
         val finalContent = content ?: when {
             providerConfig.m3uUrl != null -> {
                 logger.debug("Fetching M3U playlist from URL for provider ${providerConfig.name}: ${providerConfig.m3uUrl}")
-                val response: HttpResponse = httpClient.get(providerConfig.m3uUrl)
+                val response: HttpResponse = httpClient.get(providerConfig.m3uUrl) {
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    }
+                }
                 if (response.status == HttpStatusCode.OK) {
                     val body = response.body<String>()
                     
@@ -248,7 +254,11 @@ class IptvSyncService(
             null
         } ?: when {
             providerConfig.m3uUrl != null -> {
-                val response: HttpResponse = httpClient.get(providerConfig.m3uUrl)
+                val response: HttpResponse = httpClient.get(providerConfig.m3uUrl) {
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    }
+                }
                 if (response.status == HttpStatusCode.OK) {
                     response.body<String>()
                 } else {

@@ -209,7 +209,8 @@ class StreamingService(
                         val providerConfig = providerConfigs.find { it.name == providerName }
                         if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
                             logger.debug("Making initial login call to IPTV provider $providerName before streaming")
-                            val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService)
+                            val userAgent = iptvConfigurationProperties?.userAgent
+                            val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService, userAgent)
                             val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
                             // Update timestamp after successful call
                             iptvLoginCallTimestamps[providerName] = now

@@ -45,7 +45,7 @@ class IptvRequestService(
     private val responseFileService: IptvResponseFileService
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
-    private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService)
+    private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
     
     // Rate limiting for IPTV provider login calls per provider
     private val iptvLoginCallTimestamps = ConcurrentHashMap<String, Long>()
@@ -559,6 +559,9 @@ class IptvRequestService(
                     parameter("password", providerConfig.xtreamPassword ?: "")
                     parameter("action", "get_series_info")
                     parameter("series_id", seriesId)
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    }
                 }
                 if (response.status.isSuccess()) {
                     response.body<String>()
