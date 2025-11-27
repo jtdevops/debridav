@@ -10,12 +10,14 @@ import org.apache.commons.io.FileUtils
 import java.net.InetAddress
 import io.skjaere.debridav.debrid.DebridClient
 import io.skjaere.debridav.debrid.DebridLinkService
+import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.ClientError
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridFile
 import io.skjaere.debridav.fs.DebridFileContents
+import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.MissingFile
 import io.skjaere.debridav.fs.NetworkError
 import io.skjaere.debridav.fs.ProviderError
@@ -107,38 +109,49 @@ class DebridFileResource(
                 }
 
                 if (result != StreamResult.OK) {
-                    // Try to refresh the failed link and retry once
-                    logger.info("Streaming failed for ${currentCachedFile.path}, attempting to refresh link and retry")
-                    val refreshedLink = runBlocking { debridService.refreshLinkOnError(file, currentCachedFile) }
-
-                    if (refreshedLink != null) {
-                        logger.info("Retrying streaming with refreshed link for ${refreshedLink.path}")
-                        val retryResult = try {
-                            streamingService.streamContents(
-                                refreshedLink,
-                                range,
-                                outputStream,
-                                file,
-                                httpRequestInfo
-                            )
-                        } catch (_: CancellationException) {
-                            this.coroutineContext.cancelChildren()
-                            StreamResult.OK
-                        }
-
-                        if (retryResult == StreamResult.OK) {
-                            logger.info("Successfully retried streaming with refreshed link for ${refreshedLink.path}")
-                        } else {
-                            // If retry also failed, update with the error status
-                            val updatedDebridLink = mapResultToDebridFile(retryResult, refreshedLink)
-                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
-                            fileService.saveDbEntity(file)
-                        }
-                    } else {
-                        // If link refresh failed, update with the original error
+                    // Check if this is IPTV content - IPTV links don't need refreshing
+                    val isIptvContent = file.contents is DebridIptvContent || currentCachedFile.provider == DebridProvider.IPTV
+                    
+                    if (isIptvContent) {
+                        logger.debug("Streaming failed for IPTV file ${currentCachedFile.path}, skipping link refresh - IPTV links don't use debrid clients")
+                        // Update with the error status for IPTV content
                         val updatedDebridLink = mapResultToDebridFile(result, currentCachedFile)
                         file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
                         fileService.saveDbEntity(file)
+                    } else {
+                        // Try to refresh the failed link and retry once
+                        logger.info("Streaming failed for ${currentCachedFile.path}, attempting to refresh link and retry")
+                        val refreshedLink = runBlocking { debridService.refreshLinkOnError(file, currentCachedFile) }
+
+                        if (refreshedLink != null) {
+                            logger.info("Retrying streaming with refreshed link for ${refreshedLink.path}")
+                            val retryResult = try {
+                                streamingService.streamContents(
+                                    refreshedLink,
+                                    range,
+                                    outputStream,
+                                    file,
+                                    httpRequestInfo
+                                )
+                            } catch (_: CancellationException) {
+                                this.coroutineContext.cancelChildren()
+                                StreamResult.OK
+                            }
+
+                            if (retryResult == StreamResult.OK) {
+                                logger.info("Successfully retried streaming with refreshed link for ${refreshedLink.path}")
+                            } else {
+                                // If retry also failed, update with the error status
+                                val updatedDebridLink = mapResultToDebridFile(retryResult, refreshedLink)
+                                file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                                fileService.saveDbEntity(file)
+                            }
+                        } else {
+                            // If link refresh failed, update with the original error
+                            val updatedDebridLink = mapResultToDebridFile(result, currentCachedFile)
+                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                            fileService.saveDbEntity(file)
+                        }
                     }
                 }
             } else {
@@ -307,8 +320,14 @@ class DebridFileResource(
         // Fallback to external file size
         val externalFileSize = file.contents!!.size!!.toLong()
         val workingDebridFile = file.contents!!.debridLinks.firstOrNull { it is CachedFile }
+        // Determine provider label for logging - use IPTV for IPTV content, otherwise use debrid provider
+        val providerLabel = if (file.contents is DebridIptvContent || workingDebridFile?.provider == DebridProvider.IPTV) {
+            DebridProvider.IPTV.toString()
+        } else {
+            workingDebridFile?.provider?.toString() ?: "null"
+        }
         logger.debug("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
-            file.name ?: "unknown", externalFileSize, workingDebridFile?.provider)
+            file.name ?: "unknown", externalFileSize, providerLabel)
         return externalFileSize
     }
 
