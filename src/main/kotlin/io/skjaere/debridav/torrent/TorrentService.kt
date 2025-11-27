@@ -250,12 +250,9 @@ class TorrentService(
         torrent.hash = finalHash
         torrent.status = Status.LIVE
         // For IPTV files, savePath should match the pattern used by regular torrents
-        // Regular torrents use: ${downloadPath}/${torrent.name} (folder path only)
-        // Use fileSystemPath() to convert ltree path to human-readable path (e.g., /downloads/Twisters...)
-        // All files should be in the same directory, so use the first file's directory
-        val directoryPath = filesToInclude.first().directory?.fileSystemPath() ?: debridavConfigurationProperties.downloadPath
-        // savePath should be the folder path (not including filename), matching regular torrents
-        torrent.savePath = directoryPath
+        // Regular torrents use: ${downloadPath}/${torrent.name} (folder path only, relative to mount path)
+        // This ensures consistency with regular torrents and correct path construction in API responses
+        torrent.savePath = "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
         torrent.files = filesToInclude.toMutableList()
         
         torrentRepository.save(torrent)
