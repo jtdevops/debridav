@@ -1267,6 +1267,7 @@ class IptvRequestService(
     /**
      * Formats title for Radarr compatibility.
      * Radarr expects titles in format like: "Movie.Title.1990.1080p.BluRay.x264-GROUP"
+     * For resolutions lower than 1080p, uses WebDL instead (e.g., "Movie.Title.1990.480p.WebDL.x264-GROUP")
      * We'll add quality and encoding info if available.
      */
     private fun formatTitleForRadarr(originalTitle: String, year: Int?, quality: String?, languageCodeToRemove: String? = null, episode: String? = null, codec: String? = null): String {
@@ -1333,11 +1334,19 @@ class IptvRequestService(
         parts.add(finalQuality)
         
         // STEP 11: Add source and codec (use detected codec or default to x264)
-        parts.add("BluRay")
+        // Use WebDL for resolutions lower than 1080p, BluRay for 1080p and higher
+        val source = when {
+            finalQuality.contains("1080", ignoreCase = true) || 
+            finalQuality.contains("4K", ignoreCase = true) || 
+            finalQuality.contains("2160", ignoreCase = true) ||
+            finalQuality.equals("FHD", ignoreCase = true) -> "BluRay"
+            else -> "WebDL"
+        }
+        parts.add(source)
         val finalCodec = codec ?: "x264"
         parts.add(finalCodec)
         
-        // STEP 11: Join parts with dots, then add release group with dash (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV")
+        // STEP 12: Join parts with dots, then add release group with dash (e.g., "Movie.Title.1990.1080p.BluRay.x264-IPTV" or "Movie.Title.1990.480p.WebDL.x264-IPTV")
         val baseTitle = parts.joinToString(".")
         return "$baseTitle-IPTV"
     }
