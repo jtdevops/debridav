@@ -662,8 +662,8 @@ class StreamingService(
                                     }
                                 }
                             } catch (e: Exception) {
-                                // Suppress stacktraces for ClientAbortException and EOFException (normal client disconnects)
-                                if (isClientAbortException(e) || e is EOFException) {
+                                // Suppress stacktraces for ClientAbortException, CancellationException, and EOFException (normal client disconnects)
+                                if (isClientAbortException(e) || e is CancellationException || e is EOFException) {
                                     logger.debug("REDIRECT_BODY_EXCEPTION: Client disconnected (expected): redirectUrl={}, exceptionClass={}", 
                                         redirectUrl.take(100), e::class.simpleName)
                                 } else {
@@ -675,8 +675,8 @@ class StreamingService(
                             }
                         }
                     } catch (e: Exception) {
-                        // Suppress stacktraces for ClientAbortException (normal client disconnect)
-                        if (isClientAbortException(e)) {
+                        // Suppress stacktraces for ClientAbortException, CancellationException, and EOFException (normal client disconnect)
+                        if (isClientAbortException(e) || e is CancellationException || e is EOFException) {
                             logger.debug("REDIRECT_REQUEST_EXCEPTION: Client disconnected (expected): redirectUrl={}, exceptionClass={}", 
                                 redirectUrl.take(100), e::class.simpleName)
                         } else {
@@ -755,8 +755,8 @@ class StreamingService(
                     }
                 }
             } catch (e: Exception) {
-                // Check if this is a client abort (expected when client disconnects)
-                if (isClientAbortException(e)) {
+                // Check if this is a client abort or cancellation (expected when client disconnects)
+                if (isClientAbortException(e) || e is CancellationException || e is EOFException) {
                     logger.debug("BODY_EXCEPTION: Client disconnected (expected): link={}, exceptionClass={}", 
                         source.cachedFile.link?.take(100), e::class.simpleName)
                 } else {
