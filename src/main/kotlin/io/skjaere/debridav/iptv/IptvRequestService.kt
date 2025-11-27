@@ -1441,11 +1441,12 @@ class IptvRequestService(
         val entityRequestedEpisodeNumbers = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: requested episode number
         // Store series year from info per entity for magnet title
         val entitySeriesYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: series year from info
-        // Store S01E01 file size per entity for accurate size calculation
-        val entityS01E01FileSizes = mutableMapOf<String, Long>() // Key: "${providerName}_${contentId}", Value: S01E01 file size in bytes
-        // Store resolution per entity from S01E01 video metadata
+        // Store reference episode file size per entity for accurate size calculation
+        // Uses first episode of requested season if available, otherwise falls back to S01E01
+        val entityReferenceEpisodeFileSizes = mutableMapOf<String, Long>() // Key: "${providerName}_${contentId}", Value: reference episode file size in bytes
+        // Store resolution per entity from reference episode video metadata
         val entityResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
-        // Store codec per entity from S01E01 video metadata
+        // Store codec per entity from reference episode video metadata
         val entityCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
         
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
@@ -1529,37 +1530,52 @@ class IptvRequestService(
                         return@filter false
                     }
                     
-                    // Find S01E01 to extract file size, resolution, and codec (should always exist)
-                    val s01e01 = episodes.find { it.season == 1 && it.episode == 1 }
-                    if (s01e01 != null) {
+                    // Find reference episode to extract file size, resolution, and codec
+                    // Prefer first episode of requested season, fallback to S01E01
+                    val referenceEpisode = if (requestedSeason != null) {
+                        // Try to find first episode of requested season (e.g., S07E01)
+                        episodes.find { it.season == requestedSeason && it.episode == 1 } 
+                            ?: episodes.find { it.season == 1 && it.episode == 1 } // Fallback to S01E01
+                    } else {
+                        // No season requested, use S01E01
+                        episodes.find { it.season == 1 && it.episode == 1 }
+                    }
+                    
+                    if (referenceEpisode != null) {
+                        val episodeLabel = if (referenceEpisode.season == requestedSeason && requestedSeason != null) {
+                            "S${String.format("%02d", referenceEpisode.season)}E01"
+                        } else {
+                            "S01E01"
+                        }
+                        
                         // Extract file size from video tags
-                        val s01e01FileSize = s01e01.info?.video?.tags?.let { tags ->
+                        val referenceFileSize = referenceEpisode.info?.video?.tags?.let { tags ->
                             extractFileSizeFromVideoTags(tags)
                         }
-                        if (s01e01FileSize != null) {
-                            entityS01E01FileSizes["${entity.providerName}_${entity.contentId}"] = s01e01FileSize
-                            logger.debug("Extracted S01E01 file size for series ${entity.contentId}: ${s01e01FileSize / 1_000_000}MB")
+                        if (referenceFileSize != null) {
+                            entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = referenceFileSize
+                            logger.debug("Extracted $episodeLabel file size for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB")
                         }
                         
                         // Extract resolution from video metadata
-                        val resolution = s01e01.info?.video?.let { video ->
+                        val resolution = referenceEpisode.info?.video?.let { video ->
                             extractResolutionFromVideo(video.width, video.height)
                         }
                         if (resolution != null) {
                             entityResolutions["${entity.providerName}_${entity.contentId}"] = resolution
-                            logger.debug("Extracted resolution from S01E01 for series ${entity.contentId}: $resolution (width=${s01e01.info?.video?.width}, height=${s01e01.info?.video?.height})")
+                            logger.debug("Extracted resolution from $episodeLabel for series ${entity.contentId}: $resolution (width=${referenceEpisode.info?.video?.width}, height=${referenceEpisode.info?.video?.height})")
                         }
                         
                         // Extract codec from video metadata
-                        val codec = s01e01.info?.video?.codec_name?.let { codecName ->
+                        val codec = referenceEpisode.info?.video?.codec_name?.let { codecName ->
                             mapCodecToMagnetFormat(codecName)
                         }
                         if (codec != null) {
                             entityCodecs["${entity.providerName}_${entity.contentId}"] = codec
-                            logger.debug("Extracted codec from S01E01 for series ${entity.contentId}: $codec (codec_name=${s01e01.info?.video?.codec_name})")
+                            logger.debug("Extracted codec from $episodeLabel for series ${entity.contentId}: $codec (codec_name=${referenceEpisode.info?.video?.codec_name})")
                         }
                     } else {
-                        logger.debug("S01E01 not found for series ${entity.contentId}, will use default estimates")
+                        logger.debug("Reference episode (preferred: S${String.format("%02d", requestedSeason ?: 1)}E01, fallback: S01E01) not found for series ${entity.contentId}, will use default estimates")
                     }
                     
                     // Check if requested season exists
@@ -1606,12 +1622,13 @@ class IptvRequestService(
             // Try to extract quality from title
             var quality = extractQualityFromTitle(entity.title)
             
-            // For series, try to get resolution from S01E01 metadata first (more accurate than title)
+            // For series, try to get resolution from reference episode metadata first (more accurate than title)
             if (entity.contentType == ContentType.SERIES) {
                 val resolutionFromMetadata = entityResolutions["${entity.providerName}_${entity.contentId}"]
                 if (resolutionFromMetadata != null) {
                     quality = resolutionFromMetadata
-                    logger.debug("Using resolution from S01E01 metadata for series ${entity.contentId}: $resolutionFromMetadata")
+                    val episodeLabel = if (requestedSeason != null) "S${String.format("%02d", requestedSeason)}E01" else "S01E01"
+                    logger.debug("Using resolution from $episodeLabel metadata for series ${entity.contentId}: $resolutionFromMetadata")
                 }
             }
             
@@ -1694,15 +1711,17 @@ class IptvRequestService(
                 }
                 
                 if (episodeCount > 0) {
-                    // Try to use S01E01 file size for accurate calculation
-                    val s01e01FileSize = entityS01E01FileSizes["${entity.providerName}_${entity.contentId}"]
-                    if (s01e01FileSize != null && s01e01FileSize > 0) {
-                        // Use S01E01 file size as base and multiply by episode count
-                        val calculatedSize = episodeCount * s01e01FileSize
+                    // Try to use reference episode file size for accurate calculation
+                    // Uses first episode of requested season if available, otherwise S01E01
+                    val referenceFileSize = entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"]
+                    if (referenceFileSize != null && referenceFileSize > 0) {
+                        // Use reference episode file size as base and multiply by episode count
+                        val calculatedSize = episodeCount * referenceFileSize
+                        val episodeLabel = if (requestedSeason != null) "S${String.format("%02d", requestedSeason)}E01" else "S01E01"
                         if (requestedEpisode != null) {
-                            logger.debug("Calculated size for series ${entity.contentId} episode S${requestedSeason}E${requestedEpisode} using S01E01 file size: $episodeCount episode × ${s01e01FileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                            logger.debug("Calculated size for series ${entity.contentId} episode S${requestedSeason}E${requestedEpisode} using $episodeLabel file size: $episodeCount episode × ${referenceFileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
                         } else {
-                            logger.debug("Calculated size for series ${entity.contentId} using S01E01 file size: $episodeCount episodes × ${s01e01FileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                            logger.debug("Calculated size for series ${entity.contentId} using $episodeLabel file size: $episodeCount episodes × ${referenceFileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
                         }
                         calculatedSize
                     } else {
