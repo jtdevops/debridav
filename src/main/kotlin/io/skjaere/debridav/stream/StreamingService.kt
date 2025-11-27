@@ -902,6 +902,14 @@ class StreamingService(
                 }
             }
         } catch (e: CancellationException) {
+            // Handle the case where consumeEach calls cancelConsumed but the consumer has already failed
+            // This is expected when the consumer fails before the producer completes
+            if (e.message?.contains("Channel was consumed, consumer had failed") == true) {
+                logger.debug("Channel cancellation during consumeEach (expected when consumer fails): path={}", 
+                    remotelyCachedEntity.name)
+                // Don't rethrow - this is expected behavior when consumer fails
+                return
+            }
             throw e
         } catch (_: ClientAbortException) {
             cancel()
