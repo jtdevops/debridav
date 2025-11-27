@@ -8,6 +8,9 @@ CREATE TABLE iptv_sync_hash
     endpoint_type VARCHAR(50) NOT NULL,
     content_hash  VARCHAR(64) NOT NULL,
     last_checked  TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+    file_size     BIGINT,
+    sync_status   VARCHAR(20) NOT NULL DEFAULT 'COMPLETED',
+    sync_started_at TIMESTAMP WITHOUT TIME ZONE,
     CONSTRAINT pk_iptv_sync_hash PRIMARY KEY (id)
 );
 

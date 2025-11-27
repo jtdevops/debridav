@@ -1,6 +1,7 @@
 CREATE SEQUENCE IF NOT EXISTS iptv_series_metadata_seq START WITH 1 INCREMENT BY 50;
 
 -- IPTV series metadata cache table
+-- Note: response_json uses TEXT type which is unlimited in PostgreSQL (up to ~1GB)
 CREATE TABLE iptv_series_metadata
 (
     id            BIGINT NOT NULL,
