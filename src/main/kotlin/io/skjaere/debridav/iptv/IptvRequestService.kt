@@ -624,6 +624,19 @@ class IptvRequestService(
         return match?.groupValues?.get(1)?.toIntOrNull()
     }
     
+    /**
+     * Parses the episode number from an episode string (e.g., "S07E01" -> 1).
+     * @param episode Episode string in format "S{season}E{episode}" or "S{season}"
+     * @return Episode number if successfully parsed, null otherwise
+     */
+    private fun parseEpisodeNumberFromEpisode(episode: String): Int? {
+        val normalized = episode.trim().uppercase()
+        // Match S followed by digits, optionally followed by E and more digits
+        val pattern = Regex("^S\\d+E(\\d+)$")
+        val match = pattern.find(normalized)
+        return match?.groupValues?.get(1)?.toIntOrNull()
+    }
+    
     private fun parseSeriesInfo(title: String): io.skjaere.debridav.iptv.model.EpisodeInfo? {
         // Try to parse series info from title
         // Pattern: Series Name S01E01 or Series Name - S01E01
@@ -1418,10 +1431,14 @@ class IptvRequestService(
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
         val requestedSeason = episode?.let { parseSeasonFromEpisode(it) }
+        // Parse episode parameter to extract episode number if provided (e.g., "S07E01" -> 1)
+        val requestedEpisodeNumber = episode?.let { parseEpisodeNumberFromEpisode(it) }
         
         // For series with episode parameter, fetch episodes to verify season availability and calculate accurate size
         // Store episode count per entity for size calculation
         val entityEpisodeCounts = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: episode count
+        // Store requested episode number per entity for single episode size calculation
+        val entityRequestedEpisodeNumbers = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: requested episode number
         // Store series year from info per entity for magnet title
         val entitySeriesYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: series year from info
         // Store S01E01 file size per entity for accurate size calculation
@@ -1561,6 +1578,10 @@ class IptvRequestService(
                         }
                         // Store episode count for size calculation
                         entityEpisodeCounts["${entity.providerName}_${entity.contentId}"] = episodeCount
+                        // Store requested episode number if a specific episode was requested
+                        if (requestedEpisodeNumber != null) {
+                            entityRequestedEpisodeNumbers["${entity.providerName}_${entity.contentId}"] = requestedEpisodeNumber
+                        }
                     }
                     hasSeason
                 } else {
@@ -1659,16 +1680,30 @@ class IptvRequestService(
             val magnetUri = createIptvMagnetUri(infohash, radarrTitle, guid)
             
             // Calculate size for Radarr compatibility
-            // For series with episode parameter, calculate size based on number of episodes in the season
+            // For series with episode parameter, calculate size based on number of episodes
+            // If a specific episode is requested (e.g., S07E01), use size for 1 episode only
             val estimatedSize = if (entity.contentType == ContentType.SERIES && requestedSeason != null) {
-                val episodeCount = entityEpisodeCounts["${entity.providerName}_${entity.contentId}"]
-                if (episodeCount != null && episodeCount > 0) {
+                // Check if a specific episode number was requested
+                val requestedEpisode = entityRequestedEpisodeNumbers["${entity.providerName}_${entity.contentId}"]
+                val episodeCount = if (requestedEpisode != null) {
+                    // Specific episode requested, use count of 1
+                    1
+                } else {
+                    // No specific episode requested, use season episode count
+                    entityEpisodeCounts["${entity.providerName}_${entity.contentId}"] ?: 0
+                }
+                
+                if (episodeCount > 0) {
                     // Try to use S01E01 file size for accurate calculation
                     val s01e01FileSize = entityS01E01FileSizes["${entity.providerName}_${entity.contentId}"]
                     if (s01e01FileSize != null && s01e01FileSize > 0) {
                         // Use S01E01 file size as base and multiply by episode count
                         val calculatedSize = episodeCount * s01e01FileSize
-                        logger.debug("Calculated size for series ${entity.contentId} using S01E01 file size: $episodeCount episodes × ${s01e01FileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        if (requestedEpisode != null) {
+                            logger.debug("Calculated size for series ${entity.contentId} episode S${requestedSeason}E${requestedEpisode} using S01E01 file size: $episodeCount episode × ${s01e01FileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        } else {
+                            logger.debug("Calculated size for series ${entity.contentId} using S01E01 file size: $episodeCount episodes × ${s01e01FileSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        }
                         calculatedSize
                     } else {
                         // Fallback to per-episode estimates based on quality
@@ -1681,7 +1716,11 @@ class IptvRequestService(
                             else -> 120_000_000L // Default to 120MB for 1080p
                         }
                         val calculatedSize = episodeCount * perEpisodeSize
-                        logger.debug("Calculated size for series ${entity.contentId} using quality-based estimates: $episodeCount episodes × ${perEpisodeSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        if (requestedEpisode != null) {
+                            logger.debug("Calculated size for series ${entity.contentId} episode S${requestedSeason}E${requestedEpisode} using quality-based estimates: $episodeCount episode × ${perEpisodeSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        } else {
+                            logger.debug("Calculated size for series ${entity.contentId} using quality-based estimates: $episodeCount episodes × ${perEpisodeSize / 1_000_000}MB = ${calculatedSize / 1_000_000_000.0}GB")
+                        }
                         calculatedSize
                     }
                 } else {
