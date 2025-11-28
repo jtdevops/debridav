@@ -72,13 +72,6 @@ class IptvResponseFileService(
             file.writeText(content)
             val fileSize = file.length()
             
-            // Update file size in sync hash table if it exists
-            val syncHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, responseType)
-            if (syncHash != null) {
-                syncHash.fileSize = fileSize
-                iptvSyncHashRepository.save(syncHash)
-            }
-            
             logger.debug("Saved ${providerConfig.type} response for provider ${providerConfig.name} to: ${file.absolutePath} (size: $fileSize bytes)")
             return true
         } catch (e: Exception) {

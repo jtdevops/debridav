@@ -195,7 +195,8 @@ class IptvSyncService(
             if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.M3U) {
                 val hashCheckResult = checkM3uHashChanged(providerConfig)
                 hashCheckResult.changedEndpoints.forEach { (endpointType, hash) ->
-                    updateSyncHash(providerConfig.name, endpointType, hash)
+                    val responseSize = hashCheckResult.endpointSizes[endpointType]
+                    updateSyncHash(providerConfig.name, endpointType, hash, responseSize)
                 }
                 if (hashCheckResult.changedEndpoints.isNotEmpty()) {
                     logger.info("Successfully synced and updated hashes for provider ${providerConfig.name}: ${hashCheckResult.changedEndpoints.keys}")
@@ -349,7 +350,8 @@ class IptvSyncService(
     private data class HashCheckResult(
         val shouldSync: Boolean,
         val changedEndpoints: Map<String, String>, // endpointType -> currentHash
-        val endpointType: String? = null // For backward compatibility with M3U
+        val endpointType: String? = null, // For backward compatibility with M3U
+        val endpointSizes: Map<String, Long> = emptyMap() // endpointType -> responseBodySize
     )
 
     private suspend fun checkM3uHashChanged(
@@ -407,16 +409,17 @@ class IptvSyncService(
         }
 
         val currentHash = IptvHashUtil.computeHash(content)
+        val contentSize = content.length.toLong()
         val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, "m3u")
         
         return if (storedHash?.contentHash == currentHash) {
             // Hash unchanged, just update last checked timestamp
             storedHash.lastChecked = Instant.now()
             iptvSyncHashRepository.save(storedHash)
-            HashCheckResult(shouldSync = false, changedEndpoints = emptyMap(), endpointType = "m3u")
+            HashCheckResult(shouldSync = false, changedEndpoints = emptyMap(), endpointType = "m3u", endpointSizes = emptyMap())
         } else {
             // Hash changed or doesn't exist, need to sync (but don't update hash yet)
-            HashCheckResult(shouldSync = true, changedEndpoints = mapOf("m3u" to currentHash), endpointType = "m3u")
+            HashCheckResult(shouldSync = true, changedEndpoints = mapOf("m3u" to currentHash), endpointType = "m3u", endpointSizes = mapOf("m3u" to contentSize))
         }
     }
 
@@ -564,10 +567,12 @@ class IptvSyncService(
             
             // Update hashes after successful processing
             if (vodCategoriesHash != null) {
-                updateSyncHash(providerConfig.name, "vod_categories", vodCategoriesHash)
+                val categoriesSize = vodCategoriesBody?.length?.toLong()
+                updateSyncHash(providerConfig.name, "vod_categories", vodCategoriesHash, categoriesSize)
             }
             if (vodStreamsHash != null) {
-                updateSyncHash(providerConfig.name, "vod_streams", vodStreamsHash)
+                val streamsSize = vodStreamsBody?.length?.toLong()
+                updateSyncHash(providerConfig.name, "vod_streams", vodStreamsHash, streamsSize)
             }
             
             // Clear memory for VOD group
@@ -602,10 +607,12 @@ class IptvSyncService(
             
             // Update hashes after successful processing
             if (seriesCategoriesHash != null) {
-                updateSyncHash(providerConfig.name, "series_categories", seriesCategoriesHash)
+                val categoriesSize = seriesCategoriesBody?.length?.toLong()
+                updateSyncHash(providerConfig.name, "series_categories", seriesCategoriesHash, categoriesSize)
             }
             if (seriesStreamsHash != null) {
-                updateSyncHash(providerConfig.name, "series_streams", seriesStreamsHash)
+                val streamsSize = seriesStreamsBody?.length?.toLong()
+                updateSyncHash(providerConfig.name, "series_streams", seriesStreamsHash, streamsSize)
             }
         }
         
@@ -671,7 +678,7 @@ class IptvSyncService(
         logger.debug("Synced ${categories.size} $categoryType categories for provider $providerName")
     }
 
-    private fun updateSyncHash(providerName: String, endpointType: String, newHash: String) {
+    private fun updateSyncHash(providerName: String, endpointType: String, newHash: String, responseBodySize: Long? = null) {
         val hashEntity = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerName, endpointType)
             ?: IptvSyncHashEntity().apply {
                 this.providerName = providerName
@@ -682,6 +689,12 @@ class IptvSyncService(
         hashEntity.lastChecked = Instant.now()
         hashEntity.syncStatus = "COMPLETED"
         hashEntity.syncStartedAt = null
+        
+        // Update file size from response body size (never from saved files)
+        if (responseBodySize != null) {
+            hashEntity.fileSize = responseBodySize
+        }
+        
         iptvSyncHashRepository.save(hashEntity)
     }
 
