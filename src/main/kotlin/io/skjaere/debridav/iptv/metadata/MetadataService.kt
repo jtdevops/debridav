@@ -145,15 +145,15 @@ class MetadataService(
     
     /**
      * Parses a year string that may be a single year or a range.
-     * Supports formats: "2006", "2006–2013", "2006-2013" (en-dash or hyphen)
-     * @return Pair of (startYear, endYear) where endYear is null if not a range
+     * Supports formats: "2006", "2006–2013", "2006-2013" (en-dash or hyphen), "2022–" (ongoing series)
+     * @return Pair of (startYear, endYear) where endYear is null if not a range or ongoing series
      */
     private fun parseYearRange(yearStr: String?): Pair<Int?, Int?> {
         if (yearStr == null || yearStr.isBlank()) {
             return Pair(null, null)
         }
         
-        // Try to match year range patterns (en-dash or hyphen)
+        // Try to match complete year range patterns (en-dash or hyphen) - e.g., "2006–2013"
         val rangePattern = Regex("""(\d{4})\s*[–-]\s*(\d{4})""")
         val rangeMatch = rangePattern.find(yearStr)
         
@@ -162,6 +162,16 @@ class MetadataService(
             val endYear = rangeMatch.groupValues[2].toIntOrNull()
             logger.debug("Parsed year range: startYear=$startYear, endYear=$endYear from '$yearStr'")
             return Pair(startYear, endYear)
+        }
+        
+        // Try to match ongoing series pattern (trailing dash) - e.g., "2022–"
+        val ongoingPattern = Regex("""(\d{4})\s*[–-]\s*$""")
+        val ongoingMatch = ongoingPattern.find(yearStr)
+        
+        if (ongoingMatch != null) {
+            val startYear = ongoingMatch.groupValues[1].toIntOrNull()
+            logger.debug("Parsed ongoing series: startYear=$startYear from '$yearStr'")
+            return Pair(startYear, null)
         }
         
         // Single year
