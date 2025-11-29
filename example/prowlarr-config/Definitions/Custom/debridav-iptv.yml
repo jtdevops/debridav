@@ -29,13 +29,13 @@ settings:
     label: The following help to validate an indexer in Radarr by confirming that the movie returns results
   - name: validate_movie_title
     type: text
-    label: Title of Movie to use for Radarr validation (must exist in IPTV provider)
+    label: Title of Movie or IMDb ID (e.g., "The Matrix" or "tt0133093") to use for Radarr validation (must exist in IPTV provider)
   - name: validate_tv_title_label
     type: info
     label: The following help to validate an indexer in Sonarr by confirming that the show returns results
   - name: validate_tv_title
     type: text
-    label: Title of TV show to use for Sonarr validation (must exist in IPTV provider)
+    label: Title of TV show or IMDb ID (e.g., "Breaking Bad" or "tt0903747") to use for Sonarr validation (must exist in IPTV provider)
 
 search:
   headers:

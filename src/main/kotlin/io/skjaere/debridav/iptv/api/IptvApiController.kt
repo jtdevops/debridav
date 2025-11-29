@@ -171,9 +171,33 @@ class IptvApiController(
         }
         
         // Priority 3: Use 'qTest' parameter (testing data)
+        // Can be either a text string or an IMDb ID
         val qTestParam = qTest?.takeIf { it.isNotBlank() }
         if (qTestParam != null) {
-            logger.debug("Using 'qTest' parameter (testing): '$qTestParam'")
+            // Check if qTest looks like an IMDb ID (starts with "tt" followed by digits)
+            if (isImdbId(qTestParam)) {
+                logger.debug("qTest parameter detected as IMDb ID: '$qTestParam', attempting to fetch metadata")
+                val metadata = runBlocking {
+                    metadataService.getMetadataByImdbId(qTestParam)
+                }
+                
+                if (metadata != null) {
+                    logger.info("Successfully resolved qTest IMDb ID '$qTestParam' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear})")
+                    return SearchQuery(
+                        title = metadata.title,
+                        year = metadata.startYear,
+                        startYear = metadata.startYear,
+                        endYear = metadata.endYear,
+                        useArticleVariations = false
+                    )
+                } else {
+                    logger.warn("Failed to resolve qTest IMDb ID '$qTestParam' to metadata, treating as text")
+                    // Fall through to treat as text
+                }
+            }
+            
+            // Treat as text string (either not an IMDb ID, or IMDb ID resolution failed)
+            logger.debug("Using 'qTest' parameter as text (testing): '$qTestParam'")
             return extractTitleAndYear(qTestParam, useArticleVariations = true)
         }
         
@@ -185,6 +209,19 @@ class IptvApiController(
         }
         
         return null
+    }
+    
+    /**
+     * Checks if a string looks like an IMDb ID.
+     * IMDb IDs typically start with "tt" followed by 7-8 digits (e.g., "tt0111161", "tt12345678")
+     * 
+     * @param value The string to check
+     * @return true if it looks like an IMDb ID, false otherwise
+     */
+    private fun isImdbId(value: String): Boolean {
+        // IMDb ID pattern: "tt" followed by 7-8 digits
+        val imdbIdPattern = Regex("^tt\\d{7,8}$", RegexOption.IGNORE_CASE)
+        return imdbIdPattern.matches(value.trim())
     }
     
     /**
