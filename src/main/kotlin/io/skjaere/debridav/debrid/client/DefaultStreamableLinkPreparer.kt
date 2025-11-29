@@ -33,7 +33,7 @@ class DefaultStreamableLinkPreparer(
 
     init {
         // Log the effective logger level at startup for debugging
-        logger.info("DefaultStreamableLinkPreparer logger initialized: loggerName={}, effectiveLevel={}", 
+        logger.debug("DefaultStreamableLinkPreparer logger initialized: loggerName={}, effectiveLevel={}", 
             DefaultStreamableLinkPreparer::class.java.name,
             if (logger.isTraceEnabled) "TRACE" else if (logger.isDebugEnabled) "DEBUG" else if (logger.isInfoEnabled) "INFO" else if (logger.isWarnEnabled) "WARN" else "ERROR")
     }
@@ -102,7 +102,7 @@ class DefaultStreamableLinkPreparer(
                         getByteRange(range, debridLink.size!!)?.let { byteRange ->
                             // Only apply byte range if chunking is not disabled
                             if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
-                                logger.info(
+                                logger.debug(
                                     "Applying byteRange $byteRange " +
                                             "for ${debridLink.link}" +
                                             " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) " +
@@ -113,7 +113,7 @@ class DefaultStreamableLinkPreparer(
                                     append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
                                 }
                             } else {
-                                logger.info("Byte range chunking disabled - using exact user range" +
+                                logger.debug("Byte range chunking disabled - using exact user range" +
                                         if (isIptv) " (IPTV - Range header will be re-applied on redirect URLs)" else "")
                                 // When chunking is disabled, use the exact range requested by user
                                 if (!(range.start == 0L && range.finish == debridLink.size)) {

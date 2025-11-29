@@ -337,17 +337,17 @@ class IptvContentService(
         val filtered = when {
             // If we have results without spin-offs, exclude those with spin-offs
             resultsWithoutSpinOffs.isNotEmpty() -> {
-                logger.info("Spin-off filter: Found ${resultsWithoutSpinOffs.size} results without spin-offs and ${resultsWithSpinOffs.size} results with spin-offs. Excluding spin-offs.")
+                logger.debug("Spin-off filter: Found ${resultsWithoutSpinOffs.size} results without spin-offs and ${resultsWithSpinOffs.size} results with spin-offs. Excluding spin-offs.")
                 resultsWithoutSpinOffs
             }
             // If ALL results have spin-off indicators, return all results (don't filter everything out)
             else -> {
-                logger.info("Spin-off filter: All ${results.size} results have spin-off indicators. Returning all results.")
+                logger.debug("Spin-off filter: All ${results.size} results have spin-off indicators. Returning all results.")
                 results
             }
         }
         
-        logger.info("Spin-off filter returned ${filtered.size} results (from ${results.size} total)")
+        logger.debug("Spin-off filter returned ${filtered.size} results (from ${results.size} total)")
         return filtered
     }
     
@@ -424,17 +424,17 @@ class IptvContentService(
             // If we have results with matching year or no year, exclude non-matching year results
             resultsWithMatchingYear.isNotEmpty() || resultsWithNoYear.isNotEmpty() -> {
                 val included = resultsWithMatchingYear + resultsWithNoYear
-                logger.info("Year filter: Found ${resultsWithMatchingYear.size} results with matching year and ${resultsWithNoYear.size} results with no year. Excluding ${resultsWithNonMatchingYear.size} results with non-matching year.")
+                logger.debug("Year filter: Found ${resultsWithMatchingYear.size} results with matching year and ${resultsWithNoYear.size} results with no year. Excluding ${resultsWithNonMatchingYear.size} results with non-matching year.")
                 included
             }
             // If ALL results have non-matching years, return all results (year filter is optional)
             else -> {
-                logger.info("Year filter: All ${results.size} results have non-matching years. Returning all results (year filter is optional).")
+                logger.debug("Year filter: All ${results.size} results have non-matching years. Returning all results (year filter is optional).")
                 results
             }
         }
         
-        logger.info("Year filter returned ${filtered.size} results (from ${results.size} total)")
+        logger.debug("Year filter returned ${filtered.size} results (from ${results.size} total)")
         return filtered
     }
     

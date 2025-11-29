@@ -94,7 +94,7 @@ class DebridFileResource(
             
             var currentCachedFile = debridService.getCachedFileCached(file)
             if (currentCachedFile != null) {
-                logger.info("streaming: {} range {} from {}", currentCachedFile.path, range, currentCachedFile.provider)
+                logger.debug("streaming: {} range {} from {}", currentCachedFile.path, range, currentCachedFile.provider)
 
                 val result = try {
                     streamingService.streamContents(

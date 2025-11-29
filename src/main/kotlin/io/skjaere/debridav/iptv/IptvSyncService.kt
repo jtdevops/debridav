@@ -49,7 +49,7 @@ class IptvSyncService(
             return
         }
 
-        logger.info("Starting IPTV content sync")
+        logger.debug("Starting IPTV content sync")
         
         // Check for interrupted syncs from previous run
         checkAndResumeInterruptedSyncs()
@@ -99,7 +99,7 @@ class IptvSyncService(
             }
         }
 
-        logger.info("IPTV content sync completed")
+        logger.debug("IPTV content sync completed")
     }
 
     /**

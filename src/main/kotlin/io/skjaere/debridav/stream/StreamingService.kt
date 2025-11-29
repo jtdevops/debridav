@@ -399,7 +399,7 @@ class StreamingService(
             this.coroutineContext.cancelChildren()
             trackingId?.let { id -> completeDownloadTracking(id, result) }
         }
-        logger.info("done streaming ${debridLink.path}: $result")
+        logger.debug("done streaming ${debridLink.path}: $result")
         result
     }
     

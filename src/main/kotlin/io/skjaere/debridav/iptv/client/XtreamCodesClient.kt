@@ -79,7 +79,7 @@ class XtreamCodesClient(
                     val userInfo = json.decodeFromString<XtreamUserInfo>(body)
                     val isActive = userInfo.user_info?.status == "Active" || userInfo.user_info != null
                     if (isActive) {
-                        logger.info("Account verified as active for provider ${providerConfig.name}")
+                        logger.debug("Account verified as active for provider ${providerConfig.name}")
                     } else {
                         logger.warn("Account status is not active for provider ${providerConfig.name}")
                     }
@@ -90,7 +90,7 @@ class XtreamCodesClient(
                         val directUserInfo = json.decodeFromString<XtreamUserInfoDetails>(body)
                         val isActive = directUserInfo.status == "Active" || directUserInfo.auth == 1
                         if (isActive) {
-                            logger.info("Account verified as active for provider ${providerConfig.name}")
+                            logger.debug("Account verified as active for provider ${providerConfig.name}")
                         } else {
                             logger.warn("Account status is not active for provider ${providerConfig.name}")
                         }
