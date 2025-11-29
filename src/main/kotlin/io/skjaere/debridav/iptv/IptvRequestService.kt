@@ -1658,7 +1658,7 @@ class IptvRequestService(
                     val hasSeason = episodes.any { it.season == requestedSeason }
                     if (!hasSeason && episodes.isNotEmpty()) {
                         val availableSeasons = episodes.mapNotNull { it.season }.distinct().sorted()
-                        logger.debug("Series ${entity.contentId} (${entity.title}) does not have season $requestedSeason. Available seasons: $availableSeasons")
+                        logger.warn("Series ${entity.contentId} (${entity.title}) does not have season $requestedSeason. Available seasons: $availableSeasons")
                     } else if (hasSeason) {
                         val seasonEpisodes = episodes.filter { it.season == requestedSeason }
                         val episodeCount = seasonEpisodes.size
@@ -1681,7 +1681,13 @@ class IptvRequestService(
                         val requestedEpisode = episodes.find { 
                             it.season == requestedSeason && it.episode == requestedEpisodeNumber 
                         }
-                        if (requestedEpisode != null) {
+                        if (requestedEpisode == null) {
+                            val availableEpisodes = episodes.filter { it.season == requestedSeason }
+                                .mapNotNull { it.episode }
+                                .distinct()
+                                .sorted()
+                            logger.warn("Series ${entity.contentId} (${entity.title}) does not have episode S${String.format("%02d", requestedSeason)}E${String.format("%02d", requestedEpisodeNumber)} in season $requestedSeason. Available episodes: $availableEpisodes")
+                        } else {
                             val requestedEpisodeLabel = "S${String.format("%02d", requestedSeason)}E${String.format("%02d", requestedEpisodeNumber)}"
                             
                             // Try to extract file size from video tags first
@@ -1745,9 +1751,6 @@ class IptvRequestService(
         }
         
         return seriesWithEpisodes.map { entity ->
-            // Log initial content title
-            logger.debug("Generating magnet title - initial content title: {}", entity.title)
-            
             // Generate infohash from providerName and contentId (now returns hex string)
             val infohash = generateIptvHash(entity.providerName, entity.contentId)
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
@@ -1820,8 +1823,8 @@ class IptvRequestService(
                 radarrTitle = "$radarrTitle-${releaseGroupParts.joinToString("-")}"
             }
             
-            // Log final magnet title
-            logger.debug("Generating magnet title - final magnet title: {}", radarrTitle)
+            // Log magnet title generation (initial -> final)
+            logger.debug("Generating magnet title - initial: '{}', final: '{}'", entity.title, radarrTitle)
             
             // Note: The magnet title should NOT contain the media extension
             // The extension will be added when creating the actual file, but the magnet title

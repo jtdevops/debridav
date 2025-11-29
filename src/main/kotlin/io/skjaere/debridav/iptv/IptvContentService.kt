@@ -143,7 +143,16 @@ class IptvContentService(
         // Note: For now, we only pass year (startYear) - year range support can be added later if needed
         val yearFiltered = filterByYear(filteredResults, year)
         val spinOffFiltered = filterSpinOffs(yearFiltered, normalizedTitle)
-        return sortByRelevanceAndProviderPriority(spinOffFiltered, normalizedTitle, year, providerPriorityMap)
+        val finalResults = sortByRelevanceAndProviderPriority(spinOffFiltered, normalizedTitle, year, providerPriorityMap)
+        
+        // Log search results summary at INFO level
+        if (finalResults.isEmpty()) {
+            logger.info("IPTV search returned 0 results for title='$title'${year?.let { ", year=$it" } ?: ""}${contentType?.let { ", type=$it" } ?: ""}")
+        } else {
+            logger.debug("IPTV search returned ${finalResults.size} results for title='$title'${year?.let { ", year=$it" } ?: ""}${contentType?.let { ", type=$it" } ?: ""}")
+        }
+        
+        return finalResults
     }
     
     /**
