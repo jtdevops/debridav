@@ -309,12 +309,22 @@ class StreamingService(
         } catch (_: ClientAbortException) {
             result = StreamResult.OK
         } catch (e: kotlinx.io.IOException) {
-            // TRACE level logging for streaming IO exceptions with full stack trace
-            logger.trace("STREAMING_IO_EXCEPTION: IOException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
-                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
-            // Explicitly log stack trace to ensure it appears
-            logger.trace("STREAMING_IO_EXCEPTION_STACK_TRACE", e)
-            logger.error("IOError occurred during streaming", e)
+            // Check if this is a ConnectTimeoutException (handled gracefully with fallback)
+            val isConnectTimeout = e.javaClass.simpleName == "ConnectTimeoutException" || 
+                                   e.message?.contains("Connect timeout") == true
+            
+            if (isConnectTimeout) {
+                // Reduced logging for handled ConnectTimeoutException - fallback will handle it
+                logger.debug("STREAMING_IO_EXCEPTION: Connect timeout during streaming: path={}, link={}, provider={}, exceptionClass={}", 
+                    debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName)
+            } else {
+                // TRACE level logging for other streaming IO exceptions with full stack trace
+                logger.trace("STREAMING_IO_EXCEPTION: IOException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
+                    debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+                // Explicitly log stack trace to ensure it appears
+                logger.trace("STREAMING_IO_EXCEPTION_STACK_TRACE", e)
+                logger.error("IOError occurred during streaming", e)
+            }
             result = StreamResult.IO_ERROR
         } catch (e: CancellationException) {
             throw e

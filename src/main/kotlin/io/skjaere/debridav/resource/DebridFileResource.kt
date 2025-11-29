@@ -18,6 +18,7 @@ import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridFile
 import io.skjaere.debridav.fs.DebridFileContents
 import io.skjaere.debridav.fs.DebridIptvContent
+import io.skjaere.debridav.fs.IptvFile
 import io.skjaere.debridav.fs.MissingFile
 import io.skjaere.debridav.fs.NetworkError
 import io.skjaere.debridav.fs.ProviderError
@@ -114,10 +115,25 @@ class DebridFileResource(
                     
                     if (isIptvContent) {
                         logger.debug("Streaming failed for IPTV file ${currentCachedFile.path}, skipping link refresh - IPTV links don't use debrid clients")
-                        // Update with the error status for IPTV content
-                        val updatedDebridLink = mapResultToDebridFile(result, currentCachedFile)
-                        file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
-                        fileService.saveDbEntity(file)
+                        // For IPTV content, preserve the valid IptvFile and don't replace it with error types
+                        // Temporary network errors shouldn't overwrite valid link data
+                        val existingLinks = file.contents!!.debridLinks
+                        val hasValidIptvFile = existingLinks.any { it is IptvFile }
+                        
+                        if (!hasValidIptvFile) {
+                            // Only update if there's no valid IptvFile (shouldn't happen normally)
+                            logger.warn("No valid IptvFile found for IPTV content, updating with error status")
+                            val updatedDebridLink = mapResultToDebridFile(result, currentCachedFile)
+                            file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
+                            fileService.saveDbEntity(file)
+                        } else {
+                            // Preserve the IptvFile - just update its lastChecked timestamp
+                            existingLinks.filterIsInstance<IptvFile>().firstOrNull()?.let { iptvFile ->
+                                iptvFile.lastChecked = Instant.now().toEpochMilli()
+                                fileService.saveDbEntity(file)
+                            }
+                            logger.debug("Preserved IptvFile for IPTV content despite streaming error - temporary network issues shouldn't overwrite valid links")
+                        }
                     } else {
                         // Try to refresh the failed link and retry once
                         logger.info("Streaming failed for ${currentCachedFile.path}, attempting to refresh link and retry")
