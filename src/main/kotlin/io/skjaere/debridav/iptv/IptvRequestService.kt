@@ -42,7 +42,8 @@ class IptvRequestService(
     private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
     private val httpClient: HttpClient,
     private val responseFileService: IptvResponseFileService,
-    private val iptvLoginRateLimitService: IptvLoginRateLimitService
+    private val iptvLoginRateLimitService: IptvLoginRateLimitService,
+    private val iptvUrlTemplateRepository: IptvUrlTemplateRepository
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
@@ -203,26 +204,38 @@ class IptvRequestService(
             fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
         }
         
+        // Extract base URL and suffix for URL template system
+        val (baseUrl, urlSuffix) = extractBaseUrlAndSuffix(resolvedUrl)
+        val urlTemplate = if (baseUrl.isNotEmpty()) {
+            getOrCreateUrlTemplate(providerName, baseUrl, iptvContent.contentType)
+        } else {
+            null
+        }
+        
         // Create DebridIptvContent entity
         val debridIptvContent = DebridIptvContent(
             originalPath = fileNameWithExtension,
             size = fileSize,
             modified = Instant.now().toEpochMilli(),
-            iptvUrl = resolvedUrl,
+            iptvUrl = resolvedUrl, // Keep for backward compatibility during migration
             iptvProviderName = providerName,
             iptvContentId = contentId,
             mimeType = determineMimeType(fileNameWithExtension),
             debridLinks = mutableListOf()
         )
+        // Set URL template fields
+        debridIptvContent.iptvUrlTemplate = urlTemplate
+        debridIptvContent.iptvUrlSuffix = urlSuffix
         // Set foreign key reference for cascading deletes
         debridIptvContent.iptvContentRefId = iptvContent.id
         
-        // Create IptvFile link
+        // Create IptvFile link (use reconstructed URL from template)
+        val fullUrlForLink = urlTemplate?.let { "${it.baseUrl}/$urlSuffix" } ?: resolvedUrl
         val iptvFile = IptvFile(
             path = fileNameWithExtension,
             size = fileSize,
             mimeType = debridIptvContent.mimeType ?: "video/mp4",
-            link = resolvedUrl,
+            link = fullUrlForLink,
             params = emptyMap(),
             lastChecked = Instant.now().toEpochMilli()
         )
@@ -475,25 +488,37 @@ class IptvRequestService(
                 fetchActualFileSize(episodeUrl, ContentType.SERIES, providerName)
             }
             
+            // Extract base URL and suffix for URL template system
+            val (episodeBaseUrl, episodeUrlSuffix) = extractBaseUrlAndSuffix(episodeUrl)
+            val episodeUrlTemplate = if (episodeBaseUrl.isNotEmpty()) {
+                getOrCreateUrlTemplate(providerName, episodeBaseUrl, ContentType.SERIES)
+            } else {
+                null
+            }
+            
             // Create DebridIptvContent entity for episode
             val debridIptvContent = DebridIptvContent(
                 originalPath = episodeTitle,
                 size = episodeFileSize,
                 modified = Instant.now().toEpochMilli(),
-                iptvUrl = episodeUrl,
+                iptvUrl = episodeUrl, // Keep for backward compatibility during migration
                 iptvProviderName = providerName,
                 iptvContentId = "${seriesId}_${episode.id}", // Use series_id_episode_id as content ID
                 mimeType = determineMimeType(episodeTitle),
                 debridLinks = mutableListOf()
             )
+            // Set URL template fields
+            debridIptvContent.iptvUrlTemplate = episodeUrlTemplate
+            debridIptvContent.iptvUrlSuffix = episodeUrlSuffix
             debridIptvContent.iptvContentRefId = iptvContent.id
             
-            // Create IptvFile link
+            // Create IptvFile link (use reconstructed URL from template)
+            val fullEpisodeUrlForLink = episodeUrlTemplate?.let { "${it.baseUrl}/$episodeUrlSuffix" } ?: episodeUrl
             val iptvFile = IptvFile(
                 path = episodeTitle,
                 size = episodeFileSize,
                 mimeType = debridIptvContent.mimeType ?: "video/mp4",
-                link = episodeUrl,
+                link = fullEpisodeUrlForLink,
                 params = emptyMap(),
                 lastChecked = Instant.now().toEpochMilli()
             )
@@ -1080,7 +1105,8 @@ class IptvRequestService(
         iptvContent: DebridIptvContent,
         remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity
     ): Long? {
-        val iptvUrl = iptvContent.iptvUrl
+        // Reconstruct full URL from template + suffix, or fallback to old iptvUrl field
+        val iptvUrl = reconstructFullUrl(iptvContent)
         val providerName = iptvContent.iptvProviderName
         
         if (iptvUrl == null || providerName == null) {
@@ -2050,5 +2076,68 @@ class IptvRequestService(
         @JsonProperty("quality")
         val quality: String?
     )
+    
+    /**
+     * Extracts base URL and suffix from a full IPTV URL.
+     * Base URL is everything up to and including the last '/', suffix is the filename/content ID.
+     * 
+     * Example: 
+     * - Input: "http://bunjajum.qastertv.xyz/series/3YN7M6EG/CTJNEE8L/401813119.mkv"
+     * - Base: "http://bunjajum.qastertv.xyz/series/3YN7M6EG/CTJNEE8L"
+     * - Suffix: "401813119.mkv"
+     */
+    private fun extractBaseUrlAndSuffix(fullUrl: String): Pair<String, String> {
+        val lastSlashIndex = fullUrl.lastIndexOf('/')
+        if (lastSlashIndex == -1) {
+            // No slash found, treat entire URL as suffix
+            return Pair("", fullUrl)
+        }
+        val baseUrl = fullUrl.substring(0, lastSlashIndex)
+        val suffix = fullUrl.substring(lastSlashIndex + 1)
+        return Pair(baseUrl, suffix)
+    }
+    
+    /**
+     * Gets or creates a URL template for the given provider and base URL.
+     * Returns the template entity.
+     */
+    @Transactional
+    fun getOrCreateUrlTemplate(providerName: String, baseUrl: String, contentType: ContentType? = null): IptvUrlTemplateEntity {
+        val existing = iptvUrlTemplateRepository.findByProviderNameAndBaseUrl(providerName, baseUrl)
+        if (existing != null) {
+            // Update last_updated timestamp
+            existing.lastUpdated = Instant.now()
+            if (contentType != null && existing.contentType == null) {
+                existing.contentType = contentType
+            }
+            return iptvUrlTemplateRepository.save(existing)
+        }
+        
+        // Create new template
+        val template = IptvUrlTemplateEntity().apply {
+            this.providerName = providerName
+            this.baseUrl = baseUrl
+            this.contentType = contentType
+            this.lastUpdated = Instant.now()
+        }
+        return iptvUrlTemplateRepository.save(template)
+    }
+    
+    /**
+     * Reconstructs a full URL from a template and suffix.
+     * If template is null, falls back to using iptvUrl (backward compatibility).
+     */
+    fun reconstructFullUrl(iptvContent: DebridIptvContent): String? {
+        val template = iptvContent.iptvUrlTemplate
+        val suffix = iptvContent.iptvUrlSuffix
+        
+        if (template != null && suffix != null) {
+            // Reconstruct from template + suffix
+            return "${template.baseUrl}/$suffix"
+        }
+        
+        // Fallback to old iptvUrl field for backward compatibility
+        return iptvContent.iptvUrl
+    }
 }
 

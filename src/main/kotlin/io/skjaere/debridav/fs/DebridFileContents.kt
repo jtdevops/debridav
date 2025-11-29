@@ -11,11 +11,15 @@ import jakarta.persistence.Column
 import jakarta.persistence.DiscriminatorColumn
 import jakarta.persistence.DiscriminatorType
 import jakarta.persistence.Entity
+import jakarta.persistence.FetchType
+import jakarta.persistence.ForeignKey
 import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Inheritance
 import jakarta.persistence.InheritanceType
+import jakarta.persistence.JoinColumn
+import jakarta.persistence.ManyToOne
 import org.hibernate.annotations.Type
 import java.io.Serializable
 
@@ -108,7 +112,17 @@ open class DebridUsenetContents : DebridFileContents() {
 @Entity
 open class DebridIptvContent() : DebridFileContents() {
     @Column(name = "iptv_url", length = 2048)
-    open var iptvUrl: String? = null // resolved URL with actual credentials
+    open var iptvUrl: String? = null // resolved URL with actual credentials (deprecated, kept for backward compatibility)
+    
+    @Column(name = "iptv_url_suffix", length = 512)
+    open var iptvUrlSuffix: String? = null // Unique part of URL (filename/content ID) - used with template
+    
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(
+        name = "iptv_url_template_id",
+        foreignKey = ForeignKey(name = "fk_debrid_iptv_content_url_template")
+    )
+    open var iptvUrlTemplate: io.skjaere.debridav.iptv.IptvUrlTemplateEntity? = null
     
     @Column(name = "iptv_provider_name", length = 255)
     open var iptvProviderName: String? = null
