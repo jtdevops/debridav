@@ -1114,6 +1114,14 @@ class IptvRequestService(
         
         try {
             val oldFileSize = iptvContent.size
+            
+            // If size is already set and not a default value, don't update it - IPTV sizes are stable
+            if (oldFileSize != null && !isDefaultFileSize(oldFileSize, contentType)) {
+                logger.debug("File size already set to non-default value, skipping update: size={}, url={}", 
+                    oldFileSize, iptvUrl.take(100))
+                return oldFileSize
+            }
+            
             val newFileSize = fetchActualFileSize(iptvUrl, contentType, providerName)
             
             // Only update if we got a different size
