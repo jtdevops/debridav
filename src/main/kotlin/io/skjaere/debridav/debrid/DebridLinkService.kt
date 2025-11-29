@@ -43,6 +43,9 @@ import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.support.TransactionTemplate
+import jakarta.persistence.EntityManager
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -59,10 +62,13 @@ class DebridLinkService(
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val debridClients: List<DebridCachedContentClient>,
     private val clock: Clock,
-    meterRegistry: MeterRegistry
+    meterRegistry: MeterRegistry,
+    private val transactionManager: PlatformTransactionManager,
+    private val entityManager: EntityManager
 ) {
 
     private val logger = LoggerFactory.getLogger(DebridLinkService::class.java)
+    private val transactionTemplate = TransactionTemplate(transactionManager)
 
     data class LinkLivenessCacheKey(val provider: String, val cachedFile: CachedFile)
 
@@ -86,8 +92,13 @@ class DebridLinkService(
         .expireAfterWrite(debridavConfigurationProperties.cachedFileCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<RemotelyCachedEntity, CachedFile?> { entity ->
-            runBlocking {
-                getCachedFile(entity)
+            // Use TransactionTemplate to ensure we have a Hibernate session when accessing lazy-loaded properties
+            // Merge the entity to reattach it to the current session so lazy proxies can be initialized
+            transactionTemplate.execute<CachedFile?> {
+                val mergedEntity = entityManager.merge(entity)
+                runBlocking {
+                    getCachedFile(mergedEntity)
+                }
             }
         })
 
