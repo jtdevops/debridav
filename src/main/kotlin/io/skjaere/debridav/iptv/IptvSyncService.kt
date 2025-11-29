@@ -170,25 +170,21 @@ class IptvSyncService(
                 syncM3uCategories(providerConfig.name, contentItems)
             }
             
-            if (iptvConfigurationProperties.filterVodOnly) {
-                // Filter is already applied in parsers, but double-check here
-                // For M3U, check category name; for Xtream Codes, all items are already VOD
-                val filtered = contentItems.filter { item ->
-                    if (item.categoryType == "m3u" && item.categoryId != null) {
-                        val categoryName = item.categoryId // For M3U, categoryId is the group-title
-                        categoryName.contains("VOD", ignoreCase = true) ||
-                        categoryName.contains("Movies", ignoreCase = true) ||
-                        categoryName.contains("Series", ignoreCase = true) ||
-                        categoryName.contains("TV Shows", ignoreCase = true)
-                    } else {
-                        true // Xtream Codes items are already filtered
-                    }
+            // Always filter VOD content only (live streams are not supported)
+            // For M3U, check category name; for Xtream Codes, all items are already VOD
+            val filtered = contentItems.filter { item ->
+                if (item.categoryType == "m3u" && item.categoryId != null) {
+                    val categoryName = item.categoryId // For M3U, categoryId is the group-title
+                    categoryName.contains("VOD", ignoreCase = true) ||
+                    categoryName.contains("Movies", ignoreCase = true) ||
+                    categoryName.contains("Series", ignoreCase = true) ||
+                    categoryName.contains("TV Shows", ignoreCase = true)
+                } else {
+                    true // Xtream Codes items are already VOD
                 }
-                if (filtered.isNotEmpty()) {
-                    syncContentToDatabase(providerConfig.name, filtered)
-                }
-            } else {
-                syncContentToDatabase(providerConfig.name, contentItems)
+            }
+            if (filtered.isNotEmpty()) {
+                syncContentToDatabase(providerConfig.name, filtered)
             }
 
             // Hashes are updated during sync for Xtream Codes, or here for M3U

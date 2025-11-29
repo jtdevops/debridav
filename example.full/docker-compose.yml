@@ -76,11 +76,31 @@ services:
       - IPTV_SYNC_INTERVAL=${IPTV_SYNC_INTERVAL:-PT24H}
       # Comma-separated list of IPTV provider names
       # Example: provider1,provider2,my-iptv-service
-      - IPTV_PROVIDERS=${IPTV_PROVIDERS:-}
-      # Filter VOD content only, exclude Live TV (default: true)
-      - IPTV_FILTER_VOD_ONLY=${IPTV_FILTER_VOD_ONLY:-true}
-      # Search fuzziness for content matching (0.0-1.0, default: 0.8)
-      - IPTV_SEARCH_FUZZINESS=${IPTV_SEARCH_FUZZINESS:-0.8}
+      # - IPTV_PROVIDERS=${IPTV_PROVIDERS:-}
+      # - IPTV_PROVIDERS=provider1
+      # - IPTV_PROVIDERS=provider2
+      # - IPTV_PROVIDERS=provider1,provider2
+
+      - IPTV_LANGUAGE_PREFIXES="EN| ", "EN - ","AM| ","UNV| "
+      - IPTV_METADATA_OMDB_API_KEY=${IPTV_METADATA_OMDB_API_KEY}
+      - IPTV_INCLUDE_PROVIDER_IN_MAGNET_TITLE=true
+
+      - IPTV_USE_LOCAL_RESPONSES=true
+      - IPTV_RESPONSE_SAVE_FOLDER=/iptv_cache
+
+      - IPTV_PROVIDER_PROVIDER1_TYPE=xtream_codes
+      - IPTV_PROVIDER_PROVIDER1_XTREAM_BASE_URL=${IPTV_PROVIDER_PROVIDER1_XTREAM_BASE_URL}
+      - IPTV_PROVIDER_PROVIDER1_XTREAM_USERNAME=${IPTV_PROVIDER_PROVIDER1_XTREAM_USERNAME}
+      - IPTV_PROVIDER_PROVIDER1_XTREAM_PASSWORD=${IPTV_PROVIDER_PROVIDER1_XTREAM_PASSWORD}
+      - IPTV_PROVIDER_PROVIDER1_PRIORITY=1
+      #- IPTV_PROVIDER_PROVIDER1_SYNC_ENABLED=true
+
+      - IPTV_PROVIDER_PROVIDER2_TYPE=xtream_codes
+      - IPTV_PROVIDER_PROVIDER2_XTREAM_BASE_URL=${IPTV_PROVIDER_PROVIDER2_XTREAM_BASE_URL}
+      - IPTV_PROVIDER_PROVIDER2_XTREAM_USERNAME=${IPTV_PROVIDER_PROVIDER2_XTREAM_USERNAME}
+      - IPTV_PROVIDER_PROVIDER2_XTREAM_PASSWORD=${IPTV_PROVIDER_PROVIDER2_XTREAM_PASSWORD}
+      - IPTV_PROVIDER_PROVIDER2_PRIORITY=1
+      #- IPTV_PROVIDER_PROVIDER2_SYNC_ENABLED=true
 
       # IPTV Provider Configuration
       # For each provider, configure the following (replace {PROVIDER_NAME} with your provider name):
@@ -112,6 +132,11 @@ services:
 #      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_IPTV_CLIENT_XTREAMCODESCLIENT=DEBUG
 #      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_IPTV_CONFIGURATION_IPTVCONFIGURATIONSERVICE=DEBUG
 #      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_TORRENT_TORRENTSERVICE=DEBUG
+
+      # IPTV Trace Logging: Enable TRACE level exception logging for IPTV streaming diagnostics
+#      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV=TRACE
+#      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_STREAM_STREAMINGSERVICE=TRACE
+#      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_DEBRID_CLIENT_DEFAULTSTREAMABLELINKPREPARER=TRACE
 
       # Download details can be accessed: http://<ip address>:8888/actuator/streaming-download-tracking
       - DEBRIDAV_ENABLE_STREAMING_DOWNLOAD_TRACKING=true
@@ -149,20 +174,21 @@ services:
       #- DEBRIDAV_RCLONE_ARRS_USER_AGENT_PATTERN=rclone/arrs
       - DEBRIDAV_RCLONE_ARRS_HOSTNAME_PATTERN=rclone_arrs
 
-      # Use a locally hosted video file for ARRS projects.
+      # Use a locally hosted video file for ARRS project requests
       - DEBRIDAV_ENABLE_RCLONE_ARRS_LOCAL_VIDEO=true
       - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_PATHS=1080p=/local-video/BigBuckBunny_60fps_1080p.mp4,720|=/local-video/BigBuckBunny_60fps_720p.mp4
 #      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_PATH_REGEX=^/downloads/.*
       - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_MIN_SIZE_KB=1024
 
-      # Enable STRM folders and for media files.
-#      - DEBRIDAV_ENABLE_STRM_FOLDERS=true
+      # Query the IPTV Provider directly for media details
+      - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_IPTV_BYPASS_PROVIDERS=*
     ports:
       - ${DEBRIDAV_PORT}:8080
       - "8000:8000"
     volumes:
       - ./BigBuckBunny_60fps_1080p.mp4:/local-video/BigBuckBunny_60fps_1080p.mp4
       - ./BigBuckBunny_60fps_720p.mp4:/local-video/BigBuckBunny_60fps_720p.mp4
+      - ./iptv_cache:/iptv_cache
       # Legacy storage folder for .debridav files
       #- ${DEBRIDAV_ROOT_HOST_FS}:${DEBRIDAV_ROOT_PATH}
     healthcheck:

@@ -9,8 +9,6 @@ data class IptvConfigurationProperties(
     val syncInterval: Duration = Duration.ofHours(24),
     val initialSyncDelay: Duration = Duration.ofSeconds(30),
     val providers: List<String> = emptyList(),
-    val filterVodOnly: Boolean = true,
-    val searchFuzziness: Double = 0.8,
     val responseSaveFolder: String? = null,
     val useLocalResponses: Boolean = false,
     val seriesMetadataCacheTtl: Duration = Duration.ofHours(168), // Default: 7 days (168 hours)
@@ -25,10 +23,6 @@ data class IptvConfigurationProperties(
     val loginRateLimit: Duration = Duration.ofMinutes(1) // Rate limit for IPTV provider login/credential verification calls (default: 1 minute)
 ) {
     init {
-        // Validate searchFuzziness regardless of enabled state
-        require(searchFuzziness in 0.0..1.0) {
-            "IPTV search fuzziness must be between 0.0 and 1.0"
-        }
         // Note: It's valid to have IPTV enabled with no providers - 
         // the sync service will simply skip processing in that case
     }

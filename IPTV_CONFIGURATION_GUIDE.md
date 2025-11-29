@@ -23,9 +23,6 @@ iptv.sync-interval=PT24H
 
 # List of provider names (comma-separated)
 iptv.providers=my-iptv-provider,backup-provider
-
-# Search fuzziness for title matching (0.0-1.0, default: 0.8)
-iptv.search-fuzziness=0.8
 ```
 
 #### Configure M3U Provider
@@ -199,7 +196,6 @@ POST /api/iptv/sync
 1. Verify content exists in provider's playlist/API
 2. Check sync completed successfully
 3. Try searching with different query terms
-4. Check `iptv.search-fuzziness` setting (lower = stricter matching)
 
 ### Sonarr/Radarr Not Processing IPTV Content
 

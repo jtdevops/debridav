@@ -28,8 +28,8 @@ The implementation follows the existing DebriDav pattern:
   - `iptv.provider.{name}.xtream-username=`
   - `iptv.provider.{name}.xtream-password=`
   - `iptv.provider.{name}.priority=1` (lower number = higher priority)
-  - `iptv.filter-vod-only=true` (only sync VOD content, skip live TV)
-  - `iptv.search-fuzziness=0.8` (fuzzy matching threshold for content search)
+  
+  Note: Only VOD content (Movies and Series) is synced - live TV streams are not supported.
 
 #### 1.2 IPTV Provider Enum
 - **File**: `src/main/kotlin/io/skjaere/debridav/iptv/IptvProvider.kt` (new)
@@ -275,8 +275,6 @@ iptv.provider.provider2.xtream-base-url=https://xtream.example.com
 iptv.provider.provider2.xtream-username=user
 iptv.provider.provider2.xtream-password=pass
 iptv.provider.provider2.priority=2
-iptv.filter-vod-only=true
-iptv.search-fuzziness=0.8
 ```
 
 ## Future Enhancements

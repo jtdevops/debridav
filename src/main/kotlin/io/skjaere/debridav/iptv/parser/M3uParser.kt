@@ -73,7 +73,7 @@ class M3uParser {
         val groupTitle = matcher.group(2) ?: ""
         val title = matcher.group(3) ?: ""
         
-        // Filter VOD content only if configured
+        // Always filter VOD content only (live streams are not supported)
         val isVod = groupTitle.contains("VOD", ignoreCase = true) ||
                    groupTitle.contains("Movies", ignoreCase = true) ||
                    groupTitle.contains("Series", ignoreCase = true) ||
