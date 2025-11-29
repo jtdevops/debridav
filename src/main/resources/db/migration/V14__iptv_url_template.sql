@@ -18,9 +18,8 @@ ALTER TABLE iptv_url_template
 -- Index for efficient lookups
 CREATE INDEX idx_iptv_url_template_provider ON iptv_url_template (provider_name);
 
--- Add new columns to debrid_iptv_content for URL template support
+-- Add new column to debrid_iptv_content for URL template support
 ALTER TABLE debrid_iptv_content
-    ADD COLUMN iptv_url_suffix VARCHAR(512),
     ADD COLUMN iptv_url_template_id BIGINT;
 
 -- Add foreign key constraint
@@ -31,6 +30,7 @@ ALTER TABLE debrid_iptv_content
 -- Create index for foreign key lookups
 CREATE INDEX idx_debrid_iptv_content_url_template ON debrid_iptv_content (iptv_url_template_id);
 
--- Note: iptv_url column is kept for backward compatibility
--- New code should use iptv_url_template + iptv_url_suffix instead
+-- Note: URLs are stored in debrid_links JSONB column (IptvFile.link) with base URL replaced by {IPTV_TEMPLATE_URL}
+-- Example: {IPTV_TEMPLATE_URL}/401813119.mkv
+-- The base URL is replaced from iptv_url_template.base_url when reading
 

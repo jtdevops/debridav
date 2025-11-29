@@ -111,12 +111,6 @@ open class DebridUsenetContents : DebridFileContents() {
 
 @Entity
 open class DebridIptvContent() : DebridFileContents() {
-    @Column(name = "iptv_url", length = 2048)
-    open var iptvUrl: String? = null // resolved URL with actual credentials (deprecated, kept for backward compatibility)
-    
-    @Column(name = "iptv_url_suffix", length = 512)
-    open var iptvUrlSuffix: String? = null // Unique part of URL (filename/content ID) - used with template
-    
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(
         name = "iptv_url_template_id",
@@ -137,7 +131,6 @@ open class DebridIptvContent() : DebridFileContents() {
         originalPath: String?,
         size: Long?,
         modified: Long?,
-        iptvUrl: String?,
         iptvProviderName: String?,
         iptvContentId: String?,
         mimeType: String?,
@@ -146,7 +139,6 @@ open class DebridIptvContent() : DebridFileContents() {
         this.originalPath = originalPath
         this.size = size
         this.modified = modified
-        this.iptvUrl = iptvUrl
         this.iptvProviderName = iptvProviderName
         this.iptvContentId = iptvContentId
         this.debridLinks = debridLinks

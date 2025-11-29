@@ -66,7 +66,6 @@ CREATE TABLE debrid_iptv_content
     modified           BIGINT,
     original_path      VARCHAR(255),
     size               BIGINT,
-    iptv_url           VARCHAR(2048),
     iptv_provider_name VARCHAR(255),
     iptv_content_id    VARCHAR(512),
     iptv_content_ref_id BIGINT,

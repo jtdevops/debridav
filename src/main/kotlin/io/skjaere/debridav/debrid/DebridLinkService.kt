@@ -122,8 +122,22 @@ class DebridLinkService(
         // Handle IPTV content - convert IptvFile to CachedFile
         if (debridFileContents is DebridIptvContent) {
             val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
-            val link = iptvFile?.link
-            if (iptvFile != null && link != null) {
+            val tokenizedUrl = iptvFile?.link
+            if (iptvFile != null && tokenizedUrl != null) {
+                // Replace token with actual base URL if present
+                val link = if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
+                    val template = debridFileContents.iptvUrlTemplate
+                    if (template != null) {
+                        tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
+                    } else {
+                        logger.warn("Cannot reconstruct IPTV URL: template missing for content ${debridFileContents.iptvContentId}")
+                        return null
+                    }
+                } else {
+                    // Fallback for legacy records that still have full URL stored
+                    tokenizedUrl
+                }
+                
                 // Create a fs.CachedFile with a dummy provider for compatibility
                 return io.skjaere.debridav.fs.CachedFile(
                     path = iptvFile.path ?: file.name ?: "",
@@ -192,8 +206,22 @@ class DebridLinkService(
         // Handle IPTV content - IPTV files don't use debrid clients
         if (debridFileContents is DebridIptvContent) {
             val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
-            val link = iptvFile?.link
-            if (iptvFile != null && link != null) {
+            val tokenizedUrl = iptvFile?.link
+            if (iptvFile != null && tokenizedUrl != null) {
+                // Replace token with actual base URL if present
+                val link = if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
+                    val template = debridFileContents.iptvUrlTemplate
+                    if (template != null) {
+                        tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
+                    } else {
+                        logger.warn("Cannot reconstruct IPTV URL: template missing for content ${debridFileContents.iptvContentId}")
+                        return@flow
+                    }
+                } else {
+                    // Fallback for legacy records that still have full URL stored
+                    tokenizedUrl
+                }
+                
                 // Convert IptvFile to CachedFile for streaming
                 // Use dummy provider - will be handled specially in StreamingService
                 emit(io.skjaere.debridav.fs.CachedFile(
