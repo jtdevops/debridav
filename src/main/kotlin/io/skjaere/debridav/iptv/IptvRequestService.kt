@@ -200,24 +200,33 @@ class IptvRequestService(
         
         // Try to fetch actual file size from IPTV URL, fallback to estimated size
         logger.debug("Fetching file size for IPTV content - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
-        val fileSize = runBlocking {
+        val (fileSize, _) = runBlocking {
             fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
         }
         
-        // Extract base URL and suffix for URL template system
-        val (baseUrl, urlSuffix) = extractBaseUrlAndSuffix(resolvedUrl)
-        val urlTemplate = if (baseUrl.isNotEmpty()) {
-            getOrCreateUrlTemplate(providerName, baseUrl, iptvContent.contentType)
+        // Use resolvedUrl (configured base URL) as the base URL for template
+        // Use contentId from iptv_content table as the file suffix (e.g., "26684" for movies)
+        // Add file extension to the suffix
+        val urlSuffix = if (mediaExtension != null) {
+            "$contentId.$mediaExtension"
+        } else {
+            contentId
+        }
+        val urlTemplate = if (resolvedUrl.isNotEmpty()) {
+            getOrCreateUrlTemplate(providerName, resolvedUrl, iptvContent.contentType)
         } else {
             null
         }
+        
+        // Construct full URL from configured base URL + file suffix
+        val fullUrl = urlTemplate?.let { "${it.baseUrl}/$urlSuffix" } ?: resolvedUrl
         
         // Create DebridIptvContent entity
         val debridIptvContent = DebridIptvContent(
             originalPath = fileNameWithExtension,
             size = fileSize,
             modified = Instant.now().toEpochMilli(),
-            iptvUrl = resolvedUrl, // Keep for backward compatibility during migration
+            iptvUrl = fullUrl, // Use full URL constructed from configured base + suffix
             iptvProviderName = providerName,
             iptvContentId = contentId,
             mimeType = determineMimeType(fileNameWithExtension),
@@ -230,7 +239,7 @@ class IptvRequestService(
         debridIptvContent.iptvContentRefId = iptvContent.id
         
         // Create IptvFile link (use reconstructed URL from template)
-        val fullUrlForLink = urlTemplate?.let { "${it.baseUrl}/$urlSuffix" } ?: resolvedUrl
+        val fullUrlForLink = urlTemplate?.let { "${it.baseUrl}/$urlSuffix" } ?: fullUrl
         val iptvFile = IptvFile(
             path = fileNameWithExtension,
             size = fileSize,
@@ -484,24 +493,29 @@ class IptvRequestService(
             logger.debug("Fetching file size for IPTV episode - original URL: {}, episode URL: {}", iptvContent.url, episodeUrl)
             
             // Try to fetch actual file size from IPTV URL, fallback to estimated size
-            val episodeFileSize = runBlocking {
+            val (episodeFileSize, _) = runBlocking {
                 fetchActualFileSize(episodeUrl, ContentType.SERIES, providerName)
             }
             
-            // Extract base URL and suffix for URL template system
-            val (episodeBaseUrl, episodeUrlSuffix) = extractBaseUrlAndSuffix(episodeUrl)
-            val episodeUrlTemplate = if (episodeBaseUrl.isNotEmpty()) {
-                getOrCreateUrlTemplate(providerName, episodeBaseUrl, ContentType.SERIES)
+            // Use episodeUrl (configured base URL) as the base URL for template
+            // Use episode.id as the file suffix (e.g., "1688351" for episodes)
+            // Add file extension to the suffix
+            val episodeUrlSuffix = "${episode.id}.$mediaExtension"
+            val episodeUrlTemplate = if (episodeUrl.isNotEmpty()) {
+                getOrCreateUrlTemplate(providerName, episodeUrl, ContentType.SERIES)
             } else {
                 null
             }
+            
+            // Construct full URL from configured base URL + file suffix
+            val fullEpisodeUrl = episodeUrlTemplate?.let { "${it.baseUrl}/$episodeUrlSuffix" } ?: episodeUrl
             
             // Create DebridIptvContent entity for episode
             val debridIptvContent = DebridIptvContent(
                 originalPath = episodeTitle,
                 size = episodeFileSize,
                 modified = Instant.now().toEpochMilli(),
-                iptvUrl = episodeUrl, // Keep for backward compatibility during migration
+                iptvUrl = fullEpisodeUrl, // Use full URL constructed from configured base + suffix
                 iptvProviderName = providerName,
                 iptvContentId = "${seriesId}_${episode.id}", // Use series_id_episode_id as content ID
                 mimeType = determineMimeType(episodeTitle),
@@ -513,7 +527,7 @@ class IptvRequestService(
             debridIptvContent.iptvContentRefId = iptvContent.id
             
             // Create IptvFile link (use reconstructed URL from template)
-            val fullEpisodeUrlForLink = episodeUrlTemplate?.let { "${it.baseUrl}/$episodeUrlSuffix" } ?: episodeUrl
+            val fullEpisodeUrlForLink = episodeUrlTemplate?.let { "${it.baseUrl}/$episodeUrlSuffix" } ?: fullEpisodeUrl
             val iptvFile = IptvFile(
                 path = episodeTitle,
                 size = episodeFileSize,
@@ -844,9 +858,9 @@ class IptvRequestService(
      * @param url The resolved IPTV URL
      * @param contentType The content type (for fallback estimation)
      * @param providerName The IPTV provider name (for login call before fetching)
-     * @return The actual file size if available, otherwise estimated size
+     * @return Pair of (file size, final URL after redirects). Returns estimated size and original URL if request fails.
      */
-    private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Long {
+    private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
         // Make an initial login/test call to the provider before fetching file size
         // Rate limiting: shared across all services per provider
         if (providerName != null) {
@@ -941,7 +955,7 @@ class IptvRequestService(
                             } catch (e: Exception) {
                                 // Ignore errors when consuming response body
                             }
-                            return estimateIptvSize(contentType)
+                            return Pair(estimateIptvSize(contentType), redirectUrl)
                         }
                         
                         // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
@@ -958,7 +972,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                                return totalSize
+                                return Pair(totalSize, redirectUrl)
                             }
                         }
                         
@@ -971,10 +985,10 @@ class IptvRequestService(
                         }
                         if (contentLength != null && contentLength > 0) {
                             logger.debug("Retrieved actual file size from IPTV redirect URL Content-Length header: $contentLength bytes (redirectUrl: $redirectUrl)")
-                            return contentLength
+                            return Pair(contentLength, redirectUrl)
                         } else {
                             logger.debug("Content-Range and Content-Length headers not available for IPTV redirect URL, using estimated size (redirectUrl: $redirectUrl)")
-                            return estimateIptvSize(contentType)
+                            return Pair(estimateIptvSize(contentType), redirectUrl)
                         }
                     } else {
                         // No redirect location - fallback to estimated size
@@ -984,7 +998,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                        return estimateIptvSize(contentType)
+                        return Pair(estimateIptvSize(contentType), url)
                     }
                 }
                 
@@ -996,7 +1010,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                    return estimateIptvSize(contentType)
+                    return Pair(estimateIptvSize(contentType), url)
                 }
                 
                 // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
@@ -1013,7 +1027,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                        return totalSize
+                        return Pair(totalSize, url)
                     }
                 }
                 
@@ -1026,10 +1040,10 @@ class IptvRequestService(
                                 }
                 if (contentLength != null && contentLength > 0) {
                     logger.debug("Retrieved actual file size from IPTV URL Content-Length header: $contentLength bytes ($url)")
-                    return contentLength
+                    return Pair(contentLength, url)
                 } else {
                     logger.debug("Content-Range and Content-Length headers not available for IPTV URL, using estimated size ($url)")
-                    return estimateIptvSize(contentType)
+                    return Pair(estimateIptvSize(contentType), url)
                 }
             } catch (e: Exception) {
                 val isNetworkError = e.message?.contains("timeout", ignoreCase = true) == true ||
@@ -1047,7 +1061,7 @@ class IptvRequestService(
         }
         
         // Fallback to estimated size if all retries failed
-        return estimateIptvSize(contentType)
+        return Pair(estimateIptvSize(contentType), url)
     }
     
     /**
@@ -1148,7 +1162,7 @@ class IptvRequestService(
                 return oldFileSize
             }
             
-            val newFileSize = fetchActualFileSize(iptvUrl, contentType, providerName)
+            val (newFileSize, _) = fetchActualFileSize(iptvUrl, contentType, providerName)
             
             // Only update if we got a different size
             if (newFileSize != oldFileSize) {
@@ -1612,7 +1626,7 @@ class IptvRequestService(
                             if (episodeUrl != null) {
                                 try {
                                     logger.debug("File size not found in video tags or duration/bitrate for $episodeLabel, fetching from episode URL: ${episodeUrl.take(100)}")
-                                    val fetchedSize = runBlocking {
+                                    val (fetchedSize, _) = runBlocking {
                                         fetchActualFileSize(episodeUrl, ContentType.SERIES, entity.providerName)
                                     }
                                     // Only use if it's not the default estimated size
@@ -1718,7 +1732,7 @@ class IptvRequestService(
                                 if (episodeUrl != null) {
                                     try {
                                         logger.debug("File size not found in video tags or duration/bitrate for $requestedEpisodeLabel, fetching from episode URL: ${episodeUrl.take(100)}")
-                                        val fetchedSize = runBlocking {
+                                        val (fetchedSize, _) = runBlocking {
                                             fetchActualFileSize(episodeUrl, ContentType.SERIES, entity.providerName)
                                         }
                                         // Only use if it's not the default estimated size
