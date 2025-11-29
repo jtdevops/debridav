@@ -153,7 +153,9 @@ class DebridLinkService(
                 logger.error("Uncaught exception encountered while getting links", e)
             }
             .transformWhile { debridLink ->
-                if (debridLink !is NetworkError) {
+                // Don't update IPTV links - they're stable and don't change
+                val isIptvContent = debridFileContents is DebridIptvContent || debridLink.provider == DebridProvider.IPTV
+                if (debridLink !is NetworkError && !isIptvContent) {
                     updateContentsOfDebridFile(file, debridFileContents, debridLink)
                 }
                 if (debridLink is CachedFile) {

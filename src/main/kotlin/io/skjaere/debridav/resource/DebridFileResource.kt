@@ -116,7 +116,7 @@ class DebridFileResource(
                     if (isIptvContent) {
                         logger.debug("Streaming failed for IPTV file ${currentCachedFile.path}, skipping link refresh - IPTV links don't use debrid clients")
                         // For IPTV content, preserve the valid IptvFile and don't replace it with error types
-                        // Temporary network errors shouldn't overwrite valid link data
+                        // IPTV links are stable and don't change, so we shouldn't update them at all
                         val existingLinks = file.contents!!.debridLinks
                         val hasValidIptvFile = existingLinks.any { it is IptvFile }
                         
@@ -127,12 +127,8 @@ class DebridFileResource(
                             file.contents!!.replaceOrAddDebridLink(updatedDebridLink)
                             fileService.saveDbEntity(file)
                         } else {
-                            // Preserve the IptvFile - just update its lastChecked timestamp
-                            existingLinks.filterIsInstance<IptvFile>().firstOrNull()?.let { iptvFile ->
-                                iptvFile.lastChecked = Instant.now().toEpochMilli()
-                                fileService.saveDbEntity(file)
-                            }
-                            logger.debug("Preserved IptvFile for IPTV content despite streaming error - temporary network issues shouldn't overwrite valid links")
+                            // IPTV links are stable - don't update them at all, even on streaming errors
+                            logger.debug("Preserved IptvFile for IPTV content despite streaming error - IPTV links remain unchanged")
                         }
                     } else {
                         // Try to refresh the failed link and retry once
