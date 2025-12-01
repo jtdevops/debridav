@@ -1279,6 +1279,8 @@ class XtreamCodesClient(
         val director: String? = null,
         val genre: String? = null,
         val releaseDate: String? = null,
+        val release_date: String? = null,
+        val releasedate: String? = null, // Lowercase variant from API
         @Serializable(with = StringOrNumberSerializer::class)
         val rating: String? = null,
         val rating_5based: Double? = null,

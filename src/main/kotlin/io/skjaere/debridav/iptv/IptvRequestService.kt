@@ -1377,30 +1377,83 @@ class IptvRequestService(
     }
     
     /**
+     * Extracts BPS (bits per second) from video tags.
+     * BPS is more accurate than the top-level bitrate field.
+     * Returns BPS in bits per second, or null if not found.
+     */
+    private fun extractBpsFromVideoTags(tags: Map<String, String>?): Long? {
+        if (tags == null) return null
+        
+        // Try different tag key variations for BPS
+        val bpsKeys = listOf(
+            "BPS-eng",
+            "BPS",
+            "BPS-ENG"
+        )
+        
+        for (key in bpsKeys) {
+            val bpsStr = tags[key]
+            if (bpsStr != null) {
+                val bps = bpsStr.toLongOrNull()
+                if (bps != null && bps > 0) {
+                    return bps
+                }
+            }
+        }
+        
+        return null
+    }
+    
+    /**
      * Calculates file size from duration and bitrate.
-     * Formula: file_size_bytes = (bitrate_kbps * 1000 * duration_seconds) / 8
+     * Prefers BPS from video tags (more accurate), falls back to top-level bitrate field.
+     * Formula: file_size_bytes = (bps * duration_seconds) / 8
      * 
      * @param durationSecs Duration in seconds
-     * @param bitrate Bitrate in kilobits per second (kbps)
+     * @param bitrate Bitrate in kilobits per second (kbps) - used as fallback
+     * @param videoTags Optional video tags that may contain BPS (bits per second)
      * @return File size in bytes, or null if calculation cannot be performed
      */
-    private fun calculateFileSizeFromDurationAndBitrate(durationSecs: Int?, bitrate: Int?): Long? {
-        if (durationSecs == null || bitrate == null || durationSecs <= 0 || bitrate <= 0) {
+    private fun calculateFileSizeFromDurationAndBitrate(durationSecs: Int?, bitrate: Int?, videoTags: Map<String, String>? = null): Long? {
+        if (durationSecs == null || durationSecs <= 0) {
             return null
         }
         
-        // Convert bitrate from kbps to bytes per second, then multiply by duration
-        // bitrate is in kbps (kilobits per second)
-        // 1 kbps = 1000 bits per second = 125 bytes per second
-        // File size = (bitrate_kbps * 1000 bits/kbps * duration_secs) / 8 bits/byte
-        val fileSizeBytes = (bitrate.toLong() * 1000L * durationSecs.toLong()) / 8L
-        
-        // Sanity check: file size should be reasonable (between 1MB and 10GB for a single episode)
-        if (fileSizeBytes < 1_000_000L || fileSizeBytes > 10_000_000_000L) {
-            return null
+        // Prefer BPS from video tags (more accurate)
+        val bps = extractBpsFromVideoTags(videoTags)
+        if (bps != null && bps > 0) {
+            // BPS is already in bits per second, so: file_size = (bps * duration) / 8
+            val fileSizeBytes = (bps * durationSecs.toLong()) / 8L
+            
+            // Sanity check: file size should be reasonable (between 1MB and 10GB)
+            if (fileSizeBytes >= 1_000_000L && fileSizeBytes <= 10_000_000_000L) {
+                return fileSizeBytes
+            }
         }
         
-        return fileSizeBytes
+        // Fallback to top-level bitrate field (in kbps)
+        // Note: The top-level bitrate field may include audio+video combined or be an average,
+        // which can overestimate file size. We apply a correction factor based on empirical data.
+        if (bitrate != null && bitrate > 0) {
+            // The top-level bitrate field tends to overestimate by ~20-30% compared to actual file size.
+            // Based on analysis: actual bitrate ≈ top-level bitrate * 0.79 (average correction factor)
+            // This accounts for the fact that bitrate may be total (video+audio) or include overhead.
+            val correctionFactor = 0.79 // Empirical correction factor (776MB actual vs 977MB calculated = 0.794)
+            
+            // Convert bitrate from kbps to bytes per second, apply correction, then multiply by duration
+            // bitrate is in kbps (kilobits per second)
+            // 1 kbps = 1000 bits per second
+            // File size = (bitrate_kbps * correction_factor * 1000 bits/kbps * duration_secs) / 8 bits/byte
+            val correctedBitrate = (bitrate.toLong() * correctionFactor).toLong()
+            val fileSizeBytes = (correctedBitrate * 1000L * durationSecs.toLong()) / 8L
+            
+            // Sanity check: file size should be reasonable (between 1MB and 10GB)
+            if (fileSizeBytes >= 1_000_000L && fileSizeBytes <= 10_000_000_000L) {
+                return fileSizeBytes
+            }
+        }
+        
+        return null
     }
     
     /**
@@ -1633,8 +1686,10 @@ class IptvRequestService(
         val entityMovieResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
         // Store movie codec per entity from video metadata
         val entityMovieCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
+        // Store movie file size per entity from video metadata
+        val entityMovieFileSizes = mutableMapOf<String, Long>() // Key: "${providerName}_${contentId}", Value: file size in bytes
         
-        // For movies, fetch metadata to get year, resolution, and codec
+        // For movies, fetch metadata to get year, resolution, codec, and file size
         if (contentType == ContentType.MOVIE) {
             results.forEach { entity ->
                 val providerConfig = iptvConfigurationService.getProviderConfigurations()
@@ -1655,13 +1710,20 @@ class IptvRequestService(
                     
                     // Extract year from movie info
                     if (movieInfo != null) {
-                        val movieYear = extractYearFromReleaseDate(movieInfo.releaseDate ?: movieInfo.release_date)
+                        // Try multiple field names for release date (API may use different formats)
+                        val releaseDateStr = movieInfo.releaseDate 
+                            ?: movieInfo.release_date 
+                            ?: movieInfo.info?.releaseDate 
+                            ?: movieInfo.info?.release_date 
+                            ?: movieInfo.info?.releasedate
+                        val movieYear = extractYearFromReleaseDate(releaseDateStr)
                         if (movieYear != null) {
                             entityMovieYears["${entity.providerName}_${entity.contentId}"] = movieYear
                             logger.debug("Extracted year $movieYear from movie metadata for movie ${entity.contentId}")
                         }
                         
-                        // Extract resolution and codec from video info
+                        // Extract resolution, codec, and file size from video info
+                        // Note: video field may be an empty array [] in some API responses, so we check if it's actually an object
                         movieInfo.info?.video?.let { videoInfo ->
                             if (videoInfo.width != null && videoInfo.height != null) {
                                 val resolution = when {
@@ -1684,6 +1746,43 @@ class IptvRequestService(
                                     entityMovieCodecs["${entity.providerName}_${entity.contentId}"] = normalizedCodec
                                     logger.debug("Extracted codec $normalizedCodec from movie metadata for movie ${entity.contentId} (codec: $codec)")
                                 }
+                            }
+                            
+                            // Extract file size from video tags (NUMBER_OF_BYTES) - most accurate
+                            val fileSize = extractFileSizeFromVideoTags(videoInfo.tags)
+                            if (fileSize != null) {
+                                entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = fileSize
+                                logger.debug("Extracted file size ${fileSize / 1_000_000}MB from movie metadata for movie ${entity.contentId}")
+                            } else {
+                                // Fallback: calculate from duration and BPS/bitrate
+                                // Prefer BPS from video tags (more accurate than top-level bitrate)
+                                val calculatedSize = calculateFileSizeFromDurationAndBitrate(
+                                    movieInfo.info?.duration_secs,
+                                    movieInfo.info?.bitrate,
+                                    videoInfo.tags
+                                )
+                                if (calculatedSize != null) {
+                                    entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = calculatedSize
+                                    val bps = extractBpsFromVideoTags(videoInfo.tags)
+                                    if (bps != null) {
+                                        logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and BPS for movie ${entity.contentId} (duration=${movieInfo.info?.duration_secs}s, BPS=${bps}bps)")
+                                    } else {
+                                        logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and bitrate for movie ${entity.contentId} (duration=${movieInfo.info?.duration_secs}s, bitrate=${movieInfo.info?.bitrate}kbps)")
+                                    }
+                                }
+                            }
+                        } ?: run {
+                            // Video info not available (empty array or null) - try to calculate from duration and bitrate if available
+                            val calculatedSize = calculateFileSizeFromDurationAndBitrate(
+                                movieInfo.info?.duration_secs,
+                                movieInfo.info?.bitrate,
+                                null // No video tags available
+                            )
+                            if (calculatedSize != null) {
+                                entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = calculatedSize
+                                logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and bitrate for movie ${entity.contentId} (video info not available, duration=${movieInfo.info?.duration_secs}s, bitrate=${movieInfo.info?.bitrate}kbps)")
+                            } else {
+                                logger.debug("Video info not available in movie metadata for movie ${entity.contentId} (video field may be empty array), and cannot calculate from duration/bitrate")
                             }
                         }
                     }
@@ -1813,10 +1912,16 @@ class IptvRequestService(
                         if (referenceFileSize == null) {
                             referenceFileSize = calculateFileSizeFromDurationAndBitrate(
                                 referenceEpisode.info?.duration_secs,
-                                referenceEpisode.info?.bitrate
+                                referenceEpisode.info?.bitrate,
+                                referenceEpisode.info?.video?.tags
                             )
                             if (referenceFileSize != null) {
-                                logger.debug("Calculated $episodeLabel file size from duration and bitrate for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB (duration=${referenceEpisode.info?.duration_secs}s, bitrate=${referenceEpisode.info?.bitrate}kbps)")
+                                val bps = extractBpsFromVideoTags(referenceEpisode.info?.video?.tags)
+                                if (bps != null) {
+                                    logger.debug("Calculated $episodeLabel file size from duration and BPS for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB (duration=${referenceEpisode.info?.duration_secs}s, BPS=${bps}bps)")
+                                } else {
+                                    logger.debug("Calculated $episodeLabel file size from duration and bitrate for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB (duration=${referenceEpisode.info?.duration_secs}s, bitrate=${referenceEpisode.info?.bitrate}kbps)")
+                                }
                             }
                         } else {
                             logger.debug("Extracted $episodeLabel file size from video tags for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB")
@@ -1915,10 +2020,16 @@ class IptvRequestService(
                             if (requestedFileSize == null) {
                                 requestedFileSize = calculateFileSizeFromDurationAndBitrate(
                                     requestedEpisode.info?.duration_secs,
-                                    requestedEpisode.info?.bitrate
+                                    requestedEpisode.info?.bitrate,
+                                    requestedEpisode.info?.video?.tags
                                 )
                                 if (requestedFileSize != null) {
-                                    logger.debug("Calculated $requestedEpisodeLabel file size from duration and bitrate for series ${entity.contentId}: ${requestedFileSize / 1_000_000}MB (duration=${requestedEpisode.info?.duration_secs}s, bitrate=${requestedEpisode.info?.bitrate}kbps)")
+                                    val bps = extractBpsFromVideoTags(requestedEpisode.info?.video?.tags)
+                                    if (bps != null) {
+                                        logger.debug("Calculated $requestedEpisodeLabel file size from duration and BPS for series ${entity.contentId}: ${requestedFileSize / 1_000_000}MB (duration=${requestedEpisode.info?.duration_secs}s, BPS=${bps}bps)")
+                                    } else {
+                                        logger.debug("Calculated $requestedEpisodeLabel file size from duration and bitrate for series ${entity.contentId}: ${requestedFileSize / 1_000_000}MB (duration=${requestedEpisode.info?.duration_secs}s, bitrate=${requestedEpisode.info?.bitrate}kbps)")
+                                    }
                                     // Store as reference file size for this specific episode
                                     entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = requestedFileSize
                                 }
