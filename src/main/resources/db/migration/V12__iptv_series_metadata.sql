@@ -9,6 +9,7 @@ CREATE TABLE iptv_series_metadata
     series_id     VARCHAR(512) NOT NULL,
     response_json TEXT NOT NULL,
     last_accessed TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+    last_fetch    TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     created_at    TIMESTAMP WITHOUT TIME ZONE NOT NULL,
     CONSTRAINT pk_iptv_series_metadata PRIMARY KEY (id)
 );
@@ -16,6 +17,7 @@ CREATE TABLE iptv_series_metadata
 -- Indexes for efficient lookups and purging
 CREATE INDEX idx_iptv_series_metadata_provider_series ON iptv_series_metadata (provider_name, series_id);
 CREATE INDEX idx_iptv_series_metadata_last_accessed ON iptv_series_metadata (last_accessed);
+CREATE INDEX idx_iptv_series_metadata_last_fetch ON iptv_series_metadata (last_fetch);
 
 -- Unique constraint on provider_name + series_id
 ALTER TABLE iptv_series_metadata

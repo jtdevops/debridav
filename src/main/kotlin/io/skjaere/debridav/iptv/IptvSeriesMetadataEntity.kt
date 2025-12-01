@@ -38,6 +38,9 @@ open class IptvSeriesMetadataEntity {
     @Column(name = "last_accessed", nullable = false)
     open var lastAccessed: Instant = Instant.now()
     
+    @Column(name = "last_fetch", nullable = false)
+    open var lastFetch: Instant = Instant.now()
+    
     @Column(name = "created_at", nullable = false)
     open var createdAt: Instant = Instant.now()
 }

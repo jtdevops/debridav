@@ -303,17 +303,49 @@ class IptvRequestService(
         // Try to get episodes from cache first
         val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
         val (seriesInfo, episodes) = if (cachedMetadata != null) {
-            // Check if cache is still valid (not expired)
-            val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
-            if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
-                logger.debug("Using cached episodes for series $seriesId (cache age: ${cacheAge.toHours()} hours)")
+            // Parse from cached JSON response to check if requested season exists
+            logger.debug("Parsing episodes from cached JSON response for series $seriesId")
+            val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, seriesId, cachedMetadata.responseJson)
+            
+            // Check if requested season exists in cache
+            val shouldRefetch = if (requestedSeason != null) {
+                val seasonExists = cachedEpisodes.any { it.season == requestedSeason }
+                if (!seasonExists) {
+                    // Requested season not in cache, only refetch if last_fetch > 24 hours
+                    val timeSinceLastFetch = java.time.Duration.between(cachedMetadata.lastFetch, java.time.Instant.now())
+                    val hoursSinceLastFetch = timeSinceLastFetch.toHours()
+                    if (hoursSinceLastFetch >= 24) {
+                        logger.debug("Requested season $requestedSeason not found in cache for series $seriesId, and last fetch was ${hoursSinceLastFetch} hours ago. Refetching metadata.")
+                        true
+                    } else {
+                        logger.debug("Requested season $requestedSeason not found in cache for series $seriesId, but last fetch was only ${hoursSinceLastFetch} hours ago. Using cached data to prevent constant refetching.")
+                        false
+                    }
+                } else {
+                    // Season exists in cache, use cache (don't refetch)
+                    logger.debug("Requested season $requestedSeason found in cache for series $seriesId. Using cached data.")
+                    false
+                }
+            } else {
+                // No specific season requested, check if cache is still valid (not expired)
+                val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
+                if (cacheAge >= iptvConfigurationProperties.seriesMetadataCacheTtl) {
+                    logger.debug("Cache expired for series $seriesId (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
+                    true
+                } else {
+                    false
+                }
+            }
+            
+            if (shouldRefetch) {
+                // Refetch metadata
+                fetchAndCacheEpisodes(providerConfig, providerName, seriesId)
+            } else {
+                // Use cached data
+                logger.debug("Using cached episodes for series $seriesId")
                 // Update last accessed time
                 cachedMetadata.lastAccessed = java.time.Instant.now()
                 iptvSeriesMetadataRepository.save(cachedMetadata)
-                
-                // Parse from cached JSON response
-                logger.debug("Parsing episodes from cached JSON response for series $seriesId")
-                val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, seriesId, cachedMetadata.responseJson)
                 
                 // Log cached episode details at DEBUG level - filter by requested season if provided
                 val episodesToLog = if (requestedSeason != null) {
@@ -329,10 +361,6 @@ class IptvRequestService(
                     logger.debug("  Episode: id=${ep.id}, title='${ep.title}', season=${ep.season}, episode=${ep.episode}, extension=${ep.container_extension ?: "mp4"}")
                 }
                 Pair(cachedSeriesInfo, cachedEpisodes)
-            } else {
-                logger.debug("Cache expired for series $seriesId (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
-                // Cache expired, fetch fresh data
-                fetchAndCacheEpisodes(providerConfig, providerName, seriesId)
             }
         } else {
             // No cache, fetch and store
@@ -609,15 +637,18 @@ class IptvRequestService(
             }
             
             // Save or update cache with raw JSON response
+            val now = java.time.Instant.now()
             val metadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(providerName, seriesId)
                 ?: IptvSeriesMetadataEntity().apply {
                     this.providerName = providerName
                     this.seriesId = seriesId
-                    this.createdAt = java.time.Instant.now()
+                    this.createdAt = now
+                    this.lastFetch = now
                 }
             
             metadata.responseJson = responseJson
-            metadata.lastAccessed = java.time.Instant.now()
+            metadata.lastAccessed = now
+            metadata.lastFetch = now
             iptvSeriesMetadataRepository.save(metadata)
             logger.debug("Cached raw JSON response for series $seriesId (${episodes.size} episodes)")
         }
@@ -1510,25 +1541,54 @@ class IptvRequestService(
                     val (seriesInfo, episodes) = try {
                         val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(entity.providerName, entity.contentId)
                         if (cachedMetadata != null) {
-                            val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
-                            if (cacheAge < iptvConfigurationProperties.seriesMetadataCacheTtl) {
-                                logger.debug("Using cached episodes for series ${entity.contentId} during search (cache age: ${cacheAge.toHours()} hours)")
-                                
+                            // Parse from cached JSON response to check if requested season exists
+                            logger.debug("Parsing episodes from cached JSON response for series ${entity.contentId}")
+                            val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                            
+                            // Check if requested season exists in cache
+                            val shouldRefetch = if (requestedSeason != null) {
+                                val seasonExists = cachedEpisodes.any { it.season == requestedSeason }
+                                if (!seasonExists) {
+                                    // Requested season not in cache, only refetch if last_fetch > 24 hours
+                                    val timeSinceLastFetch = java.time.Duration.between(cachedMetadata.lastFetch, java.time.Instant.now())
+                                    val hoursSinceLastFetch = timeSinceLastFetch.toHours()
+                                    if (hoursSinceLastFetch >= 24) {
+                                        logger.debug("Requested season $requestedSeason not found in cache for series ${entity.contentId} during search, and last fetch was ${hoursSinceLastFetch} hours ago. Refetching metadata.")
+                                        true
+                                    } else {
+                                        logger.debug("Requested season $requestedSeason not found in cache for series ${entity.contentId} during search, but last fetch was only ${hoursSinceLastFetch} hours ago. Using cached data to prevent constant refetching.")
+                                        false
+                                    }
+                                } else {
+                                    // Season exists in cache, use cache (don't refetch)
+                                    logger.debug("Requested season $requestedSeason found in cache for series ${entity.contentId} during search. Using cached data.")
+                                    false
+                                }
+                            } else {
+                                // No specific season requested, check if cache is still valid (not expired)
+                                val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
+                                if (cacheAge >= iptvConfigurationProperties.seriesMetadataCacheTtl) {
+                                    logger.debug("Cache expired for series ${entity.contentId} during search (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            
+                            if (shouldRefetch) {
+                                // Refetch metadata
+                                fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
+                            } else {
+                                // Use cached data
+                                logger.debug("Using cached episodes for series ${entity.contentId} during search")
                                 // Update last accessed time before using cached data
                                 cachedMetadata.lastAccessed = java.time.Instant.now()
                                 iptvSeriesMetadataRepository.save(cachedMetadata)
-                                
-                                // Parse from cached JSON response
-                                logger.debug("Parsing episodes from cached JSON response for series ${entity.contentId}")
-                                val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
                                 
                                 if (cachedSeriesInfo != null) {
                                     logger.debug("Retrieved series info from cache: name='${cachedSeriesInfo.name}', releaseDate='${cachedSeriesInfo.releaseDate}', release_date='${cachedSeriesInfo.release_date}'")
                                 }
                                 Pair(cachedSeriesInfo, cachedEpisodes)
-                            } else {
-                                // Cache expired, fetch fresh
-                                fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
                             }
                         } else {
                             // No cache, fetch fresh
