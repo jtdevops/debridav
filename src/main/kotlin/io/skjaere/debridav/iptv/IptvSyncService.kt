@@ -154,6 +154,8 @@ class IptvSyncService(
                     val hashCheckResult = checkM3uHashChanged(providerConfig)
                     if (!hashCheckResult.shouldSync) {
                         logger.info("Content hash unchanged for provider ${providerConfig.name}, skipping sync")
+                        // Mark sync as completed since hash check was successful
+                        markSyncCompleted(providerConfig.name, providerConfig.type)
                         return
                     }
                     fetchM3uContent(providerConfig)
@@ -168,6 +170,8 @@ class IptvSyncService(
             if (contentItems.isEmpty()) {
                 // For Xtream Codes, this means all endpoints were unchanged (already logged)
                 // For M3U, this shouldn't happen as we check hash before fetching
+                // Mark sync as completed since all endpoints were checked successfully
+                markSyncCompleted(providerConfig.name, providerConfig.type)
                 return
             }
             
