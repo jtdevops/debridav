@@ -2180,34 +2180,75 @@ class IptvRequestService(
     }
     
     /**
-     * Checks if the IPTV content title starts with any configured language prefix.
-     * If not, extracts the language code from the beginning of the title.
+     * Extracts language code/prefix from IPTV content title if it's not in the configured language prefixes.
      * 
-     * Language code format: uppercase letters followed by '|' or '-' (e.g., "NL| ", "NL- ")
+     * If the title starts with a configured language prefix (e.g., "EN| ", "007 - ", "4K-A+| "), 
+     * this method returns null because configured prefixes indicate English content.
      * 
-     * @param iptvContentTitle The IPTV content title (e.g., "NL| The Breakfast Club")
-     * @return The uppercase language code if not in configured prefixes, null otherwise
+     * If the title starts with a prefix that's NOT in the configured list (e.g., "NL| ", "DE- "),
+     * this method extracts and returns that prefix to be added to the magnet filename.
+     * 
+     * Prefix patterns: any text followed by '| ', '- ', or ' - ' (e.g., "NL| ", "007- ", "4K-A+ - ")
+     * 
+     * @param iptvContentTitle The IPTV content title (e.g., "NL| The Breakfast Club" or "007 - Movie Title")
+     * @return The extracted prefix if not in configured prefixes, null if it's a configured prefix (English)
      */
     private fun extractLanguageCodeIfNotInPrefixes(iptvContentTitle: String): String? {
-        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        val expandedPrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
+        val basePrefixes = iptvConfigurationProperties.baseLanguagePrefixes
+        val expansionSeparators = iptvConfigurationProperties.languagePrefixExpansionSeparators
         
-        // Check if title starts with any configured prefix (after stripping quotes)
-        val startsWithConfiguredPrefix = languagePrefixes.any { prefix ->
+        // Check if title starts with any configured expanded prefix (after stripping quotes)
+        val startsWithConfiguredPrefix = expandedPrefixes.any { prefix ->
             val cleanedPrefix = stripQuotes(prefix)
             iptvContentTitle.startsWith(cleanedPrefix, ignoreCase = false)
         }
         
-        // If it starts with a configured prefix, don't extract language code
+        // If it starts with a configured prefix, don't extract language code (it's English content)
         if (startsWithConfiguredPrefix) {
             return null
         }
         
-        // Extract language code from the beginning of the title
-        // Pattern: uppercase letters followed by '|' or '-' and optional space
-        val languagePattern = Regex("^([A-Z]{2,})\\s*[|\\-]\\s*")
+        // Extract prefix from the beginning of the title using expansion separator patterns
+        // Try each separator pattern and extract the prefix part
+        for (separator in expansionSeparators) {
+            if (iptvContentTitle.startsWith(separator, ignoreCase = false)) {
+                // Title starts with separator only, no prefix
+                continue
+            }
+            
+            // Check if title starts with something followed by this separator
+            val separatorIndex = iptvContentTitle.indexOf(separator)
+            if (separatorIndex > 0) {
+                val extractedPrefix = iptvContentTitle.substring(0, separatorIndex).trim()
+                
+                // Check if this extracted prefix is in the configured base prefixes
+                // If yes, it's English content (should have been caught above, but double-check)
+                if (extractedPrefix in basePrefixes) {
+                    return null
+                }
+                
+                // If not in configured prefixes, return it to be added to magnet filename
+                if (extractedPrefix.isNotEmpty()) {
+                    return extractedPrefix.uppercase()
+                }
+            }
+        }
+        
+        // Fallback: try to extract using regex pattern for backward compatibility
+        // Pattern: any characters followed by '|' or '-' and optional space
+        val languagePattern = Regex("^([^|\\-]+?)\\s*[|\\-]\\s+")
         val match = languagePattern.find(iptvContentTitle)
         
-        return match?.groupValues?.get(1)?.uppercase()
+        if (match != null) {
+            val extractedPrefix = match.groupValues[1].trim().uppercase()
+            // Check if it's in configured prefixes
+            if (extractedPrefix !in basePrefixes && extractedPrefix.isNotEmpty()) {
+                return extractedPrefix
+            }
+        }
+        
+        return null
     }
     
     /**
@@ -2215,7 +2256,7 @@ class IptvRequestService(
      * This ensures that titles like "EN - Titanic (1997)" become "Titanic (1997)".
      */
     private fun removeLanguagePrefixes(title: String): String {
-        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        val languagePrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
         
         // Try each configured prefix and remove the first matching one
         for (prefix in languagePrefixes) {

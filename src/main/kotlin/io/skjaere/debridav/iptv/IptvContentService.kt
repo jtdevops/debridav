@@ -21,10 +21,12 @@ class IptvContentService(
 
     @PostConstruct
     fun logLanguagePrefixes() {
-        val prefixes = iptvConfigurationProperties.languagePrefixes
-        if (prefixes.isNotEmpty()) {
-            logger.info("IPTV language prefixes configured: $prefixes (count: ${prefixes.size})")
-            prefixes.forEachIndexed { index, prefix ->
+        val originalPrefixes = iptvConfigurationProperties.languagePrefixes
+        val expandedPrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
+        if (originalPrefixes.isNotEmpty()) {
+            logger.info("IPTV language prefixes configured: $originalPrefixes (count: ${originalPrefixes.size})")
+            logger.info("Expanded language prefixes: $expandedPrefixes (count: ${expandedPrefixes.size})")
+            originalPrefixes.forEachIndexed { index, prefix ->
                 val cleaned = stripQuotes(prefix)
                 logger.info("  [$index] Original: '$prefix' -> Cleaned: '$cleaned'")
             }
@@ -42,57 +44,7 @@ class IptvContentService(
         // Create a map of provider name to priority for sorting results
         val providerPriorityMap = configuredProviders.associate { it.name to it.priority }
         
-        // Try language prefixes first if configured
-        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
-        logger.debug("Configured language prefixes: $languagePrefixes (count: ${languagePrefixes.size})")
-        
-        if (languagePrefixes.isNotEmpty()) {
-            for (prefix in languagePrefixes) {
-                val cleanedPrefix = stripQuotes(prefix)
-                
-                // Try the title as-is first
-                val titleVariations = mutableListOf(title)
-                
-                // Only add article variations if useArticleVariations is true
-                // This handles cases where IPTV content has "The Breakfast Club" but search query is "Breakfast Club"
-                // Skip article variations when metadata is provided (e.g., from IMDB ID) as it should be accurate
-                if (useArticleVariations && !title.matches(Regex("^(?i)(the|a|an)\\s+.*"))) {
-                    titleVariations.add("The $title")
-                    titleVariations.add("A $title")
-                    titleVariations.add("An $title")
-                }
-                
-                for (titleVariation in titleVariations) {
-                    val prefixedTitle = normalizeTitle("$cleanedPrefix$titleVariation")
-                    logger.debug("Trying prefix '$cleanedPrefix' (original: '$prefix') with title '$titleVariation' -> normalized: '$prefixedTitle'")
-                    
-                    // Use word boundary matching to prevent partial word matches
-                    val prefixedResults = if (contentType != null) {
-                        iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(prefixedTitle, contentType)
-                    } else {
-                        iptvContentRepository.findByNormalizedTitleWordBoundary(prefixedTitle)
-                    }
-                    
-                    val filteredPrefixedResults = prefixedResults.filter { it.providerName in configuredProviderNames }
-                    
-                    logger.debug("Prefix '$cleanedPrefix' with title '$titleVariation' returned ${filteredPrefixedResults.size} results (before filtering: ${prefixedResults.size})")
-                    
-                    if (filteredPrefixedResults.isNotEmpty()) {
-                        logger.debug("Found ${filteredPrefixedResults.size} results with prefix '$cleanedPrefix' for title '$titleVariation', returning early")
-                        // Filter by year if provided, then filter spin-offs, then sort by relevance and provider priority
-                        // Use original normalized title (without prefix) for scoring relevance
-                        val yearFiltered = filterByYear(filteredPrefixedResults, year)
-                        val spinOffFiltered = filterSpinOffs(yearFiltered, normalizedTitle)
-                        return sortByRelevanceAndProviderPriority(spinOffFiltered, normalizedTitle, year, providerPriorityMap)
-                    }
-                }
-            }
-            logger.debug("No results found with any language prefix, falling back to search without prefix")
-        } else {
-            logger.debug("No language prefixes configured, searching without prefix")
-        }
-        
-        // Fallback to search without prefix - search by title only (year excluded from search)
+        // Search by title only (year excluded from search)
         // First try word boundary matching to prevent partial word matches (e.g., "twister" won't match "twisters")
         val results = mutableListOf<IptvContentEntity>()
         
@@ -357,7 +309,7 @@ class IptvContentService(
      */
     private fun removeLanguagePrefixesForSpinOffCheck(title: String): String {
         // First try configured language prefixes
-        val languagePrefixes = iptvConfigurationProperties.languagePrefixes
+        val languagePrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
         for (prefix in languagePrefixes) {
             val cleanedPrefix = stripQuotes(prefix)
             if (title.startsWith(cleanedPrefix, ignoreCase = false)) {
