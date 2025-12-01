@@ -583,6 +583,105 @@ class XtreamCodesClient(
     }
 
     /**
+     * Gets movie info from the Xtream Codes provider using get_vod_info API
+     * Returns the movie info for the given vod_id
+     * Uses local file caching if configured (files named: {provider}_movie_info_{vodId}.json)
+     */
+    suspend fun getMovieInfo(providerConfig: IptvProviderConfiguration, vodId: String, cachedJson: String? = null): MovieInfo? {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
+        val username = providerConfig.xtreamUsername ?: return null
+        val password = providerConfig.xtreamPassword ?: return null
+        
+        try {
+            val apiUrl = "$baseUrl/player_api.php"
+            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+            
+            // Try to load from local file cache first (if configured)
+            val responseType = "movie_info_$vodId"
+            val responseBody = if (useLocal) {
+                logger.debug("Checking for local cached file for movie $vodId from provider ${providerConfig.name}")
+                responseFileService.loadResponse(providerConfig, responseType, logNotFound = false)
+                    ?: run {
+                        logger.debug("Local response file not found for movie $vodId, will fetch from API")
+                        null
+                    }
+            } else {
+                null
+            }
+            
+            val finalResponseBody = cachedJson ?: responseBody ?: run {
+                val movieInfoRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_vod_info&vod_id=$vodId"
+                logger.debug("Fetching movie info from Xtream Codes provider ${providerConfig.name}: $movieInfoRequestUrl")
+                
+                val response: HttpResponse = httpClient.get(apiUrl) {
+                    parameter("username", username)
+                    parameter("password", password)
+                    parameter("action", "get_vod_info")
+                    parameter("vod_id", vodId)
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
+                }
+                
+                logger.debug("Received response status ${response.status} for movie info request")
+                
+                if (response.status != HttpStatusCode.OK) {
+                    logger.error("Failed to fetch movie info from Xtream Codes: ${response.status}")
+                    return null
+                }
+                
+                val body = response.body<String>()
+                
+                // Save response to local file if configured
+                if (responseFileService.shouldSaveResponses()) {
+                    responseFileService.saveResponse(providerConfig, responseType, body)
+                }
+                
+                body
+            }
+            
+            if (cachedJson != null) {
+                logger.debug("Using cached JSON response for movie $vodId (length: ${cachedJson.length} characters)")
+            }
+            
+            logger.debug("Parsing movie info response (length: ${finalResponseBody.length} characters)")
+            
+            // The response structure can vary:
+            // Format 1: { "movie_data": { "name": "...", "info": {...} } }
+            // Format 2: { "info": { "name": "...", ... } }
+            // Format 3: Direct MovieInfo object
+            return try {
+                // Try wrapped format first
+                val movieInfoResponse = json.decodeFromString<MovieInfoResponseWrapper>(finalResponseBody)
+                val movieInfo = movieInfoResponse.movie_data ?: movieInfoResponse.info
+                if (movieInfo != null) {
+                    logger.debug("Successfully parsed movie info for movie $vodId: name='${movieInfo.name}', releaseDate='${movieInfo.releaseDate}', release_date='${movieInfo.release_date}'")
+                }
+                movieInfo
+            } catch (e: Exception) {
+                // Try direct MovieInfo format
+                try {
+                    val movieInfo = json.decodeFromString<MovieInfo>(finalResponseBody)
+                    logger.debug("Successfully parsed movie info (direct format) for movie $vodId: name='${movieInfo.name}', releaseDate='${movieInfo.releaseDate}', release_date='${movieInfo.release_date}'")
+                    movieInfo
+                } catch (e2: Exception) {
+                    logger.error("Failed to parse movie info response for movie $vodId: ${e2.message}", e2)
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("Error fetching movie info from Xtream Codes provider ${providerConfig.name} for vod_id=$vodId", e)
+            return null
+        }
+    }
+
+    /**
      * Gets series episodes and info from the Xtream Codes provider using get_series_info API
      * Returns a Pair containing the series info and a list of episodes for the given series_id
      * Uses local file caching if configured (files named: {provider}_series_info_{seriesId}.json)
@@ -1163,6 +1262,36 @@ class XtreamCodesClient(
     private data class SeriesInfoResponseWrapper(
         val info: SeriesInfo? = null,
         val episodes: Map<String, List<XtreamSeriesEpisodeRaw>>? = null
+    )
+    
+    @Serializable
+    data class MovieInfo(
+        val name: String? = null,
+        val releaseDate: String? = null,
+        val release_date: String? = null,
+        val info: XtreamMovieInfo? = null
+    )
+    
+    @Serializable
+    data class XtreamMovieInfo(
+        val plot: String? = null,
+        val cast: String? = null,
+        val director: String? = null,
+        val genre: String? = null,
+        val releaseDate: String? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
+        val rating: String? = null,
+        val rating_5based: Double? = null,
+        val duration: String? = null,
+        val duration_secs: Int? = null,
+        val video: XtreamVideoInfo? = null,
+        val bitrate: Int? = null
+    )
+    
+    @Serializable
+    private data class MovieInfoResponseWrapper(
+        val movie_data: MovieInfo? = null,
+        val info: MovieInfo? = null
     )
 }
 

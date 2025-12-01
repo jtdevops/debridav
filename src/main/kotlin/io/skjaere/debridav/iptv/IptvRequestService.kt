@@ -40,6 +40,7 @@ class IptvRequestService(
     private val iptvConfigurationService: IptvConfigurationService,
     private val iptvConfigurationProperties: io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties,
     private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
+    private val iptvMovieMetadataRepository: IptvMovieMetadataRepository,
     private val httpClient: HttpClient,
     private val responseFileService: IptvResponseFileService,
     private val iptvLoginRateLimitService: IptvLoginRateLimitService,
@@ -103,6 +104,20 @@ class IptvRequestService(
                 return handleSeriesContent(iptvContent, providerName, category, seriesId, magnetTitle, season, episode)
             } else {
                 logger.debug("Series content detected but provider $providerName is not Xtream Codes, treating as regular content")
+            }
+        }
+        
+        // For Xtream Codes movies, fetch metadata using get_vod_info API
+        if (iptvContent.contentType == ContentType.MOVIE) {
+            // Check if provider is Xtream Codes
+            val providerConfig = iptvConfigurationService.getProviderConfigurations()
+                .find { it.name == providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+            
+            if (providerConfig != null) {
+                // For Xtream Codes movies, contentId is the vod_id (stored in database)
+                val vodId = contentId
+                logger.info("Detected Xtream Codes movie, fetching metadata via get_vod_info API: vodId=$vodId, contentId=$contentId, title=${iptvContent.title}")
+                fetchAndCacheMovieMetadata(providerConfig, providerName, vodId)
             }
         }
         
@@ -654,6 +669,90 @@ class IptvRequestService(
         }
         
         return Pair(seriesInfo, episodes)
+    }
+    
+    /**
+     * Fetches movie metadata from API and caches it in the database
+     */
+    private fun fetchAndCacheMovieMetadata(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        providerName: String,
+        vodId: String
+    ): io.skjaere.debridav.iptv.client.XtreamCodesClient.MovieInfo? {
+        // Fetch the raw JSON response first
+        val responseJson = runBlocking {
+            val apiUrl = "${providerConfig.xtreamBaseUrl}/player_api.php"
+            try {
+                val response = httpClient.get(apiUrl) {
+                    parameter("username", providerConfig.xtreamUsername ?: "")
+                    parameter("password", providerConfig.xtreamPassword ?: "")
+                    parameter("action", "get_vod_info")
+                    parameter("vod_id", vodId)
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    }
+                }
+                if (response.status.isSuccess()) {
+                    response.body<String>()
+                } else {
+                    logger.error("Failed to fetch movie metadata: ${response.status}")
+                    null
+                }
+            } catch (e: Exception) {
+                logger.error("Error fetching movie metadata JSON: ${e.message}", e)
+                null
+            }
+        }
+        
+        if (responseJson == null) {
+            return null
+        }
+        
+        // Parse the JSON response
+        val movieInfo = parseMovieInfoFromJson(providerConfig, vodId, responseJson)
+        
+        if (movieInfo != null) {
+            logger.debug("Fetched movie metadata for movie $vodId")
+            if (movieInfo.name != null) {
+                logger.debug("Movie info: name='${movieInfo.name}', releaseDate='${movieInfo.releaseDate}', release_date='${movieInfo.release_date}'")
+            }
+            
+            // Save or update cache with raw JSON response
+            val now = java.time.Instant.now()
+            val metadata = iptvMovieMetadataRepository.findByProviderNameAndMovieId(providerName, vodId)
+                ?: IptvMovieMetadataEntity().apply {
+                    this.providerName = providerName
+                    this.movieId = vodId
+                    this.createdAt = now
+                    this.lastFetch = now
+                }
+            
+            metadata.responseJson = responseJson
+            metadata.lastAccessed = now
+            metadata.lastFetch = now
+            iptvMovieMetadataRepository.save(metadata)
+            logger.debug("Cached raw JSON response for movie $vodId")
+        }
+        
+        return movieInfo
+    }
+    
+    /**
+     * Parses movie info from JSON response
+     */
+    private fun parseMovieInfoFromJson(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        vodId: String,
+        responseJson: String
+    ): io.skjaere.debridav.iptv.client.XtreamCodesClient.MovieInfo? {
+        return runBlocking {
+            try {
+                xtreamCodesClient.getMovieInfo(providerConfig, vodId, cachedJson = responseJson)
+            } catch (e: Exception) {
+                logger.error("Error parsing movie info from JSON for movie $vodId: ${e.message}", e)
+                null
+            }
+        }
     }
     
     /**
@@ -1528,6 +1627,69 @@ class IptvRequestService(
         val entityResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
         // Store codec per entity from reference episode video metadata
         val entityCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
+        // Store movie year from info per entity for magnet title
+        val entityMovieYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: movie year from info
+        // Store movie resolution per entity from video metadata
+        val entityMovieResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
+        // Store movie codec per entity from video metadata
+        val entityMovieCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
+        
+        // For movies, fetch metadata to get year, resolution, and codec
+        if (contentType == ContentType.MOVIE) {
+            results.forEach { entity ->
+                val providerConfig = iptvConfigurationService.getProviderConfigurations()
+                    .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+                
+                if (providerConfig != null) {
+                    // Try to get from cache first
+                    val cachedMetadata = iptvMovieMetadataRepository.findByProviderNameAndMovieId(entity.providerName, entity.contentId)
+                    val movieInfo = if (cachedMetadata != null) {
+                        // Parse from cached JSON response
+                        logger.debug("Parsing movie metadata from cached JSON response for movie ${entity.contentId}")
+                        parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                    } else {
+                        // No cache, fetch and store
+                        logger.debug("No cache found for movie ${entity.contentId}, fetching from API")
+                        fetchAndCacheMovieMetadata(providerConfig, entity.providerName, entity.contentId)
+                    }
+                    
+                    // Extract year from movie info
+                    if (movieInfo != null) {
+                        val movieYear = extractYearFromReleaseDate(movieInfo.releaseDate ?: movieInfo.release_date)
+                        if (movieYear != null) {
+                            entityMovieYears["${entity.providerName}_${entity.contentId}"] = movieYear
+                            logger.debug("Extracted year $movieYear from movie metadata for movie ${entity.contentId}")
+                        }
+                        
+                        // Extract resolution and codec from video info
+                        movieInfo.info?.video?.let { videoInfo ->
+                            if (videoInfo.width != null && videoInfo.height != null) {
+                                val resolution = when {
+                                    videoInfo.width!! >= 1920 || videoInfo.height!! >= 1080 -> "1080p"
+                                    videoInfo.width!! >= 1280 || videoInfo.height!! >= 720 -> "720p"
+                                    else -> "480p"
+                                }
+                                entityMovieResolutions["${entity.providerName}_${entity.contentId}"] = resolution
+                                logger.debug("Extracted resolution $resolution from movie metadata for movie ${entity.contentId} (${videoInfo.width}x${videoInfo.height})")
+                            }
+                            
+                            // Extract codec from video info
+                            videoInfo.codec_name?.let { codec ->
+                                val normalizedCodec = when {
+                                    codec.contains("265", ignoreCase = true) || codec.contains("hevc", ignoreCase = true) -> "x265"
+                                    codec.contains("264", ignoreCase = true) || codec.contains("avc", ignoreCase = true) -> "x264"
+                                    else -> null
+                                }
+                                if (normalizedCodec != null) {
+                                    entityMovieCodecs["${entity.providerName}_${entity.contentId}"] = normalizedCodec
+                                    logger.debug("Extracted codec $normalizedCodec from movie metadata for movie ${entity.contentId} (codec: $codec)")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
             logger.debug("Episode parameter provided (episode=$episode, parsed season=$requestedSeason), fetching episodes for series to verify availability")
@@ -1833,6 +1995,15 @@ class IptvRequestService(
                 }
             }
             
+            // For movies, try to get resolution from movie metadata first (more accurate than title)
+            if (entity.contentType == ContentType.MOVIE) {
+                val resolutionFromMetadata = entityMovieResolutions["${entity.providerName}_${entity.contentId}"]
+                if (resolutionFromMetadata != null) {
+                    quality = resolutionFromMetadata
+                    logger.debug("Using resolution from movie metadata for movie ${entity.contentId}: $resolutionFromMetadata")
+                }
+            }
+            
             // STEP 1: Identify language code early - check if IPTV content title starts with any configured language prefix
             // If not, extract language code and adjust quality if needed
             val languageCode = extractLanguageCodeIfNotInPrefixes(entity.title)
@@ -1853,12 +2024,16 @@ class IptvRequestService(
             // This will remove language code from beginning and handle duplicate years
             // Include episode info (e.g., "S08" or "S08E01") in title if provided (for series)
             // Use series year from info if available, otherwise fall back to year parameter
-            val yearForTitle = entitySeriesYears["${entity.providerName}_${entity.contentId}"] ?: year
-            // Get codec from S01E01 metadata if available (for series)
-            val codecForTitle = if (entity.contentType == ContentType.SERIES) {
-                entityCodecs["${entity.providerName}_${entity.contentId}"]
-            } else {
-                null
+            val yearForTitle = when (entity.contentType) {
+                ContentType.SERIES -> entitySeriesYears["${entity.providerName}_${entity.contentId}"] ?: year
+                ContentType.MOVIE -> entityMovieYears["${entity.providerName}_${entity.contentId}"] ?: year
+                else -> year
+            }
+            // Get codec from metadata if available
+            val codecForTitle = when (entity.contentType) {
+                ContentType.SERIES -> entityCodecs["${entity.providerName}_${entity.contentId}"]
+                ContentType.MOVIE -> entityMovieCodecs["${entity.providerName}_${entity.contentId}"]
+                else -> null
             }
             var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode, codecForTitle)
             

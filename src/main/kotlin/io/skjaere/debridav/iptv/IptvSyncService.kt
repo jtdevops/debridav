@@ -517,11 +517,6 @@ class IptvSyncService(
             fetchedBody
         }
         
-        if (responseBody == null) {
-            logger.warn("No response body received for endpoint $endpointType, treating as changed")
-            return null to null
-        }
-        
         val currentHash = IptvHashUtil.computeHash(responseBody)
         val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, endpointType)
         
