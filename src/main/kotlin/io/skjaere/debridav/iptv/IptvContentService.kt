@@ -21,12 +21,22 @@ class IptvContentService(
 
     @PostConstruct
     fun logLanguagePrefixes() {
-        val originalPrefixes = iptvConfigurationProperties.languagePrefixes
+        val indexedPrefixes = iptvConfigurationProperties.languagePrefixesIndex
+        val commaSeparatedPrefixes = iptvConfigurationProperties.languagePrefixes
+        val combinedPrefixes = iptvConfigurationProperties.combinedLanguagePrefixes
         val expandedPrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
-        if (originalPrefixes.isNotEmpty()) {
-            logger.info("IPTV language prefixes configured: $originalPrefixes (count: ${originalPrefixes.size})")
-            logger.info("Expanded language prefixes: $expandedPrefixes (count: ${expandedPrefixes.size})")
-            originalPrefixes.forEachIndexed { index, prefix ->
+        
+        if (combinedPrefixes.isNotEmpty()) {
+            logger.info("IPTV language prefixes configured:")
+            if (indexedPrefixes.isNotEmpty()) {
+                logger.info("  Indexed prefixes: $indexedPrefixes (count: ${indexedPrefixes.size})")
+            }
+            if (commaSeparatedPrefixes.isNotEmpty()) {
+                logger.info("  Comma-separated prefixes: $commaSeparatedPrefixes (count: ${commaSeparatedPrefixes.size})")
+            }
+            logger.info("  Combined prefixes: $combinedPrefixes (count: ${combinedPrefixes.size})")
+            logger.info("  Expanded language prefixes: $expandedPrefixes (count: ${expandedPrefixes.size})")
+            combinedPrefixes.forEachIndexed { index, prefix ->
                 val cleaned = stripQuotes(prefix)
                 logger.info("  [$index] Original: '$prefix' -> Cleaned: '$cleaned'")
             }

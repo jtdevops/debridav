@@ -1708,33 +1708,23 @@ class IptvRequestService(
                             val (cachedSeriesInfo, cachedEpisodes) = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
                             
                             // Check if requested season exists in cache
-                            val shouldRefetch = if (requestedSeason != null) {
-                                val seasonExists = cachedEpisodes.any { it.season == requestedSeason }
-                                if (!seasonExists) {
-                                    // Requested season not in cache, only refetch if last_fetch > 24 hours
-                                    val timeSinceLastFetch = java.time.Duration.between(cachedMetadata.lastFetch, java.time.Instant.now())
-                                    val hoursSinceLastFetch = timeSinceLastFetch.toHours()
-                                    if (hoursSinceLastFetch >= 24) {
-                                        logger.debug("Requested season $requestedSeason not found in cache for series ${entity.contentId} during search, and last fetch was ${hoursSinceLastFetch} hours ago. Refetching metadata.")
-                                        true
-                                    } else {
-                                        logger.debug("Requested season $requestedSeason not found in cache for series ${entity.contentId} during search, but last fetch was only ${hoursSinceLastFetch} hours ago. Using cached data to prevent constant refetching.")
-                                        false
-                                    }
+                            // Note: requestedSeason is guaranteed to be non-null here because we're inside a block where requestedSeason != null
+                            val seasonExists = cachedEpisodes.any { it.season == requestedSeason }
+                            val shouldRefetch = if (!seasonExists) {
+                                // Requested season not in cache, only refetch if last_fetch > 24 hours
+                                val timeSinceLastFetch = java.time.Duration.between(cachedMetadata.lastFetch, java.time.Instant.now())
+                                val hoursSinceLastFetch = timeSinceLastFetch.toHours()
+                                if (hoursSinceLastFetch >= 24) {
+                                    logger.debug("Requested season $requestedSeason not found in cache for series ${entity.contentId} during search, and last fetch was ${hoursSinceLastFetch} hours ago. Refetching metadata.")
+                                    true
                                 } else {
-                                    // Season exists in cache, use cache (don't refetch)
-                                    logger.debug("Requested season $requestedSeason found in cache for series ${entity.contentId} during search. Using cached data.")
+                                    logger.debug("Requested season $requestedSeason not found in cache for series ${entity.contentId} during search, but last fetch was only ${hoursSinceLastFetch} hours ago. Using cached data to prevent constant refetching.")
                                     false
                                 }
                             } else {
-                                // No specific season requested, check if cache is still valid (not expired)
-                                val cacheAge = java.time.Duration.between(cachedMetadata.lastAccessed, java.time.Instant.now())
-                                if (cacheAge >= iptvConfigurationProperties.seriesMetadataCacheTtl) {
-                                    logger.debug("Cache expired for series ${entity.contentId} during search (age: ${cacheAge.toHours()} hours, TTL: ${iptvConfigurationProperties.seriesMetadataCacheTtl.toHours()} hours)")
-                                    true
-                                } else {
-                                    false
-                                }
+                                // Season exists in cache, use cache (don't refetch)
+                                logger.debug("Requested season $requestedSeason found in cache for series ${entity.contentId} during search. Using cached data.")
+                                false
                             }
                             
                             if (shouldRefetch) {

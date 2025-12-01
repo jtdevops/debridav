@@ -16,6 +16,7 @@ data class IptvConfigurationProperties(
     val imdbMetadataCacheTtl: Duration = Duration.ofHours(8760), // Default: 365 days (8760 hours) - IMDB data rarely changes
     val imdbMetadataPurgeInterval: Duration = Duration.ofHours(24), // Default: purge check every 24 hours
     val languagePrefixes: List<String> = emptyList(), // Language prefixes to try when searching (e.g., "EN - ", "EN| ", "EN | ")
+    val languagePrefixesIndex: List<String> = emptyList(), // Indexed language prefixes (preserves trailing spaces, e.g., IPTV_LANGUAGE_PREFIXES_INDEX_0="AM| ")
     val languagePrefixExpansionSeparators: List<String> = listOf("| ", "- ", " - "), // Separators used to expand each prefix into variations (default: ["| ", "- ", " - "])
     val userAgent: String = "TiviMate/5.2.0 (Android)", // User-Agent string for IPTV media requests (default: TiviMate)
     val includeProviderInMagnetTitle: Boolean = false, // Include provider name in magnet title after -IPTV (e.g., -IPTV-mega-NL) for debugging
@@ -24,11 +25,24 @@ data class IptvConfigurationProperties(
     val loginRateLimit: Duration = Duration.ofMinutes(1) // Rate limit for IPTV provider login/credential verification calls (default: 1 minute)
 ) {
     /**
+     * Combined language prefixes from both comma-separated and indexed formats.
+     * Indexed prefixes are added first (to preserve order), followed by comma-separated prefixes.
+     */
+    val combinedLanguagePrefixes: List<String> by lazy {
+        val combined = mutableListOf<String>()
+        // Add indexed prefixes first (preserves trailing spaces)
+        combined.addAll(languagePrefixesIndex)
+        // Add comma-separated prefixes
+        combined.addAll(languagePrefixes)
+        combined
+    }
+    
+    /**
      * Base language prefixes (without separators) extracted from configuration.
      * Used to check if an extracted prefix is in the configured English content list.
      */
     val baseLanguagePrefixes: Set<String> by lazy {
-        extractBasePrefixes(languagePrefixes)
+        extractBasePrefixes(combinedLanguagePrefixes)
     }
     
     /**
@@ -37,7 +51,7 @@ data class IptvConfigurationProperties(
      * Each prefix is then expanded into variations using languagePrefixExpansionSeparators.
      */
     val expandedLanguagePrefixes: List<String> by lazy {
-        expandLanguagePrefixes(languagePrefixes, languagePrefixExpansionSeparators)
+        expandLanguagePrefixes(combinedLanguagePrefixes, languagePrefixExpansionSeparators)
     }
     
     init {
@@ -53,13 +67,16 @@ data class IptvConfigurationProperties(
         val expansionSeparators = languagePrefixExpansionSeparators
         
         for (prefix in prefixes) {
-            val cleanedPrefix = prefix.trim().removeSurrounding("\"").removeSurrounding("'")
+            // Remove surrounding quotes but preserve internal spaces
+            // Only trim leading whitespace, preserve trailing spaces
+            var cleanedPrefix = prefix.removeSurrounding("\"").removeSurrounding("'")
+            cleanedPrefix = cleanedPrefix.trimStart()
             
             // Check if this prefix contains comma separator (indicating multiple prefixes)
             if (cleanedPrefix.contains(",")) {
-                // Split by comma
+                // Split by comma, preserve trailing spaces
                 val splitPrefixes = cleanedPrefix.split(",")
-                    .map { it.trim() }
+                    .map { it.trimStart() } // Only trim leading whitespace
                     .filter { it.isNotEmpty() }
                 
                 // Remove separators from each split prefix
@@ -90,7 +107,8 @@ data class IptvConfigurationProperties(
                 break
             }
         }
-        return result.trim()
+        // Only trim trailing whitespace after removing separator
+        return result.trimEnd()
     }
     
     /**
@@ -105,13 +123,17 @@ data class IptvConfigurationProperties(
         val expanded = mutableListOf<String>()
         
         for (prefix in prefixes) {
-            val cleanedPrefix = prefix.trim().removeSurrounding("\"").removeSurrounding("'")
+            // Remove surrounding quotes but preserve internal spaces
+            // Only trim leading whitespace, preserve trailing spaces (important for separators like "| ")
+            var cleanedPrefix = prefix.removeSurrounding("\"").removeSurrounding("'")
+            // Trim only leading whitespace to preserve trailing spaces
+            cleanedPrefix = cleanedPrefix.trimStart()
             
             // Check if this prefix contains comma separator (indicating multiple prefixes)
             if (cleanedPrefix.contains(",")) {
-                // Split by comma
+                // Split by comma, but preserve trailing spaces in each part
                 val splitPrefixes = cleanedPrefix.split(",")
-                    .map { it.trim() }
+                    .map { it.trimStart() } // Only trim leading whitespace
                     .filter { it.isNotEmpty() }
                 
                 // Expand each split prefix
