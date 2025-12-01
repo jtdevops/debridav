@@ -24,5 +24,8 @@ interface IptvSyncHashRepository : JpaRepository<IptvSyncHashEntity, Long> {
     
     @Query("SELECT h FROM IptvSyncHashEntity h WHERE h.providerName = :providerName AND h.syncStatus = 'IN_PROGRESS'")
     fun findByProviderNameAndSyncStatusInProgress(providerName: String): List<IptvSyncHashEntity>
+    
+    @Query("SELECT h FROM IptvSyncHashEntity h WHERE h.providerName = :providerName AND h.syncStatus = 'FAILED'")
+    fun findByProviderNameAndSyncStatusFailed(providerName: String): List<IptvSyncHashEntity>
 }
 

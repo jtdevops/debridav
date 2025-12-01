@@ -75,19 +75,25 @@ class IptvSyncService(
                 if (interruptedSyncs.isNotEmpty()) {
                     logger.info("Provider ${providerConfig.name} has ${interruptedSyncs.size} interrupted sync(s), will resync immediately")
                 } else {
-                    // Check per-provider timing instead of global timing
-                    // This allows new providers to sync immediately even if other providers were synced recently
-                    val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
-                    if (mostRecentSync != null) {
-                        val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
-                        
-                        if (timeSinceLastSync < syncInterval) {
-                            val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
-                            logger.debug("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
-                            return@forEach
-                        }
+                    // Check for failed syncs - if found, resync immediately (bypass timer)
+                    val failedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusFailed(providerConfig.name)
+                    if (failedSyncs.isNotEmpty()) {
+                        logger.info("Provider ${providerConfig.name} has ${failedSyncs.size} failed sync(s), will resync immediately")
                     } else {
-                        logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
+                        // Check per-provider timing instead of global timing
+                        // This allows new providers to sync immediately even if other providers were synced recently
+                        val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
+                        if (mostRecentSync != null) {
+                            val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
+                            
+                            if (timeSinceLastSync < syncInterval) {
+                                val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
+                                logger.debug("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
+                                return@forEach
+                            }
+                        } else {
+                            logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
+                        }
                     }
                 }
                 
@@ -225,11 +231,18 @@ class IptvSyncService(
         val now = Instant.now()
         endpoints.forEach { endpointType ->
             val hashEntity = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerName, endpointType)
-            if (hashEntity != null) {
-                hashEntity.syncStatus = "IN_PROGRESS"
-                hashEntity.syncStartedAt = now
-                iptvSyncHashRepository.save(hashEntity)
-            }
+                ?: IptvSyncHashEntity().apply {
+                    this.providerName = providerName
+                    this.endpointType = endpointType
+                    // Initialize with a placeholder hash if entity doesn't exist yet
+                    // The actual hash will be set during sync
+                    this.contentHash = ""
+                    this.lastChecked = Instant.now()
+                }
+            
+            hashEntity.syncStatus = "IN_PROGRESS"
+            hashEntity.syncStartedAt = now
+            iptvSyncHashRepository.save(hashEntity)
         }
     }
     
