@@ -79,8 +79,10 @@ class IptvApiController(
         // Determine search query following hierarchy:
         // 1. Check ID fields (imdbid first, others for future use)
         // 2. Fallback to 'q' parameter
-        // 3. Fallback to 'qTest' parameter (testing data)
+        // 3. Fallback to 'qTest' parameter (testing data) - ONLY if q and imdbid are NOT provided
         // 4. Fallback to legacy 'query' parameter
+        // Note: qTest should only be used when q and imdbid are not provided.
+        // If q or imdbid are provided but fail to find results, we don't fall back to qTest.
         
         val searchQuery = determineSearchQuery(
             imdbid = imdbid,
@@ -124,10 +126,13 @@ class IptvApiController(
      * Determines the search query following the hierarchy:
      * 1. Check ID fields (imdbid) - query external API to get title/year
      * 2. Fallback to 'q' parameter
-     * 3. Fallback to 'qTest' parameter
+     * 3. Fallback to 'qTest' parameter (only if q and imdbid are NOT provided)
      * 4. Fallback to legacy 'query' parameter
      * 
      * Returns SearchQuery with title and optional year extracted separately
+     * 
+     * Note: qTest should only be used when q and imdbid are not provided.
+     * If q or imdbid are provided but fail to find results, we don't fall back to qTest.
      */
     private fun determineSearchQuery(
         imdbid: String?,
@@ -139,6 +144,10 @@ class IptvApiController(
         query: String?,
         contentType: ContentType?
     ): SearchQuery? {
+        // Check if q or imdbid are provided - if so, qTest should not be used
+        val hasImdbId = imdbid?.takeIf { it.isNotBlank() } != null
+        val hasQ = q?.takeIf { it.isNotBlank() } != null
+        
         // Priority 1: Check IMDB ID (and potentially other IDs in the future)
         val imdbId = imdbid?.takeIf { it.isNotBlank() }
         if (imdbId != null) {
@@ -159,7 +168,10 @@ class IptvApiController(
                     useArticleVariations = false
                 )
             } else {
-                logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata, falling back to next priority")
+                logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata. Not using qTest as fallback since imdbid was provided.")
+                // If imdbid was provided but failed, don't fall back to qTest
+                // Return null to indicate no valid search query
+                return null
             }
         }
         
@@ -170,35 +182,42 @@ class IptvApiController(
             return extractTitleAndYear(qParam, useArticleVariations = true)
         }
         
-        // Priority 3: Use 'qTest' parameter (testing data)
+        // Priority 3: Use 'qTest' parameter (testing data) - ONLY if q and imdbid are NOT provided
         // Can be either a text string or an IMDb ID
-        val qTestParam = qTest?.takeIf { it.isNotBlank() }
-        if (qTestParam != null) {
-            // Check if qTest looks like an IMDb ID (starts with "tt" followed by digits)
-            if (isImdbId(qTestParam)) {
-                logger.debug("qTest parameter detected as IMDb ID: '$qTestParam', attempting to fetch metadata")
-                val metadata = runBlocking {
-                    metadataService.getMetadataByImdbId(qTestParam)
+        if (!hasImdbId && !hasQ) {
+            val qTestParam = qTest?.takeIf { it.isNotBlank() }
+            if (qTestParam != null) {
+                // Check if qTest looks like an IMDb ID (starts with "tt" followed by digits)
+                if (isImdbId(qTestParam)) {
+                    logger.debug("qTest parameter detected as IMDb ID: '$qTestParam', attempting to fetch metadata")
+                    val metadata = runBlocking {
+                        metadataService.getMetadataByImdbId(qTestParam)
+                    }
+                    
+                    if (metadata != null) {
+                        logger.debug("Successfully resolved qTest IMDb ID '$qTestParam' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear})")
+                        return SearchQuery(
+                            title = metadata.title,
+                            year = metadata.startYear,
+                            startYear = metadata.startYear,
+                            endYear = metadata.endYear,
+                            useArticleVariations = false
+                        )
+                    } else {
+                        logger.warn("Failed to resolve qTest IMDb ID '$qTestParam' to metadata, treating as text")
+                        // Fall through to treat as text
+                    }
                 }
                 
-                if (metadata != null) {
-                    logger.debug("Successfully resolved qTest IMDb ID '$qTestParam' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear})")
-                    return SearchQuery(
-                        title = metadata.title,
-                        year = metadata.startYear,
-                        startYear = metadata.startYear,
-                        endYear = metadata.endYear,
-                        useArticleVariations = false
-                    )
-                } else {
-                    logger.warn("Failed to resolve qTest IMDb ID '$qTestParam' to metadata, treating as text")
-                    // Fall through to treat as text
-                }
+                // Treat as text string (either not an IMDb ID, or IMDb ID resolution failed)
+                logger.debug("Using 'qTest' parameter as text (testing): '$qTestParam'")
+                return extractTitleAndYear(qTestParam, useArticleVariations = true)
             }
-            
-            // Treat as text string (either not an IMDb ID, or IMDb ID resolution failed)
-            logger.debug("Using 'qTest' parameter as text (testing): '$qTestParam'")
-            return extractTitleAndYear(qTestParam, useArticleVariations = true)
+        } else {
+            // q or imdbid were provided, so skip qTest even if it exists
+            if (qTest?.takeIf { it.isNotBlank() } != null) {
+                logger.debug("qTest parameter provided but ignored since q or imdbid are present")
+            }
         }
         
         // Priority 4: Fallback to legacy 'query' parameter
