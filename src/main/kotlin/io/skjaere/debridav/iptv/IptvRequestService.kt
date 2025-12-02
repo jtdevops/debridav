@@ -154,11 +154,13 @@ class IptvRequestService(
         
         if (languageCodeAtEnd != null) {
             // Language code found at the end, use it and remove from beginning
-            languageCode = languageCodeAtEnd
+            // Ensure language code is uppercase
+            languageCode = languageCodeAtEnd.uppercase()
             // Remove language code from beginning of titleToUse
             cleanedTitleToUse = removeSpecificLanguageCodeFromBeginning(titleToUse, languageCode)
         } else {
             // No language code at end, check if IPTV content title has one at beginning
+            // extractLanguageCodeIfNotInPrefixes already returns uppercase
             languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
         }
         
@@ -465,7 +467,8 @@ class IptvRequestService(
             
             // Check if IPTV content title starts with any configured language prefix
             // If not, extract language code and append it after .IPTV
-            val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)
+            // extractLanguageCodeIfNotInPrefixes already returns uppercase
+            val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)?.uppercase()
             
             // Build folder name: insert language code between .IPTV and media extension if needed
             val folderNameWithExtension = if (languageCode != null && folderNameBase.endsWith(".IPTV", ignoreCase = true)) {
@@ -2147,15 +2150,17 @@ class IptvRequestService(
             }
             
             // Conditionally add language code - only if it's not already at the end of the formatted title
-            val shouldAddLanguageCode = languageCode != null && 
-                                       !radarrTitle.endsWith("-$languageCode", ignoreCase = true) &&
-                                       !radarrTitle.endsWith(".$languageCode", ignoreCase = true)
+            // Ensure language code is always uppercase in the release group (e.g., -IPTV-provider1-NL)
+            val uppercaseLanguageCode = languageCode?.uppercase()
+            val shouldAddLanguageCode = uppercaseLanguageCode != null && 
+                                       !radarrTitle.endsWith("-$uppercaseLanguageCode", ignoreCase = true) &&
+                                       !radarrTitle.endsWith(".$uppercaseLanguageCode", ignoreCase = true)
             
             if (shouldAddLanguageCode) {
-                releaseGroupParts.add(languageCode)
+                releaseGroupParts.add(uppercaseLanguageCode)
             }
             
-            // STEP 5: Replace -IPTV with the full release group (e.g., -IPTV-mega-NL)
+            // STEP 5: Replace -IPTV with the full release group (e.g., -IPTV-provider1-NL)
             if (radarrTitle.endsWith("-IPTV", ignoreCase = true)) {
                 radarrTitle = "${radarrTitle.removeSuffix("-IPTV")}-${releaseGroupParts.joinToString("-")}"
             } else if (shouldAddLanguageCode || iptvConfigurationProperties.includeProviderInMagnetTitle) {

@@ -104,7 +104,7 @@ The `exceptionClass` field is particularly useful for identifying the root cause
 ## Example Log Output
 
 ```
-2025-11-17T12:00:00.000-05:00 TRACE 1 --- [nio-8080-exec-1] i.s.d.stream.StreamingService : IPTV_STREAMING_EXCEPTION: Exception during IPTV stream read: path=/downloads/movies/Movie.Title.2024.1080p.BluRay.x264-IPTV-streamq.mp4, link=https://example.com/movie/user/pass/12345.mp4, provider=null, exceptionClass=SSLHandshakeException
+2025-11-17T12:00:00.000-05:00 TRACE 1 --- [nio-8080-exec-1] i.s.d.stream.StreamingService : IPTV_STREAMING_EXCEPTION: Exception during IPTV stream read: path=/downloads/movies/Movie.Title.2024.1080p.BluRay.x264-IPTV-provider1.mp4, link=https://example.com/movie/user/pass/12345.mp4, provider=null, exceptionClass=SSLHandshakeException
 javax.net.ssl.SSLHandshakeException: sun.security.validator.ValidatorException: PKIX path building failed
     at io.ktor.client.engine.cio.CIOHttpRequest$execute$2.invokeSuspend(CIOHttpRequest.kt:123)
     ...
