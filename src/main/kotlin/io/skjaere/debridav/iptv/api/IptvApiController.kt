@@ -1,8 +1,14 @@
 package io.skjaere.debridav.iptv.api
 
 import io.skjaere.debridav.iptv.IptvRequestService
+import io.skjaere.debridav.iptv.IptvContentRepository
+import io.skjaere.debridav.iptv.IptvSyncHashRepository
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.metadata.MetadataService
+import io.skjaere.debridav.iptv.metadata.MetadataConfigurationProperties
 import io.skjaere.debridav.iptv.model.ContentType
+import java.time.Instant
+import java.time.Duration
 import jakarta.servlet.http.HttpServletRequest
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -19,7 +25,11 @@ import java.net.InetAddress
 @RequestMapping("/api/iptv")
 class IptvApiController(
     private val iptvRequestService: IptvRequestService,
-    private val metadataService: MetadataService
+    private val metadataService: MetadataService,
+    private val metadataConfigurationProperties: MetadataConfigurationProperties,
+    private val iptvContentRepository: IptvContentRepository,
+    private val iptvSyncHashRepository: IptvSyncHashRepository,
+    private val iptvConfigurationService: IptvConfigurationService
 ) {
     private val logger = LoggerFactory.getLogger(IptvApiController::class.java)
 
@@ -84,6 +94,11 @@ class IptvApiController(
         // Note: qTest should only be used when q and imdbid are not provided.
         // If q or imdbid are provided but fail to find results, we don't fall back to qTest.
         
+        // Check if this is a test request (only qTest parameter, no q or imdbid)
+        val isTestRequest = qTest?.takeIf { it.isNotBlank() } != null && 
+                           q?.takeIf { it.isNotBlank() } == null && 
+                           imdbid?.takeIf { it.isNotBlank() } == null
+        
         val searchQuery = determineSearchQuery(
             imdbid = imdbid,
             tmdbid = tmdbid,
@@ -96,7 +111,13 @@ class IptvApiController(
         )
         
         if (searchQuery == null) {
-            logger.warn("No valid search query found in request parameters")
+            if (isTestRequest) {
+                // For test requests, provide detailed failure reason
+                val failureReason = determineFailureReason(qTest, null, contentType)
+                logger.warn("Prowlarr test connection failed - no valid search query: qTest='{}', reason={}", qTest, failureReason)
+            } else {
+                logger.warn("No valid search query found in request parameters")
+            }
             return ResponseEntity.ok(emptyList())
         }
         
@@ -104,9 +125,21 @@ class IptvApiController(
             searchQuery.title, searchQuery.year, searchQuery.startYear, searchQuery.endYear, contentType, season, episode, searchQuery.useArticleVariations)
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
         val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear)
-        logger.debug("Search returned {} results", results.size)
-        if (results.isNotEmpty()) {
-            logger.debug("First result sample: {}", results.first())
+        
+        // For test requests, only log if there are no results (WARN level)
+        if (isTestRequest) {
+            if (results.isEmpty()) {
+                // Determine the reason for failure
+                val failureReason = determineFailureReason(qTest, searchQuery, contentType)
+                logger.warn("Prowlarr test connection failed - no results found: qTest='{}', reason={}", qTest, failureReason)
+            }
+            // Don't log INFO for test requests with results
+        } else {
+            // Normal requests: log at DEBUG level
+            logger.debug("Search returned {} results", results.size)
+            if (results.isNotEmpty()) {
+                logger.debug("First result sample: {}", results.first())
+            }
         }
         return ResponseEntity.ok(results)
     }
@@ -241,6 +274,91 @@ class IptvApiController(
         // IMDb ID pattern: "tt" followed by 7-8 digits
         val imdbIdPattern = Regex("^tt\\d{7,8}$", RegexOption.IGNORE_CASE)
         return imdbIdPattern.matches(value.trim())
+    }
+    
+    /**
+     * Determines the reason why a test request failed to return results.
+     * 
+     * @param qTest The qTest parameter value
+     * @param searchQuery The resolved search query (if any)
+     * @param contentType The content type being searched (MOVIE or SERIES)
+     * @return A human-readable reason for the failure
+     */
+    private fun determineFailureReason(qTest: String?, searchQuery: SearchQuery?, contentType: ContentType?): String {
+        if (qTest == null) {
+            return "No search query provided"
+        }
+        
+        // Check if there's any IPTV content available at all
+        val hasAnyContent = iptvContentRepository.count() > 0
+        val hasContentByType = contentType?.let { 
+            iptvContentRepository.findByContentTypeAndIsActive(it, true).isNotEmpty()
+        } ?: hasAnyContent
+        
+        // Check sync status
+        val configuredProviders = iptvConfigurationService.getProviderConfigurations()
+        val hasConfiguredProviders = configuredProviders.isNotEmpty()
+        val hasSyncHashes = iptvSyncHashRepository.count() > 0
+        val mostRecentSync = iptvSyncHashRepository.findMostRecentLastChecked()
+        
+        // Build sync status message
+        val syncStatusMessage = when {
+            !hasConfiguredProviders -> "No IPTV providers are configured."
+            !hasSyncHashes -> "IPTV sync has not been run yet. Please trigger a sync manually or wait for the scheduled sync."
+            mostRecentSync != null -> {
+                val timeSinceSync = Duration.between(mostRecentSync, Instant.now())
+                val timeAgo = when {
+                    timeSinceSync.toDays() > 0 -> "${timeSinceSync.toDays()} day(s) ago"
+                    timeSinceSync.toHours() > 0 -> "${timeSinceSync.toHours()} hour(s) ago"
+                    timeSinceSync.toMinutes() > 0 -> "${timeSinceSync.toMinutes()} minute(s) ago"
+                    else -> "just now"
+                }
+                if (!hasContentByType) {
+                    "IPTV sync was last run $timeAgo, but no ${contentType?.name ?: "content"} data was synced. The provider may not have ${contentType?.name?.lowercase() ?: "content"} available, or the sync may have failed."
+                } else {
+                    "IPTV sync was last run $timeAgo."
+                }
+            }
+            else -> "IPTV sync status is unknown."
+        }
+        
+        // Check if qTest is an IMDb ID
+        if (isImdbId(qTest)) {
+            // Check if OMDB API key is configured
+            if (metadataConfigurationProperties.omdbApiKey.isBlank()) {
+                return "OMDB API key not configured - cannot resolve IMDb ID '$qTest' to title. Please configure 'iptv.metadata.omdb-api-key' in application.properties"
+            }
+            
+            // OMDB key is configured
+            if (searchQuery != null) {
+                // Check if the searchQuery title is still the IMDb ID (meaning metadata resolution failed)
+                if (isImdbId(searchQuery.title)) {
+                    return "Failed to resolve IMDb ID '$qTest' to metadata. The OMDB API may be unavailable, the IMDb ID may be invalid, or there was an error calling the API. Please check OMDB API status and verify the IMDb ID is correct."
+                } else {
+                    // Metadata was successfully resolved, but no IPTV content found
+                    val contentTypeStr = contentType?.name ?: "content"
+                    if (!hasContentByType) {
+                        return "No IPTV ${contentTypeStr} data available to search. $syncStatusMessage"
+                    } else {
+                        return "IPTV content not found for title '${searchQuery.title}' (resolved from IMDb ID '$qTest'). IPTV ${contentTypeStr} data exists, but this specific title was not found. The content may not have been synced/imported from IPTV providers yet, or the title may not match exactly. $syncStatusMessage"
+                    }
+                }
+            } else {
+                return "Failed to resolve IMDb ID '$qTest' to metadata. The OMDB API may be unavailable or the IMDb ID may be invalid."
+            }
+        } else {
+            // qTest is a text query
+            if (searchQuery != null) {
+                val contentTypeStr = contentType?.name ?: "content"
+                if (!hasContentByType) {
+                    return "No IPTV ${contentTypeStr} data available to search. $syncStatusMessage"
+                } else {
+                    return "IPTV content not found for title '${searchQuery.title}'. IPTV ${contentTypeStr} data exists, but this specific title was not found. The content may not have been synced/imported from IPTV providers yet, or the title may not match exactly. $syncStatusMessage"
+                }
+            } else {
+                return "Failed to parse search query from qTest='$qTest'"
+            }
+        }
     }
     
     /**
