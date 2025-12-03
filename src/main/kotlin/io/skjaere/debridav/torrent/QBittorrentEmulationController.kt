@@ -24,7 +24,8 @@ class QBittorrentEmulationController(
     private val torrentService: TorrentService,
     private val resourceLoader: ResourceLoader,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
-    private val categoryService: CategoryService
+    private val categoryService: CategoryService,
+    private val torrentToMagnetConverter: TorrentToMagnetConverter
 ) {
     companion object {
         const val API_VERSION = "2.9.3"
@@ -137,7 +138,7 @@ class QBittorrentEmulationController(
             remoteAddr
         }
         
-        logger.info("Add torrent request received - category='{}', hasUrls={}, hasTorrents={}, fullQueryString='{}'", 
+        logger.debug("Add torrent request received - category='{}', hasUrls={}, hasTorrents={}, fullQueryString='{}'", 
             category, urls != null, torrents != null, request.queryString)
         logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, remoteInfo)
         
@@ -172,7 +173,18 @@ class QBittorrentEmulationController(
                 ResponseEntity.badRequest().body("Request body must contain either urls or torrents")
             }
             true -> {
-                logger.info("Successfully added torrent to category '{}'", category)
+                // Get torrent details for logging
+                val magnet = urls?.let { TorrentMagnet(it) } ?: torrents?.let { 
+                    torrentToMagnetConverter.convertTorrentToMagnet(it.bytes) 
+                }
+                val torrentName = magnet?.let { TorrentService.getNameFromMagnet(it) } ?: "unknown"
+                val torrentHash = magnet?.let { TorrentService.getHashFromMagnet(it) }
+                val fileCount = torrentHash?.let { hash ->
+                    torrentService.getTorrentByHash(hash)?.files?.size
+                } ?: 0
+                
+                logger.info("Torrent added successfully: name='{}', category='{}', files={}", 
+                    torrentName, category, fileCount)
                 ResponseEntity.ok("ok")
             }
             false -> {
@@ -209,7 +221,7 @@ class QBittorrentEmulationController(
         // Truncate URL if too long for logging
         val truncatedUrl = if (request.urls.length > 200) "${request.urls.take(200)}..." else request.urls
         
-        logger.info("Add torrent request received (form-urlencoded) - category='{}', urlLength={}, fullQueryString='{}'", 
+        logger.debug("Add torrent request received (form-urlencoded) - category='{}', urlLength={}, fullQueryString='{}'", 
             request.category, request.urls.length, httpRequest.queryString)
         logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", httpRequest.requestURI, httpRequest.method, remoteInfo)
         logger.debug("Torrent URL(s): {}", truncatedUrl)
@@ -222,7 +234,16 @@ class QBittorrentEmulationController(
         val success = torrentService.addMagnet(request.category, TorrentMagnet(request.urls))
         
         return if (success) {
-            logger.info("Successfully added torrent to category '{}'", request.category)
+            // Get torrent details for logging
+            val magnet = TorrentMagnet(request.urls)
+            val torrentName = TorrentService.getNameFromMagnet(magnet) ?: "unknown"
+            val torrentHash = TorrentService.getHashFromMagnet(magnet)
+            val fileCount = torrentHash?.let { hash ->
+                torrentService.getTorrentByHash(hash)?.files?.size
+            } ?: 0
+            
+            logger.info("Torrent added successfully: name='{}', category='{}', files={}", 
+                torrentName, request.category, fileCount)
             ResponseEntity.ok("")
         } else {
             logger.warn("Failed to add torrent to category '{}'", request.category)

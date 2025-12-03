@@ -157,14 +157,14 @@ class IptvApiController(
                     failureReason)
             } else {
                 // Results found - log at INFO level
-                val firstResultMagnet = results.first().magnetUri?.take(100) // Truncate for readability
-                logger.info("IPTV search completed: title='{}'{}{}{}, results={}, firstResultMagnet={}", 
+                val firstResultTitle = results.first().title
+                logger.info("IPTV search completed: title='{}'{}{}{}, results={}, firstResultTitle='{}'", 
                     searchQuery.title,
                     yearInfo?.let { ", year=$it" } ?: "",
                     contentType?.let { ", type=$it" } ?: "",
                     episodeInfo?.let { ", episode=$it" } ?: "",
                     results.size,
-                    firstResultMagnet ?: "N/A")
+                    firstResultTitle)
             }
         }
         return ResponseEntity.ok(results)

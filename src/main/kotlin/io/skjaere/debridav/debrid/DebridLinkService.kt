@@ -77,7 +77,7 @@ class DebridLinkService(
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<LinkLivenessCacheKey, Boolean> { key ->
             runBlocking {
-                logger.info("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
+                logger.debug("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
                 logger.debug("LINK_ALIVE_CHECK: file={}, provider={}, link={}, size={} bytes", 
                     key.cachedFile.path, key.cachedFile.provider, key.cachedFile.link?.take(50) + "...", key.cachedFile.size)
                 val isAlive = debridClients
@@ -169,7 +169,7 @@ class DebridLinkService(
     suspend fun getCheckedLinks(file: RemotelyCachedEntity): Flow<CachedFile> {
         val debridFileContents = file.contents!!
         val started = Instant.now()
-        logger.info("Getting links for ${file.name} from ${debridFileContents.originalPath}")
+        logger.debug("Getting links for ${file.name} from ${debridFileContents.originalPath}")
         logger.debug("DEBRID_LINK_REQUEST: file={}, originalPath={}, debridLinksCount={}", 
             file.name, debridFileContents.originalPath, debridFileContents.debridLinks.size)
         return getFlowOfDebridLinks(debridFileContents)
@@ -185,7 +185,7 @@ class DebridLinkService(
                 }
                 if (debridLink is CachedFile) {
                     val took = Duration.between(started, Instant.now()).toMillis().toDouble()
-                    logger.info("Found link for ${file.name} from ${debridLink.provider}. took $took ms")
+                    logger.debug("Found link for ${file.name} from ${debridLink.provider}. took $took ms")
                     logger.debug("DEBRID_LINK_FOUND: file={}, provider={}, link={}, size={} bytes, took={} ms", 
                         file.name, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size, took)
                     linkFindingDurationSummary.record(took)
