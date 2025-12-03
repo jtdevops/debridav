@@ -59,7 +59,10 @@ data class DebridavConfigurationProperties(
     val rcloneArrsUserAgentPattern: String?, // User agent pattern for ARR detection
     val rcloneArrsHostnamePattern: String?, // Hostname pattern for ARR detection
     val rcloneArrsLocalVideoFileIptvBypassProviders: String? = null, // Comma-separated list of IPTV provider names to bypass local video serving (use "*" for all providers)
-    val debugArrTorrentInfoContentPathSuffix: String? = null // Optional suffix to append to contentPath in ARR torrent info API responses (qBittorrent emulation /api/v2/torrents/info endpoint used by Sonarr/Radarr) for debugging purposes (e.g., "__DEBUG_TESTING")
+    val debugArrTorrentInfoContentPathSuffix: String? = null, // Optional suffix to append to contentPath in ARR torrent info API responses (qBittorrent emulation /api/v2/torrents/info endpoint used by Sonarr/Radarr) for debugging purposes (e.g., "__DEBUG_TESTING")
+    // Downloads cleanup configuration
+    val enableDownloadsCleanupTimeBased: Boolean = false, // If true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes. If false (default), cleanup is immediate (no age check).
+    val downloadsCleanupTimeBasedThresholdMinutes: Long = 10 // Time threshold in minutes for time-based cleanup (only used if enableDownloadsCleanupTimeBased is true)
 ) {
     init {
         require(debridClients.isNotEmpty()) {

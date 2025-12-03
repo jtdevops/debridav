@@ -4,4 +4,5 @@ import org.springframework.data.repository.CrudRepository
 
 interface CategoryRepository : CrudRepository<Category, Long> {
     fun findByNameIgnoreCase(name: String): Category?
+    fun findByDownloadPath(downloadPath: String): List<Category>
 }

@@ -60,6 +60,20 @@ class DebriDavApplication : SpringBootServletInitializer() {
                 debridavConfigurationProperties.disableByteRangeRequestChunking
             )
             
+            // Downloads cleanup configuration
+            logger.info(
+                "Enable Downloads Cleanup Time-Based: {}", 
+                debridavConfigurationProperties.enableDownloadsCleanupTimeBased
+            )
+            if (debridavConfigurationProperties.enableDownloadsCleanupTimeBased) {
+                logger.info(
+                    "Downloads Cleanup Time-Based Threshold: {} minutes", 
+                    debridavConfigurationProperties.downloadsCleanupTimeBasedThresholdMinutes
+                )
+            } else {
+                logger.info("Downloads Cleanup Mode: Immediate (no age check)")
+            }
+            
             logger.info("=== End Configuration Properties ===")
         }
     }
@@ -133,6 +147,15 @@ class DebriDavApplication : SpringBootServletInitializer() {
                 logger.info("          curl -X DELETE $baseUrl/api/iptv/provider/{providerName}")
                 logger.info("          (No IPTV providers configured)")
             }
+            logger.info("")
+            logger.info("Downloads Cleanup Endpoints:")
+            logger.info("  GET     $baseUrl/api/cleanup/downloads/abandoned?cleanupAgeHours=6&arrCleanupAgeHours=1")
+            logger.info("          curl \"$baseUrl/api/cleanup/downloads/abandoned?cleanupAgeHours=6&arrCleanupAgeHours=1\"")
+            logger.info("          (Files not linked to radarr/sonarr torrents use shorter arrCleanupAgeHours threshold)")
+            logger.info("")
+            logger.info("  POST    $baseUrl/api/cleanup/downloads/cleanup?cleanupAgeHours=6&arrCleanupAgeHours=1&dryRun=false")
+            logger.info("          curl -X POST \"$baseUrl/api/cleanup/downloads/cleanup?cleanupAgeHours=6&arrCleanupAgeHours=1&dryRun=false\"")
+            logger.info("          (Files not linked to radarr/sonarr torrents are cleaned up after arrCleanupAgeHours)")
             logger.info("")
             logger.info("=== End Maintenance Endpoints ===")
             logger.info("")

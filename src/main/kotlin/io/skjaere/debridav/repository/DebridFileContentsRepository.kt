@@ -95,6 +95,68 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
 
     @Query("select count(*) from DebridCachedUsenetReleaseContent ")
     fun numberOfRemotelyCachedUsenetEntities(): Long
+
+    @Query(
+        """
+        SELECT rce.* FROM db_item rce
+        INNER JOIN db_item dir ON rce.directory_id = dir.id
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND rce.db_item_type = 'RemotelyCachedEntity'
+        AND rce.id NOT IN (
+            SELECT tf.files_id FROM torrent_files tf
+            INNER JOIN torrent t ON tf.torrent_id = t.id
+            WHERE t.status = 0
+        )
+        AND rce.id NOT IN (
+            SELECT udf.debrid_files_id FROM usenet_download_debrid_files udf
+            INNER JOIN usenet_download ud ON udf.usenet_download_id = ud.id
+            WHERE ud.status NOT IN (7, 8)
+        )
+        AND rce.last_modified < :cutoffTime
+        ORDER BY rce.last_modified ASC
+        """,
+        nativeQuery = true
+    )
+    fun findAbandonedFilesInDownloads(
+        downloadPathPrefix: String,
+        cutoffTime: Long
+    ): List<RemotelyCachedEntity>
+
+    @Query(
+        """
+        SELECT rce.* FROM db_item rce
+        INNER JOIN db_item dir ON rce.directory_id = dir.id
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND rce.db_item_type = 'RemotelyCachedEntity'
+        AND rce.id NOT IN (
+            SELECT tf.files_id FROM torrent_files tf
+            INNER JOIN torrent t ON tf.torrent_id = t.id
+            WHERE t.status = 0
+        )
+        AND rce.id NOT IN (
+            SELECT udf.debrid_files_id FROM usenet_download_debrid_files udf
+            INNER JOIN usenet_download ud ON udf.usenet_download_id = ud.id
+            WHERE ud.status NOT IN (7, 8)
+        )
+        AND rce.id NOT IN (
+            SELECT tf.files_id FROM torrent_files tf
+            INNER JOIN torrent t ON tf.torrent_id = t.id
+            INNER JOIN category c ON t.category_id = c.id
+            WHERE t.status = 0
+            AND c.name IN (:arrCategories)
+        )
+        AND rce.last_modified < :cutoffTime
+        ORDER BY rce.last_modified ASC
+        """,
+        nativeQuery = true
+    )
+    fun findAbandonedFilesNotLinkedToArrCategories(
+        downloadPathPrefix: String,
+        cutoffTime: Long,
+        arrCategories: List<String>
+    ): List<RemotelyCachedEntity>
 }
 
 data class LibraryStats(val provider: String, val type: String, val count: Long)
