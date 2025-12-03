@@ -2118,10 +2118,10 @@ class IptvRequestService(
                 val currentQuality = quality ?: "1080p"
                 if (currentQuality.equals("1080p", ignoreCase = true) || currentQuality.equals("FHD", ignoreCase = true)) {
                     quality = "480p"
-                    logger.debug("Valid language code '$languageCode' detected (non-EN), downgrading quality from 1080p to 480p")
+                    logger.trace("Valid language code '$languageCode' detected (non-EN), downgrading quality from 1080p to 480p")
                 }
             } else if (languageCode != null && !isValidLanguageCode(languageCode)) {
-                logger.debug("Extracted code '$languageCode' is not a valid ISO 639-1 language code, skipping quality adjustment")
+                logger.trace("Extracted code '$languageCode' is not a valid ISO 639-1 language code, skipping quality adjustment")
             }
             
             // STEP 3: Format title for Radarr compatibility (includes quality, codec, etc.)

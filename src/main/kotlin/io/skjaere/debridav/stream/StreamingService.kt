@@ -289,6 +289,13 @@ class StreamingService(
         
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
         
+        // Log video download start at INFO level (unconditional, not dependent on tracking flag)
+        val fileName = remotelyCachedEntity.name ?: "unknown"
+        val requestedSize = appliedRange.finish - appliedRange.start + 1
+        val requestedSizeMB = String.format("%.2f", requestedSize / 1_000_000.0)
+        logger.info("Video download started: file={}, range={}-{}, size={} bytes ({} MB), provider={}", 
+            fileName, appliedRange.start, appliedRange.finish, requestedSize, requestedSizeMB, providerLabel)
+        
         var result: StreamResult = StreamResult.OK
         try {
             // Normal streaming
@@ -393,11 +400,23 @@ class StreamingService(
             }
         }
         
+        val fileNameForCompletion = remotelyCachedEntity.name ?: "unknown"
         try {
             // Cleanup
         } finally {
             this.coroutineContext.cancelChildren()
             trackingId?.let { id -> completeDownloadTracking(id, result) }
+            
+            // Log video download completion at INFO level (unconditional, not dependent on tracking flag)
+            val status = when (result) {
+                StreamResult.OK -> "completed"
+                StreamResult.IO_ERROR -> "io_error"
+                StreamResult.PROVIDER_ERROR -> "provider_error"
+                StreamResult.CLIENT_ERROR -> "client_error"
+                else -> "error"
+            }
+            logger.info("Video download stopped: file={}, size={} bytes ({} MB), status={}", 
+                fileNameForCompletion, requestedSize, requestedSizeMB, status)
         }
         logger.debug("done streaming ${debridLink.path}: $result")
         result
@@ -995,7 +1014,7 @@ class StreamingService(
         
         activeDownloads[trackingId] = context
         
-        logger.debug("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
+        logger.info("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
             fileName, requestedSize, trackingId)
         
         return trackingId
@@ -1017,7 +1036,7 @@ class StreamingService(
         // Set actual bytes sent to the final downloaded count
         context.actualBytesSent = context.bytesDownloaded.get()
         
-        logger.debug("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
+        logger.info("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
             context.fileName, context.bytesDownloaded.get(), context.actualBytesSent)
         
         completedDownloads.add(context)

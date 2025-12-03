@@ -134,7 +134,7 @@ class IptvContentService(
         
         val scoredResults = results.map { entity ->
             val score = calculateRelevanceScore(entity, searchTitle, searchYear)
-            logger.debug("Relevance score for '${entity.title}': $score (search: '$searchTitle', year: $searchYear)")
+            logger.trace("Relevance score for '${entity.title}': $score (search: '$searchTitle', year: $searchYear)")
             Pair(entity, score)
         }
         
@@ -288,10 +288,10 @@ class IptvContentService(
             
             if (hasSpinOffIndicator) {
                 resultsWithSpinOffs.add(entity)
-                logger.debug("Result '${entity.title}' detected as spin-off (contains spin-off indicator)")
+                logger.trace("Result '${entity.title}' detected as spin-off (contains spin-off indicator)")
             } else {
                 resultsWithoutSpinOffs.add(entity)
-                logger.debug("Result '${entity.title}' is not a spin-off")
+                logger.trace("Result '${entity.title}' is not a spin-off")
             }
         }
         
@@ -362,21 +362,21 @@ class IptvContentService(
             when {
                 extractedYear == null -> {
                     resultsWithNoYear.add(entity)
-                    logger.debug("Result '${entity.title}' has no year - will be included")
+                    logger.trace("Result '${entity.title}' has no year - will be included")
                 }
                 extractedYear == searchStartYear -> {
                     // Exact match
                     resultsWithMatchingYear.add(entity)
-                    logger.debug("Result '${entity.title}' (year: $extractedYear) matches filter year: $searchStartYear - will be included")
+                    logger.trace("Result '${entity.title}' (year: $extractedYear) matches filter year: $searchStartYear - will be included")
                 }
                 endYear != null && extractedYear >= searchStartYear && extractedYear <= endYear -> {
                     // Falls within year range (extractedYear is guaranteed to be non-null here since first branch handles null)
                     resultsWithMatchingYear.add(entity)
-                    logger.debug("Result '${entity.title}' (year: $extractedYear) falls within year range $yearRangeStr - will be included")
+                    logger.trace("Result '${entity.title}' (year: $extractedYear) falls within year range $yearRangeStr - will be included")
                 }
                 else -> {
                     resultsWithNonMatchingYear.add(entity)
-                    logger.debug("Result '${entity.title}' (year: $extractedYear) does not match filter year: $yearRangeStr - may be excluded")
+                    logger.trace("Result '${entity.title}' (year: $extractedYear) does not match filter year: $yearRangeStr - may be excluded")
                 }
             }
         }
