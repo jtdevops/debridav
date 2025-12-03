@@ -49,7 +49,7 @@ class IptvSyncService(
             return
         }
 
-        logger.debug("Starting IPTV content sync")
+        logger.info("Starting IPTV content sync")
         
         // Check for interrupted syncs from previous run
         checkAndResumeInterruptedSyncs()
@@ -88,7 +88,7 @@ class IptvSyncService(
                             
                             if (timeSinceLastSync < syncInterval) {
                                 val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
-                                logger.debug("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
+                                logger.info("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
                                 return@forEach
                             }
                         } else {
@@ -105,7 +105,7 @@ class IptvSyncService(
             }
         }
 
-        logger.debug("IPTV content sync completed")
+        logger.info("IPTV content sync completed")
     }
 
     /**
