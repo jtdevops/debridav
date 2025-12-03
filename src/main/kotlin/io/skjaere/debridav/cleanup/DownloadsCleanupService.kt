@@ -16,6 +16,8 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 @Service
 class DownloadsCleanupService(
@@ -29,6 +31,9 @@ class DownloadsCleanupService(
     private val logger = LoggerFactory.getLogger(DownloadsCleanupService::class.java)
 
     private val ROOT_NODE = "ROOT"
+    
+    // Mutex to prevent concurrent cleanup operations
+    private val cleanupLock = ReentrantLock()
 
     /**
      * Finds abandoned files in the downloads folder.
@@ -100,9 +105,24 @@ class DownloadsCleanupService(
      * 2. All other abandoned files are cleaned up after the standard time
      * 
      * Returns the number of files deleted.
+     * 
+     * This method is synchronized to prevent concurrent execution from multiple threads.
      */
     @Transactional
     fun cleanupAbandonedFiles(
+        cleanupAgeHours: Long = 6,
+        arrCleanupAgeHours: Long = 1,
+        arrCategories: List<String>? = null,
+        dryRun: Boolean = false
+    ): CleanupResult {
+        // Use lock to prevent concurrent cleanup operations
+        return cleanupLock.withLock {
+            cleanupAbandonedFilesInternal(cleanupAgeHours, arrCleanupAgeHours, arrCategories, dryRun)
+        }
+    }
+    
+    @Transactional
+    private fun cleanupAbandonedFilesInternal(
         cleanupAgeHours: Long = 6,
         arrCleanupAgeHours: Long = 1,
         arrCategories: List<String>? = null,
@@ -159,15 +179,34 @@ class DownloadsCleanupService(
                     deletedCount++
                     totalSizeBytes += fileSize
                 } else {
-                    logger.debug("Deleting abandoned file: {} (size: {} bytes)", filePath, fileSize)
-                    databaseFileService.deleteFile(file)
-                    deletedCount++
-                    totalSizeBytes += fileSize
+                    // Check if file still exists before attempting deletion
+                    val fileId = file.id
+                    if (fileId != null && debridFileRepository.findById(fileId).isPresent) {
+                        logger.debug("Deleting abandoned file: {} (size: {} bytes)", filePath, fileSize)
+                        try {
+                            databaseFileService.deleteFile(file)
+                            deletedCount++
+                            totalSizeBytes += fileSize
+                        } catch (e: org.hibernate.StaleStateException) {
+                            // File was already deleted by another thread - this is expected in concurrent scenarios
+                            logger.debug("File {} (id={}) was already deleted by another thread, skipping", filePath, fileId)
+                        } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                            // File was already deleted by another thread - this is expected in concurrent scenarios
+                            logger.debug("File {} (id={}) was already deleted by another thread, skipping", filePath, fileId)
+                        }
+                    } else {
+                        logger.debug("File {} (id={}) no longer exists in database, skipping", filePath, fileId)
+                    }
                 }
             } catch (e: Exception) {
-                val errorMsg = "Failed to delete file ${file.name}: ${e.message}"
-                logger.error(errorMsg, e)
-                errors.add(errorMsg)
+                // Only log non-StaleStateException errors as errors
+                if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                    logger.debug("File ${file.name} (id=${file.id}) was already deleted, skipping")
+                } else {
+                    val errorMsg = "Failed to delete file ${file.name}: ${e.message}"
+                    logger.error(errorMsg, e)
+                    errors.add(errorMsg)
+                }
             }
         }
         
@@ -190,17 +229,36 @@ class DownloadsCleanupService(
                         logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
                         deletedDirectoriesCount++
                     } else {
-                        logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
-                        logger.trace("Directory details: path={}, name={}, lastModified={}", 
-                            directory.path, directory.name, directory.lastModified)
-                        databaseFileService.deleteFile(directory)
-                        deletedDirectoriesCount++
-                        logger.trace("Successfully deleted directory: {}", dirPath)
+                        // Check if directory still exists before attempting deletion
+                        val dirId = directory.id
+                        if (dirId != null && debridFileRepository.findById(dirId).isPresent) {
+                            logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
+                            logger.trace("Directory details: path={}, name={}, lastModified={}", 
+                                directory.path, directory.name, directory.lastModified)
+                            try {
+                                databaseFileService.deleteFile(directory)
+                                deletedDirectoriesCount++
+                                logger.trace("Successfully deleted directory: {}", dirPath)
+                            } catch (e: org.hibernate.StaleStateException) {
+                                // Directory was already deleted by another thread
+                                logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                            } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                                // Directory was already deleted by another thread
+                                logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                            }
+                        } else {
+                            logger.debug("Directory {} (id={}) no longer exists in database, skipping", dirPath, dirId)
+                        }
                     }
                 } catch (e: Exception) {
-                    val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
-                    logger.error(errorMsg, e)
-                    errors.add(errorMsg)
+                    // Only log non-StaleStateException errors as errors
+                    if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                        logger.debug("Directory ${directory.name} (id=${directory.id}) was already deleted, skipping")
+                    } else {
+                        val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
+                        logger.error(errorMsg, e)
+                        errors.add(errorMsg)
+                    }
                 }
             }
             
@@ -260,9 +318,21 @@ class DownloadsCleanupService(
      * - It's not linked to any category that exists in the database with download_path='/downloads'
      * - If time-based cleanup is enabled: It's older than the configured threshold
      * - If immediate cleanup (default): No age check, all orphaned content is removed
+     * 
+     * This method is synchronized to prevent concurrent execution from multiple threads.
      */
     @Transactional
     fun cleanupOrphanedTorrentsAndFiles(
+        dryRun: Boolean = false
+    ): CleanupResult {
+        // Use lock to prevent concurrent cleanup operations
+        return cleanupLock.withLock {
+            cleanupOrphanedTorrentsAndFilesInternal(dryRun)
+        }
+    }
+    
+    @Transactional
+    private fun cleanupOrphanedTorrentsAndFilesInternal(
         dryRun: Boolean = false
     ): CleanupResult {
         logger.debug("=== Starting orphaned torrents/files cleanup (dryRun={}) ===", dryRun)
@@ -374,19 +444,38 @@ class DownloadsCleanupService(
                     deletedCount++
                     totalSizeBytes += fileSize
                 } else {
-                    logger.info("Deleting orphaned file: {} (size: {} bytes, {} MB, id={})", 
-                        filePath, fileSize, fileSizeMB, file.id)
-                    logger.trace("File details: name={}, directory={}, lastModified={}, hash={}", 
-                        file.name, file.directory?.fileSystemPath(), file.lastModified, file.hash)
-                    databaseFileService.deleteFile(file)
-                    deletedCount++
-                    totalSizeBytes += fileSize
-                    logger.trace("Successfully deleted file: {}", filePath)
+                    // Check if file still exists before attempting deletion
+                    val fileId = file.id
+                    if (fileId != null && debridFileRepository.findById(fileId).isPresent) {
+                        logger.info("Deleting orphaned file: {} (size: {} bytes, {} MB, id={})", 
+                            filePath, fileSize, fileSizeMB, file.id)
+                        logger.trace("File details: name={}, directory={}, lastModified={}, hash={}", 
+                            file.name, file.directory?.fileSystemPath(), file.lastModified, file.hash)
+                        try {
+                            databaseFileService.deleteFile(file)
+                            deletedCount++
+                            totalSizeBytes += fileSize
+                            logger.trace("Successfully deleted file: {}", filePath)
+                        } catch (e: org.hibernate.StaleStateException) {
+                            // File was already deleted by another thread - this is expected in concurrent scenarios
+                            logger.debug("File {} (id={}) was already deleted by another thread, skipping", filePath, fileId)
+                        } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                            // File was already deleted by another thread - this is expected in concurrent scenarios
+                            logger.debug("File {} (id={}) was already deleted by another thread, skipping", filePath, fileId)
+                        }
+                    } else {
+                        logger.debug("File {} (id={}) no longer exists in database, skipping", filePath, fileId)
+                    }
                 }
             } catch (e: Exception) {
-                val errorMsg = "Failed to delete orphaned file ${file.name}: ${e.message}"
-                logger.error(errorMsg, e)
-                errors.add(errorMsg)
+                // Only log non-StaleStateException errors as errors
+                if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                    logger.debug("File ${file.name} (id=${file.id}) was already deleted, skipping")
+                } else {
+                    val errorMsg = "Failed to delete orphaned file ${file.name}: ${e.message}"
+                    logger.error(errorMsg, e)
+                    errors.add(errorMsg)
+                }
             }
         }
         
@@ -419,12 +508,32 @@ class DownloadsCleanupService(
                             val filePath = file.directory?.let { dir ->
                                 dir.fileSystemPath()?.let { "$it/${file.name}" } ?: file.name
                             } ?: file.name ?: "unknown"
-                            logger.debug("Deleting file {}/{} from torrent '{}': {} (id={})", 
-                                index + 1, torrent.files.size, torrentName, filePath, file.id)
-                            databaseFileService.deleteFile(file)
-                            logger.trace("Successfully deleted file: {}", filePath)
+                            val fileId = file.id
+                            
+                            // Check if file still exists before attempting deletion
+                            if (fileId != null && debridFileRepository.findById(fileId).isPresent) {
+                                logger.debug("Deleting file {}/{} from torrent '{}': {} (id={})", 
+                                    index + 1, torrent.files.size, torrentName, filePath, file.id)
+                                try {
+                                    databaseFileService.deleteFile(file)
+                                    logger.trace("Successfully deleted file: {}", filePath)
+                                } catch (e: org.hibernate.StaleStateException) {
+                                    // File was already deleted by another thread
+                                    logger.debug("File {} (id={}) was already deleted by another thread, skipping", filePath, fileId)
+                                } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                                    // File was already deleted by another thread
+                                    logger.debug("File {} (id={}) was already deleted by another thread, skipping", filePath, fileId)
+                                }
+                            } else {
+                                logger.debug("File {} (id={}) no longer exists in database, skipping", filePath, fileId)
+                            }
                         } catch (e: Exception) {
-                            logger.warn("Failed to delete file ${file.name} from torrent ${torrent.name}: ${e.message}", e)
+                            // Only log non-StaleStateException errors as warnings
+                            if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                                logger.debug("File ${file.name} (id=${file.id}) was already deleted, skipping")
+                            } else {
+                                logger.warn("Failed to delete file ${file.name} from torrent ${torrent.name}: ${e.message}", e)
+                            }
                         }
                     }
                     
@@ -463,17 +572,36 @@ class DownloadsCleanupService(
                         logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
                         deletedDirectoriesCount++
                     } else {
-                        logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
-                        logger.trace("Directory details: path={}, name={}, lastModified={}", 
-                            directory.path, directory.name, directory.lastModified)
-                        databaseFileService.deleteFile(directory)
-                        deletedDirectoriesCount++
-                        logger.trace("Successfully deleted directory: {}", dirPath)
+                        // Check if directory still exists before attempting deletion
+                        val dirId = directory.id
+                        if (dirId != null && debridFileRepository.findById(dirId).isPresent) {
+                            logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
+                            logger.trace("Directory details: path={}, name={}, lastModified={}", 
+                                directory.path, directory.name, directory.lastModified)
+                            try {
+                                databaseFileService.deleteFile(directory)
+                                deletedDirectoriesCount++
+                                logger.trace("Successfully deleted directory: {}", dirPath)
+                            } catch (e: org.hibernate.StaleStateException) {
+                                // Directory was already deleted by another thread
+                                logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                            } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                                // Directory was already deleted by another thread
+                                logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                            }
+                        } else {
+                            logger.debug("Directory {} (id={}) no longer exists in database, skipping", dirPath, dirId)
+                        }
                     }
                 } catch (e: Exception) {
-                    val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
-                    logger.error(errorMsg, e)
-                    errors.add(errorMsg)
+                    // Only log non-StaleStateException errors as errors
+                    if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                        logger.debug("Directory ${directory.name} (id=${directory.id}) was already deleted, skipping")
+                    } else {
+                        val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
+                        logger.error(errorMsg, e)
+                        errors.add(errorMsg)
+                    }
                 }
             }
             
