@@ -5,6 +5,7 @@ import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.torrent.Status
@@ -123,9 +124,19 @@ class DownloadsCleanupService(
         logger.info("Found {} file(s) not linked to ARR categories (will use {} hour threshold) and {} other abandoned file(s) (will use {} hour threshold)", 
             arrAbandonedFiles.size, arrCleanupAgeHours, otherAbandonedFiles.size, cleanupAgeHours)
         
-        if (abandonedFiles.isEmpty()) {
-            logger.info("No abandoned files found to clean up")
-            return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, dryRun = dryRun)
+        // Find empty directories in downloads folder
+        val downloadPathPrefix = convertPathToLtree(debridavConfigurationProperties.downloadPath)
+        logger.trace("Querying database for empty directories in downloads folder...")
+        val emptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
+        logger.debug("Found {} empty directory(ies) in downloads folder", emptyDirectories.size)
+        logger.trace("Empty directories: {}", emptyDirectories.map { 
+            val path = it.fileSystemPath() ?: it.path ?: "unknown"
+            "$path (id=${it.id}, name=${it.name})"
+        }.joinToString(", "))
+        
+        if (abandonedFiles.isEmpty() && emptyDirectories.isEmpty()) {
+            logger.info("No abandoned files or empty directories found to clean up")
+            return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, deletedDirectoriesCount = 0, dryRun = dryRun)
         }
 
         var deletedCount = 0
@@ -159,20 +170,46 @@ class DownloadsCleanupService(
                 errors.add(errorMsg)
             }
         }
+        
+        // Clean up empty directories after files are deleted
+        logger.debug("Processing {} empty directory(ies) for deletion", emptyDirectories.size)
+        var deletedDirectoriesCount = 0
+        for (directory in emptyDirectories) {
+            try {
+                val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
+                
+                if (dryRun) {
+                    logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
+                    deletedDirectoriesCount++
+                } else {
+                    logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
+                    logger.trace("Directory details: path={}, name={}, lastModified={}", 
+                        directory.path, directory.name, directory.lastModified)
+                    databaseFileService.deleteFile(directory)
+                    deletedDirectoriesCount++
+                    logger.trace("Successfully deleted directory: {}", dirPath)
+                }
+            } catch (e: Exception) {
+                val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
+                logger.error(errorMsg, e)
+                errors.add(errorMsg)
+            }
+        }
 
         val result = CleanupResult(
             deletedCount = deletedCount,
             totalSizeBytes = totalSizeBytes,
+            deletedDirectoriesCount = deletedDirectoriesCount,
             errors = errors,
             dryRun = dryRun
         )
 
         if (dryRun) {
-            logger.info("Dry run: Would delete {} abandoned file(s), total size: {} MB", 
-                deletedCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("Dry run: Would delete {} abandoned file(s) and {} empty directory(ies), total size: {} MB", 
+                deletedCount, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
         } else {
-            logger.info("Cleaned up {} abandoned file(s), total size: {} MB", 
-                deletedCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("Cleaned up {} abandoned file(s) and {} empty directory(ies), total size: {} MB", 
+                deletedCount, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
             if (errors.isNotEmpty()) {
                 logger.warn("Encountered {} error(s) during cleanup", errors.size)
             }
@@ -203,7 +240,10 @@ class DownloadsCleanupService(
     fun cleanupOrphanedTorrentsAndFiles(
         dryRun: Boolean = false
     ): CleanupResult {
+        logger.debug("=== Starting orphaned torrents/files cleanup (dryRun={}) ===", dryRun)
+        
         val arrCategories = getArrCategories()
+        logger.trace("ARR categories found: {}", arrCategories.joinToString(", "))
         
         if (arrCategories.isEmpty()) {
             logger.debug("No ARR categories found, skipping orphaned cleanup")
@@ -228,47 +268,95 @@ class DownloadsCleanupService(
         }
         
         val downloadPathPrefix = convertPathToLtree(debridavConfigurationProperties.downloadPath)
+        logger.trace("Download path prefix (ltree): {}", downloadPathPrefix)
+        logger.trace("Cutoff time: {} (useTimeBased={})", if (useTimeBased) Instant.ofEpochMilli(cutoffTime) else "N/A (immediate)", useTimeBased)
+        
+        // Find empty directories in downloads folder (for cleanup after files are deleted)
+        logger.trace("Querying database for empty directories in downloads folder...")
+        val emptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
+        logger.debug("Found {} empty directory(ies) in downloads folder", emptyDirectories.size)
+        logger.trace("Empty directories: {}", emptyDirectories.map { 
+            val path = it.fileSystemPath() ?: it.path ?: "unknown"
+            "$path (id=${it.id}, name=${it.name})"
+        }.joinToString(", "))
         
         // Find files not linked to any active category
+        logger.trace("Querying database for orphaned files...")
         val orphanedFiles = debridFileRepository.findAbandonedFilesNotLinkedToArrCategories(
             downloadPathPrefix = downloadPathPrefix,
             cutoffTime = cutoffTime,
             arrCategories = arrCategories
         )
+        logger.debug("Found {} orphaned file(s) not linked to ARR categories", orphanedFiles.size)
+        logger.trace("Orphaned files: {}", orphanedFiles.map { file ->
+            val path = file.directory?.let { dir ->
+                dir.fileSystemPath()?.let { dirPath -> "$dirPath/${file.name}" } ?: file.name
+            } ?: file.name ?: "unknown"
+            "$path (id=${file.id}, size=${file.size}, lastModified=${file.lastModified})"
+        }.joinToString(", "))
         
         // Find torrents not linked to any active category
+        logger.trace("Querying database for all LIVE torrents...")
         val allTorrents = torrentRepository.findAll().filter { it.status == Status.LIVE }
+        logger.trace("Found {} LIVE torrent(s) total", allTorrents.size)
+        
         val orphanedTorrents = allTorrents.filter { torrent ->
             val categoryName = torrent.category?.name
-            categoryName == null || categoryName !in arrCategories
+            val isOrphaned = categoryName == null || categoryName !in arrCategories
+            logger.trace("Torrent '{}' (id={}, category={}, savePath={}): isOrphaned={}", 
+                torrent.name, torrent.id, categoryName ?: "null", torrent.savePath, isOrphaned)
+            isOrphaned
         }.filter { torrent ->
             // Only include torrents in downloads folder
-            torrent.savePath?.startsWith(debridavConfigurationProperties.downloadPath) == true &&
-            // Apply age check only if time-based cleanup is enabled
-            (!useTimeBased || (torrent.created?.toEpochMilli() ?: Long.MAX_VALUE) < cutoffTime)
+            val inDownloadsFolder = torrent.savePath?.startsWith(debridavConfigurationProperties.downloadPath) == true
+            val ageCheck = if (useTimeBased) {
+                val created = torrent.created?.toEpochMilli() ?: Long.MAX_VALUE
+                val passesAgeCheck = created < cutoffTime
+                logger.trace("Torrent '{}' age check: created={}, cutoff={}, passes={}", 
+                    torrent.name, if (created != Long.MAX_VALUE) Instant.ofEpochMilli(created) else "null", 
+                    Instant.ofEpochMilli(cutoffTime), passesAgeCheck)
+                passesAgeCheck
+            } else {
+                true
+            }
+            val shouldInclude = inDownloadsFolder && ageCheck
+            logger.trace("Torrent '{}' filter: inDownloadsFolder={}, ageCheck={}, shouldInclude={}", 
+                torrent.name, inDownloadsFolder, ageCheck, shouldInclude)
+            shouldInclude
         }
+        logger.debug("Found {} orphaned torrent(s) not linked to ARR categories", orphanedTorrents.size)
+        logger.trace("Orphaned torrents: {}", orphanedTorrents.map { 
+            "${it.name} (id=${it.id}, category=${it.category?.name ?: "null"}, files=${it.files.size}, created=${it.created})"
+        }.joinToString(", "))
         
         var deletedCount = 0
         var totalSizeBytes = 0L
         val errors = mutableListOf<String>()
         
         // Delete orphaned files
+        logger.debug("Processing {} orphaned file(s) for deletion", orphanedFiles.size)
         for (file in orphanedFiles) {
             try {
                 val fileSize = file.size ?: 0L
                 val filePath = file.directory?.let { dir ->
                     dir.fileSystemPath()?.let { "$it/${file.name}" } ?: file.name
                 } ?: file.name ?: "unknown"
+                val fileSizeMB = String.format("%.2f", fileSize / 1_000_000.0)
                 
                 if (dryRun) {
-                    logger.debug("Would delete orphaned file: {} (size: {} bytes)", filePath, fileSize)
+                    logger.info("Would delete orphaned file: {} (size: {} bytes, {} MB, id={})", 
+                        filePath, fileSize, fileSizeMB, file.id)
                     deletedCount++
                     totalSizeBytes += fileSize
                 } else {
-                    logger.debug("Deleting orphaned file: {} (size: {} bytes)", filePath, fileSize)
+                    logger.info("Deleting orphaned file: {} (size: {} bytes, {} MB, id={})", 
+                        filePath, fileSize, fileSizeMB, file.id)
+                    logger.trace("File details: name={}, directory={}, lastModified={}, hash={}", 
+                        file.name, file.directory?.fileSystemPath(), file.lastModified, file.hash)
                     databaseFileService.deleteFile(file)
                     deletedCount++
                     totalSizeBytes += fileSize
+                    logger.trace("Successfully deleted file: {}", filePath)
                 }
             } catch (e: Exception) {
                 val errorMsg = "Failed to delete orphaned file ${file.name}: ${e.message}"
@@ -278,35 +366,51 @@ class DownloadsCleanupService(
         }
         
         // Delete orphaned torrents and their files
+        logger.debug("Processing {} orphaned torrent(s) for deletion", orphanedTorrents.size)
         for (torrent in orphanedTorrents) {
             try {
                 val torrentSize = torrent.files.sumOf { it.size ?: 0L }
                 val torrentName = torrent.name ?: "unknown"
+                val torrentSizeMB = String.format("%.2f", torrentSize / 1_000_000.0)
+                val torrentPath = torrent.savePath ?: "unknown"
                 
                 if (dryRun) {
-                    logger.debug("Would delete orphaned torrent: {} ({} files, {} bytes)", 
-                        torrentName, torrent.files.size, torrentSize)
+                    logger.info("Would delete orphaned torrent: {} ({} files, {} bytes, {} MB, id={}, path={})", 
+                        torrentName, torrent.files.size, torrentSize, torrentSizeMB, torrent.id, torrentPath)
+                    logger.trace("Torrent files: {}", torrent.files.map { 
+                        "${it.name} (id=${it.id}, size=${it.size})" 
+                    }.joinToString(", "))
                     deletedCount += torrent.files.size
                     totalSizeBytes += torrentSize
                 } else {
-                    logger.debug("Deleting orphaned torrent: {} ({} files, {} bytes)", 
-                        torrentName, torrent.files.size, torrentSize)
+                    logger.info("Deleting orphaned torrent: {} ({} files, {} bytes, {} MB, id={}, path={})", 
+                        torrentName, torrent.files.size, torrentSize, torrentSizeMB, torrent.id, torrentPath)
+                    logger.trace("Torrent details: category={}, hash={}, created={}, status={}", 
+                        torrent.category?.name, torrent.hash, torrent.created, torrent.status)
                     
                     // Delete all files in the torrent
-                    torrent.files.forEach { file ->
+                    torrent.files.forEachIndexed { index, file ->
                         try {
+                            val filePath = file.directory?.let { dir ->
+                                dir.fileSystemPath()?.let { "$it/${file.name}" } ?: file.name
+                            } ?: file.name ?: "unknown"
+                            logger.debug("Deleting file {}/{} from torrent '{}': {} (id={})", 
+                                index + 1, torrent.files.size, torrentName, filePath, file.id)
                             databaseFileService.deleteFile(file)
+                            logger.trace("Successfully deleted file: {}", filePath)
                         } catch (e: Exception) {
-                            logger.warn("Failed to delete file ${file.name} from torrent ${torrent.name}: ${e.message}")
+                            logger.warn("Failed to delete file ${file.name} from torrent ${torrent.name}: ${e.message}", e)
                         }
                     }
                     
                     // Mark torrent as deleted
+                    logger.trace("Marking torrent '{}' (id={}) as DELETED", torrentName, torrent.id)
                     torrent.status = Status.DELETED
                     torrentRepository.save(torrent)
                     
                     deletedCount += torrent.files.size
                     totalSizeBytes += torrentSize
+                    logger.debug("Successfully deleted torrent '{}' and {} file(s)", torrentName, torrent.files.size)
                 }
             } catch (e: Exception) {
                 val errorMsg = "Failed to delete orphaned torrent ${torrent.name}: ${e.message}"
@@ -315,9 +419,35 @@ class DownloadsCleanupService(
             }
         }
         
+        // Clean up empty directories after files are deleted
+        logger.debug("Processing {} empty directory(ies) for deletion", emptyDirectories.size)
+        var deletedDirectoriesCount = 0
+        for (directory in emptyDirectories) {
+            try {
+                val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
+                
+                if (dryRun) {
+                    logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
+                    deletedDirectoriesCount++
+                } else {
+                    logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
+                    logger.trace("Directory details: path={}, name={}, lastModified={}", 
+                        directory.path, directory.name, directory.lastModified)
+                    databaseFileService.deleteFile(directory)
+                    deletedDirectoriesCount++
+                    logger.trace("Successfully deleted directory: {}", dirPath)
+                }
+            } catch (e: Exception) {
+                val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
+                logger.error(errorMsg, e)
+                errors.add(errorMsg)
+            }
+        }
+        
         val result = CleanupResult(
             deletedCount = deletedCount,
             totalSizeBytes = totalSizeBytes,
+            deletedDirectoriesCount = deletedDirectoriesCount,
             errors = errors,
             dryRun = dryRun
         )
@@ -329,22 +459,158 @@ class DownloadsCleanupService(
         }
         
         if (dryRun) {
-            logger.info("Dry run ({}): Would delete {} orphaned file(s) and {} orphaned torrent(s), total size: {} MB", 
-                cleanupMode, orphanedFiles.size, orphanedTorrents.size, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("=== Cleanup dry run completed ({}) ===", cleanupMode)
+            logger.info("Would delete: {} orphaned file(s), {} orphaned torrent(s), {} empty directory(ies), total size: {} MB", 
+                orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
         } else {
-            logger.info("Cleaned up ({}) {} orphaned file(s) and {} orphaned torrent(s), total size: {} MB", 
-                cleanupMode, orphanedFiles.size, orphanedTorrents.size, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("=== Cleanup completed ({}) ===", cleanupMode)
+            logger.info("Deleted: {} orphaned file(s), {} orphaned torrent(s), {} empty directory(ies), total size: {} MB", 
+                orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
             if (errors.isNotEmpty()) {
                 logger.warn("Encountered {} error(s) during orphaned cleanup", errors.size)
+                errors.forEach { error ->
+                    logger.warn("Cleanup error: {}", error)
+                }
+            }
+        }
+        logger.trace("=== End orphaned cleanup ===")
+        
+        return result
+    }
+
+    /**
+     * Diagnostic method to check why a specific file/folder path isn't being cleaned up.
+     * This helps understand if files are linked to torrents/categories in the database.
+     */
+    fun diagnoseFileCleanupStatus(filePath: String): String {
+        val arrCategories = getArrCategories()
+        val downloadPathPrefix = convertPathToLtree(debridavConfigurationProperties.downloadPath)
+        
+        val diagnostic = StringBuilder()
+        diagnostic.appendLine("=== Cleanup Diagnostic for: $filePath ===")
+        diagnostic.appendLine("ARR Categories: ${arrCategories.joinToString(", ")}")
+        diagnostic.appendLine("Download Path: ${debridavConfigurationProperties.downloadPath}")
+        diagnostic.appendLine("Download Path Prefix (ltree): $downloadPathPrefix")
+        
+        // Try to find the file in the database
+        val normalizedPath = filePath.removePrefix(debridavConfigurationProperties.downloadPath).trimStart('/')
+        val pathParts = normalizedPath.split("/")
+        if (pathParts.isNotEmpty()) {
+            val folderName = pathParts[0]
+            diagnostic.appendLine("Folder name: $folderName")
+            
+            // Check if there's a torrent with this name
+            val allTorrents = torrentRepository.findAll()
+            val matchingTorrents = allTorrents.filter { 
+                it.status == Status.LIVE && 
+                (it.name?.contains(folderName, ignoreCase = true) == true || 
+                 it.savePath?.contains(folderName, ignoreCase = true) == true)
+            }
+            
+            diagnostic.appendLine("Matching torrents found: ${matchingTorrents.size}")
+            matchingTorrents.forEach { torrent ->
+                diagnostic.appendLine("  - Torrent: ${torrent.name} (id=${torrent.id})")
+                diagnostic.appendLine("    Category: ${torrent.category?.name ?: "null"} (downloadPath=${torrent.category?.downloadPath})")
+                diagnostic.appendLine("    Save Path: ${torrent.savePath}")
+                diagnostic.appendLine("    Status: ${torrent.status}")
+                diagnostic.appendLine("    Created: ${torrent.created}")
+                diagnostic.appendLine("    Files: ${torrent.files.size}")
+                diagnostic.appendLine("    Is in ARR categories: ${torrent.category?.name in arrCategories}")
+                torrent.files.take(5).forEach { file ->
+                    val dbFilePath = file.directory?.let { dir ->
+                        dir.fileSystemPath()?.let { "$it/${file.name}" } ?: file.name
+                    } ?: file.name
+                    diagnostic.appendLine("      - File: $dbFilePath (id=${file.id}, size=${file.size})")
+                }
+                if (torrent.files.size > 5) {
+                    diagnostic.appendLine("      ... and ${torrent.files.size - 5} more files")
+                }
+            }
+            
+            if (matchingTorrents.isEmpty()) {
+                diagnostic.appendLine("No matching torrents found in database for folder: $folderName")
+                diagnostic.appendLine("This folder may not be tracked in the database, or the torrent may have been deleted.")
+            }
+            
+            // Check for files in the directory structure
+            val folderPathLtree = convertPathToLtree("${debridavConfigurationProperties.downloadPath}/$folderName")
+            diagnostic.appendLine("")
+            diagnostic.appendLine("Checking for files in directory structure...")
+            
+            // Try to find the directory in the database
+            val directory = debridFileRepository.getDirectoryByPath(folderPathLtree)
+            if (directory != null) {
+                diagnostic.appendLine("Directory found in database: id=${directory.id}, path=${directory.path}")
+                diagnostic.appendLine("Recursively checking directory and all subdirectories...")
+                diagnostic.appendLine("")
+                
+                // Recursively traverse directory tree
+                var totalFiles = 0
+                var totalDirectories = 0
+                var filesNotLinkedToTorrents = 0
+                
+                fun traverseDirectory(dir: DbDirectory, indent: String = "") {
+                    val dirPath = dir.fileSystemPath() ?: dir.path ?: "unknown"
+                    diagnostic.appendLine("${indent}Directory: $dirPath (id=${dir.id})")
+                    totalDirectories++
+                    
+                    val children = debridFileRepository.getByDirectory(dir)
+                    val subdirectories = debridFileRepository.getChildrenByDirectory(dir)
+                    
+                    // Process files first
+                    children.filterIsInstance<RemotelyCachedEntity>().forEach { file ->
+                        totalFiles++
+                        val filePath = file.directory?.let { d ->
+                            d.fileSystemPath()?.let { "$it/${file.name}" } ?: file.name
+                        } ?: file.name
+                        val fileSizeMB = String.format("%.2f", (file.size ?: 0L) / 1_000_000.0)
+                        diagnostic.appendLine("${indent}  - File: $filePath (id=${file.id}, size=${file.size} bytes, ${fileSizeMB} MB)")
+                        
+                        // Check if file is linked to any torrent
+                        val linkedTorrents = torrentRepository.findAll().filter { torrent ->
+                            torrent.files.any { it.id == file.id }
+                        }
+                        if (linkedTorrents.isNotEmpty()) {
+                            linkedTorrents.forEach { torrent ->
+                                diagnostic.appendLine("${indent}    Linked to torrent: ${torrent.name} (id=${torrent.id}, category=${torrent.category?.name})")
+                                diagnostic.appendLine("${indent}      Is in ARR categories: ${torrent.category?.name in arrCategories}")
+                            }
+                        } else {
+                            filesNotLinkedToTorrents++
+                            diagnostic.appendLine("${indent}    NOT linked to any torrent - should be cleaned up!")
+                        }
+                    }
+                    
+                    // Process subdirectories recursively
+                    subdirectories.forEach { subdir ->
+                        traverseDirectory(subdir, "$indent  ")
+                    }
+                }
+                
+                traverseDirectory(directory)
+                
+                diagnostic.appendLine("")
+                diagnostic.appendLine("Summary:")
+                diagnostic.appendLine("  Total directories found: $totalDirectories")
+                diagnostic.appendLine("  Total files found: $totalFiles")
+                diagnostic.appendLine("  Files NOT linked to torrents: $filesNotLinkedToTorrents")
+                if (filesNotLinkedToTorrents > 0) {
+                    diagnostic.appendLine("  ⚠️  These files should be cleaned up if they meet age requirements")
+                }
+            } else {
+                diagnostic.appendLine("Directory not found in database with path: $folderPathLtree")
+                diagnostic.appendLine("This directory may exist on filesystem but not in database.")
             }
         }
         
-        return result
+        diagnostic.appendLine("=== End Diagnostic ===")
+        return diagnostic.toString()
     }
 
     data class CleanupResult(
         val deletedCount: Int,
         val totalSizeBytes: Long,
+        val deletedDirectoriesCount: Int = 0,
         val errors: List<String> = emptyList(),
         val dryRun: Boolean = false
     ) {

@@ -115,16 +115,21 @@ class TorrentService(
      */
     private fun triggerAutomaticCleanupAsync() {
         downloadsCleanupService?.let { cleanupService ->
+            logger.debug("Triggering automatic cleanup of orphaned torrents/files in background thread")
             cleanupScope.launch {
                 try {
+                    logger.trace("Automatic cleanup thread started")
                     // Automatic cleanup uses configuration settings (default: immediate cleanup)
                     // This runs in a separate thread and doesn't block the torrent add operation
                     cleanupService.cleanupOrphanedTorrentsAndFiles(dryRun = false)
+                    logger.trace("Automatic cleanup thread completed")
                 } catch (e: Exception) {
                     // Log but don't fail the torrent add operation if cleanup fails
                     logger.warn("Automatic cleanup failed: ${e.message}", e)
                 }
             }
+        } ?: run {
+            logger.trace("DownloadsCleanupService not available, skipping automatic cleanup")
         }
     }
     

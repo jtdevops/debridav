@@ -157,6 +157,10 @@ class DebriDavApplication : SpringBootServletInitializer() {
             logger.info("          curl -X POST \"$baseUrl/api/cleanup/downloads/cleanup?cleanupAgeHours=6&arrCleanupAgeHours=1&dryRun=false\"")
             logger.info("          (Files not linked to radarr/sonarr torrents are cleaned up after arrCleanupAgeHours)")
             logger.info("")
+            logger.info("  GET     $baseUrl/api/cleanup/downloads/diagnose?filePath=/downloads/folder-name")
+            logger.info("          curl \"$baseUrl/api/cleanup/downloads/diagnose?filePath=/downloads/Rounders%20(1998)%201080p%20BrRip%20x264%20-%20YIFY\"")
+            logger.info("          (Diagnose why a specific file/folder isn't being cleaned up)")
+            logger.info("")
             logger.info("=== End Maintenance Endpoints ===")
             logger.info("")
         }

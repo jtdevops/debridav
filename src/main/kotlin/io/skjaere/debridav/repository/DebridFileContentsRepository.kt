@@ -157,6 +157,24 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
         cutoffTime: Long,
         arrCategories: List<String>
     ): List<RemotelyCachedEntity>
+
+    @Query(
+        """
+        SELECT dir.* FROM db_item dir
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND dir.path != CAST(:downloadPathPrefix AS ltree)
+        AND NOT EXISTS (
+            SELECT 1 FROM db_item child
+            WHERE child.directory_id = dir.id
+        )
+        ORDER BY nlevel(dir.path) DESC
+        """,
+        nativeQuery = true
+    )
+    fun findEmptyDirectoriesInDownloads(
+        downloadPathPrefix: String
+    ): List<DbDirectory>
 }
 
 data class LibraryStats(val provider: String, val type: String, val count: Long)

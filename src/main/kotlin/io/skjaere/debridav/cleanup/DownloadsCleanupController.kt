@@ -73,6 +73,7 @@ class DownloadsCleanupController(
                 deletedCount = result.deletedCount,
                 totalSizeBytes = result.totalSizeBytes,
                 totalSizeMB = result.totalSizeMB,
+                deletedDirectoriesCount = result.deletedDirectoriesCount,
                 errors = result.errors,
                 dryRun = result.dryRun
             )
@@ -99,8 +100,17 @@ class DownloadsCleanupController(
         val deletedCount: Int,
         val totalSizeBytes: Long,
         val totalSizeMB: Double,
+        val deletedDirectoriesCount: Int,
         val errors: List<String>,
         val dryRun: Boolean
     )
+
+    @GetMapping("/downloads/diagnose")
+    fun diagnoseFileCleanupStatus(
+        @RequestParam filePath: String
+    ): ResponseEntity<String> {
+        val diagnostic = downloadsCleanupService.diagnoseFileCleanupStatus(filePath)
+        return ResponseEntity.ok(diagnostic)
+    }
 }
 
