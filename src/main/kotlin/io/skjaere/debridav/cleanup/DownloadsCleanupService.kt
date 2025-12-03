@@ -172,28 +172,53 @@ class DownloadsCleanupService(
         }
         
         // Clean up empty directories after files are deleted
-        logger.debug("Processing {} empty directory(ies) for deletion", emptyDirectories.size)
+        // Use a loop to recursively clean up parent directories that become empty
         var deletedDirectoriesCount = 0
-        for (directory in emptyDirectories) {
-            try {
-                val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
-                
-                if (dryRun) {
-                    logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
-                    deletedDirectoriesCount++
-                } else {
-                    logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
-                    logger.trace("Directory details: path={}, name={}, lastModified={}", 
-                        directory.path, directory.name, directory.lastModified)
-                    databaseFileService.deleteFile(directory)
-                    deletedDirectoriesCount++
-                    logger.trace("Successfully deleted directory: {}", dirPath)
+        var iteration = 0
+        var currentEmptyDirectories = emptyDirectories
+        
+        while (currentEmptyDirectories.isNotEmpty() && iteration < 100) { // Safety limit of 100 iterations
+            iteration++
+            logger.debug("Empty directory cleanup iteration {}: found {} empty directory(ies)", iteration, currentEmptyDirectories.size)
+            
+            // Process directories from deepest to shallowest (already ordered by nlevel DESC)
+            for (directory in currentEmptyDirectories) {
+                try {
+                    val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
+                    
+                    if (dryRun) {
+                        logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
+                        deletedDirectoriesCount++
+                    } else {
+                        logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
+                        logger.trace("Directory details: path={}, name={}, lastModified={}", 
+                            directory.path, directory.name, directory.lastModified)
+                        databaseFileService.deleteFile(directory)
+                        deletedDirectoriesCount++
+                        logger.trace("Successfully deleted directory: {}", dirPath)
+                    }
+                } catch (e: Exception) {
+                    val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
+                    logger.error(errorMsg, e)
+                    errors.add(errorMsg)
                 }
-            } catch (e: Exception) {
-                val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
-                logger.error(errorMsg, e)
-                errors.add(errorMsg)
             }
+            
+            // Re-query for empty directories (parent directories may have become empty)
+            if (!dryRun) {
+                currentEmptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
+                if (currentEmptyDirectories.isNotEmpty()) {
+                    logger.debug("Found {} additional empty directory(ies) after deletion, continuing cleanup", currentEmptyDirectories.size)
+                }
+            } else {
+                // In dry run, we can't actually delete, so we simulate by checking what would become empty
+                // For simplicity, just break after first iteration in dry run
+                break
+            }
+        }
+        
+        if (iteration >= 100) {
+            logger.warn("Empty directory cleanup reached iteration limit (100), there may be circular references or other issues")
         }
 
         val result = CleanupResult(
@@ -420,28 +445,53 @@ class DownloadsCleanupService(
         }
         
         // Clean up empty directories after files are deleted
-        logger.debug("Processing {} empty directory(ies) for deletion", emptyDirectories.size)
+        // Use a loop to recursively clean up parent directories that become empty
         var deletedDirectoriesCount = 0
-        for (directory in emptyDirectories) {
-            try {
-                val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
-                
-                if (dryRun) {
-                    logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
-                    deletedDirectoriesCount++
-                } else {
-                    logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
-                    logger.trace("Directory details: path={}, name={}, lastModified={}", 
-                        directory.path, directory.name, directory.lastModified)
-                    databaseFileService.deleteFile(directory)
-                    deletedDirectoriesCount++
-                    logger.trace("Successfully deleted directory: {}", dirPath)
+        var iteration = 0
+        var currentEmptyDirectories = emptyDirectories
+        
+        while (currentEmptyDirectories.isNotEmpty() && iteration < 100) { // Safety limit of 100 iterations
+            iteration++
+            logger.debug("Empty directory cleanup iteration {}: found {} empty directory(ies)", iteration, currentEmptyDirectories.size)
+            
+            // Process directories from deepest to shallowest (already ordered by nlevel DESC)
+            for (directory in currentEmptyDirectories) {
+                try {
+                    val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
+                    
+                    if (dryRun) {
+                        logger.info("Would delete empty directory: {} (id={})", dirPath, directory.id)
+                        deletedDirectoriesCount++
+                    } else {
+                        logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
+                        logger.trace("Directory details: path={}, name={}, lastModified={}", 
+                            directory.path, directory.name, directory.lastModified)
+                        databaseFileService.deleteFile(directory)
+                        deletedDirectoriesCount++
+                        logger.trace("Successfully deleted directory: {}", dirPath)
+                    }
+                } catch (e: Exception) {
+                    val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
+                    logger.error(errorMsg, e)
+                    errors.add(errorMsg)
                 }
-            } catch (e: Exception) {
-                val errorMsg = "Failed to delete empty directory ${directory.name}: ${e.message}"
-                logger.error(errorMsg, e)
-                errors.add(errorMsg)
             }
+            
+            // Re-query for empty directories (parent directories may have become empty)
+            if (!dryRun) {
+                currentEmptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
+                if (currentEmptyDirectories.isNotEmpty()) {
+                    logger.debug("Found {} additional empty directory(ies) after deletion, continuing cleanup", currentEmptyDirectories.size)
+                }
+            } else {
+                // In dry run, we can't actually delete, so we simulate by checking what would become empty
+                // For simplicity, just break after first iteration in dry run
+                break
+            }
+        }
+        
+        if (iteration >= 100) {
+            logger.warn("Empty directory cleanup reached iteration limit (100), there may be circular references or other issues")
         }
         
         val result = CleanupResult(
