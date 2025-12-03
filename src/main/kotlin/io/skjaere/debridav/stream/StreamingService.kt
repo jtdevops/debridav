@@ -80,7 +80,8 @@ data class DownloadTrackingContext(
 data class HttpRequestInfo(
     val headers: Map<String, String> = emptyMap(),
     val sourceIpAddress: String? = null,
-    val sourceHostname: String? = null
+    val sourceHostname: String? = null,
+    val isInternal: Boolean = false
 ) {
     val sourceInfo: String? get() {
         val ip = sourceIpAddress ?: return null
@@ -294,12 +295,21 @@ class StreamingService(
         // This is independent of trackingId (which is used for /actuator/streaming-download-tracking)
         val logId = System.currentTimeMillis().toString()
         
-        // Log video download start at INFO level (unconditional, not dependent on tracking flag)
+        // Log video download start at INFO level (only for external requests, not internal operations)
+        // Also suppress logs for very small ranges (< 1KB) which are likely metadata requests
         val fileName = remotelyCachedEntity.name ?: "unknown"
         val requestedSize = appliedRange.finish - appliedRange.start + 1
         val requestedSizeMB = String.format("%.2f", requestedSize / 1_000_000.0)
-        logger.info("Video download started [id={}]: file={}, range={}-{}, size={} bytes ({} MB), provider={}", 
-            logId, fileName, appliedRange.start, appliedRange.finish, requestedSize, requestedSizeMB, providerLabel)
+        val isSmallRange = requestedSize < 1024 // Less than 1KB is likely a metadata request
+        val shouldLog = !httpRequestInfo.isInternal && !isSmallRange
+        
+        if (shouldLog) {
+            logger.info("Video download started [id={}]: file={}, range={}-{}, size={} bytes ({} MB), provider={}", 
+                logId, fileName, appliedRange.start, appliedRange.finish, requestedSize, requestedSizeMB, providerLabel)
+        } else {
+            logger.debug("Video download started (internal/small) [id={}]: file={}, range={}-{}, size={} bytes ({} MB), provider={}, isInternal={}, isSmallRange={}", 
+                logId, fileName, appliedRange.start, appliedRange.finish, requestedSize, requestedSizeMB, providerLabel, httpRequestInfo.isInternal, isSmallRange)
+        }
         
         var result: StreamResult = StreamResult.OK
         try {
@@ -412,7 +422,8 @@ class StreamingService(
             this.coroutineContext.cancelChildren()
             trackingId?.let { id -> completeDownloadTracking(id, result) }
             
-            // Log video download completion at INFO level (unconditional, not dependent on tracking flag)
+            // Log video download completion at INFO level (only for external requests, not internal operations)
+            // Also suppress logs for very small ranges (< 1KB) which are likely metadata requests
             // Reuse the same logId from start to link the logs together
             val status = when (result) {
                 StreamResult.OK -> "completed"
@@ -421,8 +432,16 @@ class StreamingService(
                 StreamResult.CLIENT_ERROR -> "client_error"
                 else -> "error"
             }
-            logger.info("Video download stopped [id={}]: file={}, size={} bytes ({} MB), status={}", 
-                logId, fileNameForCompletion, requestedSize, requestedSizeMB, status)
+            val isSmallRange = requestedSize < 1024 // Less than 1KB is likely a metadata request
+            val shouldLog = !httpRequestInfo.isInternal && !isSmallRange
+            
+            if (shouldLog) {
+                logger.info("Video download stopped [id={}]: file={}, size={} bytes ({} MB), status={}", 
+                    logId, fileNameForCompletion, requestedSize, requestedSizeMB, status)
+            } else {
+                logger.debug("Video download stopped (internal/small) [id={}]: file={}, size={} bytes ({} MB), status={}, isInternal={}, isSmallRange={}", 
+                    logId, fileNameForCompletion, requestedSize, requestedSizeMB, status, httpRequestInfo.isInternal, isSmallRange)
+            }
         }
         logger.debug("done streaming ${debridLink.path}: $result")
         result
