@@ -1793,6 +1793,65 @@ class IptvRequestService(
             }
         }
         
+        // For series, fetch metadata to get year, resolution, and codec (even when no episode parameter)
+        // This ensures we always extract codec and resolution from the API, not just when episode parameter is provided
+        if (contentType == ContentType.SERIES) {
+            results.forEach { entity ->
+                val providerConfig = iptvConfigurationService.getProviderConfigurations()
+                    .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+                
+                if (providerConfig != null) {
+                    // Try to get from cache first
+                    val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(entity.providerName, entity.contentId)
+                    val (seriesInfo, episodes) = if (cachedMetadata != null) {
+                        // Parse from cached JSON response
+                        logger.debug("Parsing series metadata from cached JSON response for series ${entity.contentId}")
+                        parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                    } else {
+                        // No cache, fetch and store
+                        logger.debug("No cache found for series ${entity.contentId}, fetching from API")
+                        fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
+                    }
+                    
+                    // Extract year from series info
+                    if (seriesInfo != null) {
+                        val seriesYear = extractYearFromReleaseDate(seriesInfo.release_date ?: seriesInfo.releaseDate)
+                        if (seriesYear != null) {
+                            entitySeriesYears["${entity.providerName}_${entity.contentId}"] = seriesYear
+                            logger.debug("Extracted year $seriesYear from series metadata for series ${entity.contentId}")
+                        }
+                    }
+                    
+                    // Extract resolution and codec from first episode (S01E01) as reference
+                    if (episodes.isNotEmpty()) {
+                        val referenceEpisode = episodes.find { it.season == 1 && it.episode == 1 }
+                        
+                        if (referenceEpisode != null) {
+                            // Extract resolution from video metadata
+                            val resolution = referenceEpisode.info?.video?.let { video ->
+                                extractResolutionFromVideo(video.width, video.height)
+                            }
+                            if (resolution != null) {
+                                entityResolutions["${entity.providerName}_${entity.contentId}"] = resolution
+                                logger.debug("Extracted resolution from S01E01 for series ${entity.contentId}: $resolution (width=${referenceEpisode.info?.video?.width}, height=${referenceEpisode.info?.video?.height})")
+                            }
+                            
+                            // Extract codec from video metadata
+                            val codec = referenceEpisode.info?.video?.codec_name?.let { codecName ->
+                                mapCodecToMagnetFormat(codecName)
+                            }
+                            if (codec != null) {
+                                entityCodecs["${entity.providerName}_${entity.contentId}"] = codec
+                                logger.debug("Extracted codec from S01E01 for series ${entity.contentId}: $codec (codec_name=${referenceEpisode.info?.video?.codec_name})")
+                            }
+                        } else {
+                            logger.debug("S01E01 not found for series ${entity.contentId}, will use default estimates")
+                        }
+                    }
+                }
+            }
+        }
+        
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
             logger.debug("Episode parameter provided (episode=$episode, parsed season=$requestedSeason), fetching episodes for series to verify availability")
             results.filter { entity ->
