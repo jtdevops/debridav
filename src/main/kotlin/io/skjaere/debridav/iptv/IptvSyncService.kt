@@ -44,12 +44,16 @@ class IptvSyncService(
         fixedDelayString = "\${iptv.sync-interval}"
     )
     fun syncIptvContent() {
+        syncIptvContent(forceSync = false)
+    }
+
+    fun syncIptvContent(forceSync: Boolean = false) {
         if (!iptvConfigurationProperties.enabled) {
             logger.debug("IPTV sync skipped - IPTV is disabled")
             return
         }
 
-        logger.info("Starting IPTV content sync")
+        logger.info("Starting IPTV content sync${if (forceSync) " (forced)" else ""}")
         
         // Check for interrupted syncs from previous run
         checkAndResumeInterruptedSyncs()
@@ -80,19 +84,24 @@ class IptvSyncService(
                     if (failedSyncs.isNotEmpty()) {
                         logger.info("Provider ${providerConfig.name} has ${failedSyncs.size} failed sync(s), will resync immediately")
                     } else {
-                        // Check per-provider timing instead of global timing
-                        // This allows new providers to sync immediately even if other providers were synced recently
-                        val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
-                        if (mostRecentSync != null) {
-                            val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
-                            
-                            if (timeSinceLastSync < syncInterval) {
-                                val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
-                                logger.info("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
-                                return@forEach
+                        // Skip time interval check if forceSync is true
+                        if (!forceSync) {
+                            // Check per-provider timing instead of global timing
+                            // This allows new providers to sync immediately even if other providers were synced recently
+                            val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
+                            if (mostRecentSync != null) {
+                                val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
+                                
+                                if (timeSinceLastSync < syncInterval) {
+                                    val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
+                                    logger.info("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
+                                    return@forEach
+                                }
+                            } else {
+                                logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
                             }
                         } else {
-                            logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
+                            logger.info("Provider ${providerConfig.name} sync forced via API, bypassing time interval check")
                         }
                     }
                 }

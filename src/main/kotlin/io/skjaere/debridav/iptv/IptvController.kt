@@ -22,7 +22,7 @@ class IptvController(
     @PostMapping("/sync")
     fun triggerSync(): ResponseEntity<Map<String, String>> {
         logger.info("Manual IPTV sync triggered")
-        iptvSyncService.syncIptvContent()
+        iptvSyncService.syncIptvContent(forceSync = true)
         return ResponseEntity.ok(mapOf("status" to "sync triggered"))
     }
 
