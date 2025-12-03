@@ -107,7 +107,8 @@ class IptvApiController(
             q = q,
             qTest = qTest,
             query = query,
-            contentType = contentType
+            contentType = contentType,
+            isTestRequest = isTestRequest
         )
         
         if (searchQuery == null) {
@@ -116,13 +117,14 @@ class IptvApiController(
                 val failureReason = determineFailureReason(qTest, null, contentType)
                 logger.warn("Prowlarr test connection failed - no valid search query: qTest='{}', reason={}", qTest, failureReason)
             } else {
-                logger.warn("No valid search query found in request parameters")
+                // For non-test requests, provide detailed failure reason
+                val failureReason = determineFailureReason(imdbid ?: q ?: query, null, contentType)
+                logger.warn("IPTV search failed - no valid search query found: imdbid='{}', q='{}', query='{}', reason={}", 
+                    imdbid ?: "N/A", q ?: "N/A", query ?: "N/A", failureReason)
             }
             return ResponseEntity.ok(emptyList())
         }
         
-        logger.debug("Searching IPTV content with title='{}', year={}, startYear={}, endYear={}, contentType={}, season={}, episode={}, useArticleVariations={}", 
-            searchQuery.title, searchQuery.year, searchQuery.startYear, searchQuery.endYear, contentType, season, episode, searchQuery.useArticleVariations)
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
         val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear)
         
@@ -135,10 +137,34 @@ class IptvApiController(
             }
             // Don't log INFO for test requests with results
         } else {
-            // Normal requests: log at DEBUG level
-            logger.debug("Search returned {} results", results.size)
-            if (results.isNotEmpty()) {
-                logger.debug("First result sample: {}", results.first())
+            // Normal requests: log at INFO level with main details
+            val yearInfo = when {
+                searchQuery.endYear != null -> "${searchQuery.startYear ?: searchQuery.year}-${searchQuery.endYear}"
+                searchQuery.startYear != null -> searchQuery.startYear.toString()
+                searchQuery.year != null -> searchQuery.year.toString()
+                else -> null
+            }
+            val episodeInfo = episode?.takeIf { it.isNotBlank() }
+            
+            if (results.isEmpty()) {
+                // No results - use WARN to indicate potential issue
+                val failureReason = determineFailureReason(null, searchQuery, contentType)
+                logger.warn("IPTV search returned no results: title='{}'{}{}{}, reason={}", 
+                    searchQuery.title,
+                    yearInfo?.let { ", year=$it" } ?: "",
+                    contentType?.let { ", type=$it" } ?: "",
+                    episodeInfo?.let { ", episode=$it" } ?: "",
+                    failureReason)
+            } else {
+                // Results found - log at INFO level
+                val firstResultMagnet = results.first().magnetUri?.take(100) // Truncate for readability
+                logger.info("IPTV search completed: title='{}'{}{}{}, results={}, firstResultMagnet={}", 
+                    searchQuery.title,
+                    yearInfo?.let { ", year=$it" } ?: "",
+                    contentType?.let { ", type=$it" } ?: "",
+                    episodeInfo?.let { ", episode=$it" } ?: "",
+                    results.size,
+                    firstResultMagnet ?: "N/A")
             }
         }
         return ResponseEntity.ok(results)
@@ -166,6 +192,8 @@ class IptvApiController(
      * 
      * Note: qTest should only be used when q and imdbid are not provided.
      * If q or imdbid are provided but fail to find results, we don't fall back to qTest.
+     * 
+     * @param isTestRequest Whether this is a test request (affects logging level)
      */
     private fun determineSearchQuery(
         imdbid: String?,
@@ -175,7 +203,8 @@ class IptvApiController(
         q: String?,
         qTest: String?,
         query: String?,
-        contentType: ContentType?
+        contentType: ContentType?,
+        isTestRequest: Boolean = false
     ): SearchQuery? {
         // Check if q or imdbid are provided - if so, qTest should not be used
         val hasImdbId = imdbid?.takeIf { it.isNotBlank() } != null
@@ -190,7 +219,9 @@ class IptvApiController(
             }
             
             if (metadata != null) {
-                logger.debug("Successfully resolved IMDB ID '$imdbId' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear})")
+                logger.info("Resolved IMDb ID '{}' to: '{}' (year: {}{})", 
+                    imdbId, metadata.title, metadata.startYear, 
+                    metadata.endYear?.let { "-$it" } ?: "")
                 // Return title and year separately - we'll search by title only and filter by year
                 // Don't use article variations when metadata is provided (useArticleVariations = false)
                 return SearchQuery(
@@ -211,7 +242,11 @@ class IptvApiController(
         // Priority 2: Use 'q' parameter
         val qParam = q?.takeIf { it.isNotBlank() }
         if (qParam != null) {
-            logger.debug("Using 'q' parameter: '$qParam'")
+            if (!isTestRequest) {
+                logger.info("IPTV search request: query='{}'", qParam)
+            } else {
+                logger.debug("Using 'q' parameter: '$qParam'")
+            }
             return extractTitleAndYear(qParam, useArticleVariations = true)
         }
         
