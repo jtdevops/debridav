@@ -70,5 +70,10 @@ interface IptvContentRepository : JpaRepository<IptvContentEntity, Long> {
         @Param("query") query: String,
         @Param("contentType") contentType: ContentType
     ): List<IptvContentEntity>
+    
+    fun findByIsActive(isActive: Boolean): List<IptvContentEntity>
+    
+    @Query("SELECT e FROM IptvContentEntity e WHERE e.isActive = false")
+    fun findInactiveContent(): List<IptvContentEntity>
 }
 

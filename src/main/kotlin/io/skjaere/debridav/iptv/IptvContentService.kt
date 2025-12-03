@@ -1,11 +1,15 @@
 package io.skjaere.debridav.iptv
 
+import io.skjaere.debridav.fs.DebridIptvContent
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.iptv.model.ContentType
+import io.skjaere.debridav.repository.DebridFileContentsRepository
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.net.URI
 
 @Service
@@ -15,7 +19,8 @@ class IptvContentService(
     private val iptvSyncHashRepository: IptvSyncHashRepository,
     private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
     private val iptvConfigurationService: IptvConfigurationService,
-    private val iptvConfigurationProperties: IptvConfigurationProperties
+    private val iptvConfigurationProperties: IptvConfigurationProperties,
+    private val debridFileContentsRepository: DebridFileContentsRepository
 ) {
     private val logger = LoggerFactory.getLogger(IptvContentService::class.java)
 
@@ -561,6 +566,58 @@ class IptvContentService(
         resolved = resolved.replace("%7BPASSWORD%7D", providerConfig.xtreamPassword ?: "")
         
         return resolved
+    }
+    
+    /**
+     * Finds files (RemotelyCachedEntity) that are linked to inactive IPTV content items.
+     * Returns a map of inactive IPTV content to their linked files.
+     */
+    fun findFilesLinkedToInactiveContent(): Map<IptvContentEntity, List<RemotelyCachedEntity>> {
+        val inactiveContent = iptvContentRepository.findInactiveContent()
+        logger.debug("Found ${inactiveContent.size} inactive IPTV content items")
+        
+        val result = mutableMapOf<IptvContentEntity, List<RemotelyCachedEntity>>()
+        
+        inactiveContent.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isNotEmpty()) {
+                result[content] = files
+                logger.debug("Found ${files.size} files linked to inactive content: ${content.title} (id: ${content.id})")
+            }
+        }
+        
+        logger.info("Found ${result.size} inactive IPTV content items with linked files (total ${result.values.sumOf { it.size }} files)")
+        return result
+    }
+    
+    /**
+     * Deletes inactive IPTV content items that are not linked to any files.
+     * Returns the number of deleted items.
+     */
+    @Transactional
+    fun deleteInactiveContentWithoutFiles(): Int {
+        val inactiveContent = iptvContentRepository.findInactiveContent()
+        logger.debug("Found ${inactiveContent.size} inactive IPTV content items to check")
+        
+        val contentToDelete = mutableListOf<IptvContentEntity>()
+        
+        inactiveContent.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isEmpty()) {
+                contentToDelete.add(content)
+            } else {
+                logger.debug("Skipping deletion of inactive content ${content.title} (id: ${content.id}) - has ${files.size} linked files")
+            }
+        }
+        
+        if (contentToDelete.isNotEmpty()) {
+            logger.info("Deleting ${contentToDelete.size} inactive IPTV content items without linked files")
+            iptvContentRepository.deleteAll(contentToDelete)
+        } else {
+            logger.info("No inactive IPTV content items to delete (all have linked files)")
+        }
+        
+        return contentToDelete.size
     }
 }
 
