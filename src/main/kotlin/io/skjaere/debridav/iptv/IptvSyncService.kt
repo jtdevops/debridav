@@ -395,21 +395,8 @@ class IptvSyncService(
                 if (response.status == HttpStatusCode.OK) {
                     val body = response.body<String>()
                     
-                    // Save response if configured
-                    // If saveResponse returns false (empty response), treat as unchanged to avoid overwriting cached data
-                    if (responseFileService.shouldSaveResponses()) {
-                        val saved = responseFileService.saveResponse(providerConfig, "m3u", body)
-                        if (!saved) {
-                            logger.info("M3U playlist response was empty or significantly smaller than cached for provider ${providerConfig.name}, treating as unchanged")
-                            val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, "m3u")
-                            if (storedHash != null) {
-                                storedHash.lastChecked = Instant.now()
-                                iptvSyncHashRepository.save(storedHash)
-                            }
-                            return HashCheckResult(shouldSync = false, changedEndpoints = emptyMap(), endpointType = "m3u")
-                        }
-                    }
-                    
+                    // Don't save here - save only after hash check confirms we will sync
+                    // This prevents saving bad/empty responses when provider is down
                     body
                 } else {
                     logger.error("Failed to fetch M3U playlist for hash check: ${response.status}")
@@ -440,6 +427,14 @@ class IptvSyncService(
             iptvSyncHashRepository.save(storedHash)
             HashCheckResult(shouldSync = false, changedEndpoints = emptyMap(), endpointType = "m3u", endpointSizes = emptyMap())
         } else {
+            // Hash changed or doesn't exist - we will sync
+            // Save response to file now that we know we'll import it
+            if (responseFileService.shouldSaveResponses()) {
+                val saved = responseFileService.saveResponse(providerConfig, "m3u", content)
+                if (!saved) {
+                    logger.warn("M3U playlist response for provider ${providerConfig.name} was empty or significantly smaller than cached, but hash changed - will sync anyway")
+                }
+            }
             // Hash changed or doesn't exist, need to sync (but don't update hash yet)
             HashCheckResult(shouldSync = true, changedEndpoints = mapOf("m3u" to currentHash), endpointType = "m3u", endpointSizes = mapOf("m3u" to contentSize))
         }
@@ -534,7 +529,14 @@ class IptvSyncService(
         val storedHash = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerConfig.name, endpointType)
         
         if (storedHash?.contentHash != currentHash) {
-            // Hash changed or doesn't exist
+            // Hash changed or doesn't exist - we will sync
+            // Save response to file now that we know we'll import it
+            if (responseFileService.shouldSaveResponses()) {
+                val saved = responseFileService.saveResponse(providerConfig, endpointType, responseBody)
+                if (!saved) {
+                    logger.warn("Response for endpoint $endpointType from provider ${providerConfig.name} was empty or significantly smaller than cached, but hash changed - will sync anyway")
+                }
+            }
             logger.info("Endpoint $endpointType changed for provider ${providerConfig.name}, will sync")
             return responseBody to currentHash
         } else {

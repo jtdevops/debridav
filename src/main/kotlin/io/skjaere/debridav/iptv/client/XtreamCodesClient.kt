@@ -875,17 +875,8 @@ class XtreamCodesClient(
             if (response.status == HttpStatusCode.OK) {
                 val body = response.body<String>()
                 
-                // Save response if configured
-                // If saveResponse returns false, it means the response was empty and skipped
-                // In this case, we should return null to indicate the response shouldn't be used
-                if (responseFileService.shouldSaveResponses()) {
-                    val saved = responseFileService.saveResponse(providerConfig, endpointType, body)
-                    if (!saved) {
-                        logger.warn("Skipping sync for endpoint $endpointType from provider ${providerConfig.name} - response was empty or significantly smaller than cached")
-                        return null
-                    }
-                }
-                
+                // Don't save here - save only after hash check confirms we will sync
+                // This prevents saving bad/empty responses when provider is down
                 return body
             } else {
                 logger.warn("Failed to fetch $endpointType: ${response.status}")
