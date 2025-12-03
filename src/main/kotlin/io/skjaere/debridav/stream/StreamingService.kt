@@ -289,12 +289,17 @@ class StreamingService(
         
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
         
+        // Create a simple log ID for linking start/stop logs
+        // Use only timestamp for simplicity - it's unique enough to link start/stop pairs
+        // This is independent of trackingId (which is used for /actuator/streaming-download-tracking)
+        val logId = System.currentTimeMillis().toString()
+        
         // Log video download start at INFO level (unconditional, not dependent on tracking flag)
         val fileName = remotelyCachedEntity.name ?: "unknown"
         val requestedSize = appliedRange.finish - appliedRange.start + 1
         val requestedSizeMB = String.format("%.2f", requestedSize / 1_000_000.0)
-        logger.info("Video download started: file={}, range={}-{}, size={} bytes ({} MB), provider={}", 
-            fileName, appliedRange.start, appliedRange.finish, requestedSize, requestedSizeMB, providerLabel)
+        logger.info("Video download started [id={}]: file={}, range={}-{}, size={} bytes ({} MB), provider={}", 
+            logId, fileName, appliedRange.start, appliedRange.finish, requestedSize, requestedSizeMB, providerLabel)
         
         var result: StreamResult = StreamResult.OK
         try {
@@ -408,6 +413,7 @@ class StreamingService(
             trackingId?.let { id -> completeDownloadTracking(id, result) }
             
             // Log video download completion at INFO level (unconditional, not dependent on tracking flag)
+            // Reuse the same logId from start to link the logs together
             val status = when (result) {
                 StreamResult.OK -> "completed"
                 StreamResult.IO_ERROR -> "io_error"
@@ -415,8 +421,8 @@ class StreamingService(
                 StreamResult.CLIENT_ERROR -> "client_error"
                 else -> "error"
             }
-            logger.info("Video download stopped: file={}, size={} bytes ({} MB), status={}", 
-                fileNameForCompletion, requestedSize, requestedSizeMB, status)
+            logger.info("Video download stopped [id={}]: file={}, size={} bytes ({} MB), status={}", 
+                logId, fileNameForCompletion, requestedSize, requestedSizeMB, status)
         }
         logger.debug("done streaming ${debridLink.path}: $result")
         result
@@ -1002,9 +1008,15 @@ class StreamingService(
         val trackingId = "${System.currentTimeMillis()}-${debridLink.path.hashCode()}"
         val requestedSize = (range?.finish ?: debridLink.size!! - 1) - (range?.start ?: 0) + 1
         val fileName = remotelyCachedEntity.name ?: "unknown"
+        
+        // Get the actual realized file path including parent folders
+        // This is the actual file path in the filesystem, not the original magnet path
+        val actualFilePath = remotelyCachedEntity.directory?.fileSystemPath()?.let { 
+            "$it/$fileName" 
+        } ?: fileName
 
         val context = DownloadTrackingContext(
-            filePath = debridLink.path ?: "unknown_path",
+            filePath = actualFilePath,
             fileName = fileName,
             requestedRange = range,
             requestedSize = requestedSize,
@@ -1014,7 +1026,7 @@ class StreamingService(
         
         activeDownloads[trackingId] = context
         
-        logger.info("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
+        logger.debug("DOWNLOAD_TRACKING_STARTED: file={}, requestedSize={} bytes, trackingId={}", 
             fileName, requestedSize, trackingId)
         
         return trackingId
@@ -1036,7 +1048,7 @@ class StreamingService(
         // Set actual bytes sent to the final downloaded count
         context.actualBytesSent = context.bytesDownloaded.get()
         
-        logger.info("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
+        logger.debug("DOWNLOAD_TRACKING_COMPLETED: file={}, bytesDownloaded={}, actualBytesSent={}", 
             context.fileName, context.bytesDownloaded.get(), context.actualBytesSent)
         
         completedDownloads.add(context)
