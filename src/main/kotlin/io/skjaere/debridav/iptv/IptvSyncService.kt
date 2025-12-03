@@ -541,10 +541,11 @@ class IptvSyncService(
             return responseBody to currentHash
         } else {
             // Hash unchanged, just update last checked timestamp
+            // But return the response body so it can be reused (e.g., when processing streams that need categories)
             logger.info("Endpoint $endpointType unchanged for provider ${providerConfig.name}, skipping sync")
             storedHash.lastChecked = Instant.now()
             iptvSyncHashRepository.save(storedHash)
-            return null to null
+            return responseBody to null // Return body for reuse, null hash indicates unchanged
         }
     }
 
@@ -570,13 +571,16 @@ class IptvSyncService(
             hasChanges = true
             logger.debug("Syncing VOD content for provider ${providerConfig.name}")
             
-            // Parse categories from in-memory body
+            // Parse categories from in-memory body (reuse cached body even if unchanged)
             val vodCategories = if (vodCategoriesBody != null) {
                 val categoriesList = xtreamCodesClient.parseVodCategoriesFromBody(vodCategoriesBody)
-                syncCategories(providerConfig.name, "vod", categoriesList.map { it.category_id.toString() to it.category_name })
+                // Only sync categories if they changed (hash is not null)
+                if (vodCategoriesHash != null) {
+                    syncCategories(providerConfig.name, "vod", categoriesList.map { it.category_id.toString() to it.category_name })
+                }
                 categoriesList
             } else {
-                // Categories unchanged, fetch them normally
+                // Fallback: if body is null (shouldn't happen), fetch them normally
                 xtreamCodesClient.getVodCategoriesAsObjects(providerConfig)
             }
             
@@ -610,13 +614,16 @@ class IptvSyncService(
             hasChanges = true
             logger.debug("Syncing series content for provider ${providerConfig.name}")
             
-            // Parse categories from in-memory body
+            // Parse categories from in-memory body (reuse cached body even if unchanged)
             val seriesCategories = if (seriesCategoriesBody != null) {
                 val categoriesList = xtreamCodesClient.parseSeriesCategoriesFromBody(seriesCategoriesBody)
-                syncCategories(providerConfig.name, "series", categoriesList.map { it.category_id.toString() to it.category_name })
+                // Only sync categories if they changed (hash is not null)
+                if (seriesCategoriesHash != null) {
+                    syncCategories(providerConfig.name, "series", categoriesList.map { it.category_id.toString() to it.category_name })
+                }
                 categoriesList
             } else {
-                // Categories unchanged, fetch them normally
+                // Fallback: if body is null (shouldn't happen), fetch them normally
                 xtreamCodesClient.getSeriesCategoriesAsObjects(providerConfig)
             }
             
