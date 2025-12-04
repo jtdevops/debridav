@@ -224,12 +224,55 @@ class IptvSyncService(
             
             // Mark sync as completed
             markSyncCompleted(providerConfig.name, providerConfig.type)
+            
+            // Check if sync completed successfully for this provider before cleaning up
+            if (isProviderSyncCompleted(providerConfig.name, providerConfig.type)) {
+                // Cleanup inactive content items for this provider that aren't linked to files
+                try {
+                    val deletedCount = iptvContentService.deleteInactiveContentWithoutFilesForProvider(providerConfig.name)
+                    if (deletedCount > 0) {
+                        logger.info("Cleaned up $deletedCount inactive IPTV content items and their metadata for provider ${providerConfig.name} after successful sync")
+                    }
+                } catch (e: Exception) {
+                    logger.error("Error during cleanup of inactive IPTV content items for provider ${providerConfig.name}", e)
+                    // Don't fail the sync if cleanup fails
+                }
+            } else {
+                logger.warn("Skipping cleanup for provider ${providerConfig.name} - sync did not complete successfully")
+            }
         } catch (e: Exception) {
             logger.error("Sync failed for provider ${providerConfig.name}, hash not updated. Will retry on next sync.", e)
             // Mark sync as failed
             markSyncFailed(providerConfig.name, providerConfig.type)
             throw e // Re-throw to be caught by outer try-catch
         }
+    }
+    
+    /**
+     * Checks if a provider's sync completed successfully by verifying all endpoints have COMPLETED status.
+     */
+    private fun isProviderSyncCompleted(providerName: String, providerType: io.skjaere.debridav.iptv.IptvProvider): Boolean {
+        val endpoints = when (providerType) {
+            io.skjaere.debridav.iptv.IptvProvider.M3U -> listOf("m3u")
+            io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> listOf("vod_categories", "vod_streams", "series_categories", "series_streams")
+        }
+        
+        // Check if any endpoint is not completed
+        val notCompleted = iptvSyncHashRepository.findByProviderNameAndSyncStatusNotCompleted(providerName)
+            .filter { it.endpointType in endpoints }
+        
+        if (notCompleted.isNotEmpty()) {
+            logger.debug("Provider $providerName has ${notCompleted.size} endpoint(s) that did not complete successfully: ${notCompleted.map { "${it.endpointType}=${it.syncStatus}" }}")
+            return false
+        }
+        
+        // Verify all expected endpoints exist and are completed
+        val allEndpointsCompleted = endpoints.all { endpointType ->
+            val hashEntity = iptvSyncHashRepository.findByProviderNameAndEndpointType(providerName, endpointType)
+            hashEntity?.syncStatus == "COMPLETED"
+        }
+        
+        return allEndpointsCompleted
     }
     
     /**

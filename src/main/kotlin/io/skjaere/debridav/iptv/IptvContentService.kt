@@ -18,6 +18,7 @@ class IptvContentService(
     private val iptvCategoryRepository: IptvCategoryRepository,
     private val iptvSyncHashRepository: IptvSyncHashRepository,
     private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
+    private val iptvMovieMetadataRepository: IptvMovieMetadataRepository,
     private val iptvConfigurationService: IptvConfigurationService,
     private val iptvConfigurationProperties: IptvConfigurationProperties,
     private val debridFileContentsRepository: DebridFileContentsRepository
@@ -592,6 +593,7 @@ class IptvContentService(
     
     /**
      * Deletes inactive IPTV content items that are not linked to any files.
+     * Also deletes metadata (movie and series) linked to the deleted content items.
      * Returns the number of deleted items.
      */
     @Transactional
@@ -612,9 +614,84 @@ class IptvContentService(
         
         if (contentToDelete.isNotEmpty()) {
             logger.info("Deleting ${contentToDelete.size} inactive IPTV content items without linked files")
+            
+            // Group content by provider and content type for efficient metadata deletion
+            val contentByProvider = contentToDelete.groupBy { it.providerName }
+            
+            contentByProvider.forEach { (providerName, contentList) ->
+                // Separate movies and series
+                val movieIds = contentList.filter { it.contentType == ContentType.MOVIE }.map { it.contentId }
+                val seriesIds = contentList.filter { it.contentType == ContentType.SERIES }.map { it.contentId }
+                
+                // Delete movie metadata
+                if (movieIds.isNotEmpty()) {
+                    val deletedMovieMetadata = iptvMovieMetadataRepository.deleteByProviderNameAndMovieIds(providerName, movieIds)
+                    logger.debug("Deleted $deletedMovieMetadata movie metadata entries for provider $providerName")
+                }
+                
+                // Delete series metadata
+                if (seriesIds.isNotEmpty()) {
+                    val deletedSeriesMetadata = iptvSeriesMetadataRepository.deleteByProviderNameAndSeriesIds(providerName, seriesIds)
+                    logger.debug("Deleted $deletedSeriesMetadata series metadata entries for provider $providerName")
+                }
+            }
+            
+            // Delete the content items
             iptvContentRepository.deleteAll(contentToDelete)
+            logger.info("Deleted ${contentToDelete.size} inactive IPTV content items and their associated metadata")
         } else {
             logger.info("No inactive IPTV content items to delete (all have linked files)")
+        }
+        
+        return contentToDelete.size
+    }
+    
+    /**
+     * Deletes inactive IPTV content items for a specific provider that are not linked to any files.
+     * Also deletes metadata (movie and series) linked to the deleted content items.
+     * Returns the number of deleted items.
+     */
+    @Transactional
+    fun deleteInactiveContentWithoutFilesForProvider(providerName: String): Int {
+        val inactiveContent = iptvContentRepository.findInactiveContent()
+            .filter { it.providerName == providerName }
+        logger.debug("Found ${inactiveContent.size} inactive IPTV content items for provider $providerName to check")
+        
+        val contentToDelete = mutableListOf<IptvContentEntity>()
+        
+        inactiveContent.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isEmpty()) {
+                contentToDelete.add(content)
+            } else {
+                logger.debug("Skipping deletion of inactive content ${content.title} (id: ${content.id}) for provider $providerName - has ${files.size} linked files")
+            }
+        }
+        
+        if (contentToDelete.isNotEmpty()) {
+            logger.info("Deleting ${contentToDelete.size} inactive IPTV content items without linked files for provider $providerName")
+            
+            // Separate movies and series
+            val movieIds = contentToDelete.filter { it.contentType == ContentType.MOVIE }.map { it.contentId }
+            val seriesIds = contentToDelete.filter { it.contentType == ContentType.SERIES }.map { it.contentId }
+            
+            // Delete movie metadata
+            if (movieIds.isNotEmpty()) {
+                val deletedMovieMetadata = iptvMovieMetadataRepository.deleteByProviderNameAndMovieIds(providerName, movieIds)
+                logger.debug("Deleted $deletedMovieMetadata movie metadata entries for provider $providerName")
+            }
+            
+            // Delete series metadata
+            if (seriesIds.isNotEmpty()) {
+                val deletedSeriesMetadata = iptvSeriesMetadataRepository.deleteByProviderNameAndSeriesIds(providerName, seriesIds)
+                logger.debug("Deleted $deletedSeriesMetadata series metadata entries for provider $providerName")
+            }
+            
+            // Delete the content items
+            iptvContentRepository.deleteAll(contentToDelete)
+            logger.info("Deleted ${contentToDelete.size} inactive IPTV content items and their associated metadata for provider $providerName")
+        } else {
+            logger.debug("No inactive IPTV content items to delete for provider $providerName (all have linked files)")
         }
         
         return contentToDelete.size

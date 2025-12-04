@@ -24,5 +24,9 @@ interface IptvSeriesMetadataRepository : JpaRepository<IptvSeriesMetadataEntity,
     
     @Query("SELECT COUNT(e) FROM IptvSeriesMetadataEntity e WHERE e.providerName = :providerName")
     fun countByProviderName(@Param("providerName") providerName: String): Long
+    
+    @Modifying
+    @Query("DELETE FROM IptvSeriesMetadataEntity e WHERE e.providerName = :providerName AND e.seriesId IN :seriesIds")
+    fun deleteByProviderNameAndSeriesIds(@Param("providerName") providerName: String, @Param("seriesIds") seriesIds: Collection<String>): Int
 }
 
