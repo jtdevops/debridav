@@ -1661,7 +1661,7 @@ class IptvRequestService(
         return title
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null): List<IptvSearchResult> {
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false): List<IptvSearchResult> {
         val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
@@ -1989,8 +1989,8 @@ class IptvRequestService(
                             logger.debug("Extracted $episodeLabel file size from video tags for series ${entity.contentId}: ${referenceFileSize / 1_000_000}MB")
                         }
                         
-                        // If still not found, try to fetch from episode URL
-                        if (referenceFileSize == null) {
+                        // If still not found, try to fetch from episode URL (skip for test requests)
+                        if (referenceFileSize == null && !isTestRequest) {
                             val episodeUrl = buildEpisodeUrl(providerConfig, referenceEpisode)
                             if (episodeUrl != null) {
                                 try {
@@ -2010,6 +2010,8 @@ class IptvRequestService(
                                     referenceFileSize = null
                                 }
                             }
+                        } else if (referenceFileSize == null && isTestRequest) {
+                            logger.debug("Skipping file size fetch from episode URL for test request (qTest parameter only)")
                         }
                         
                         if (referenceFileSize != null && referenceFileSize > 0) {
@@ -2101,8 +2103,8 @@ class IptvRequestService(
                                 entityReferenceEpisodeFileSizes["${entity.providerName}_${entity.contentId}"] = requestedFileSize
                             }
                             
-                            // If still not found, try to fetch from episode URL
-                            if (requestedFileSize == null) {
+                            // If still not found, try to fetch from episode URL (skip for test requests)
+                            if (requestedFileSize == null && !isTestRequest) {
                                 val episodeUrl = buildEpisodeUrl(providerConfig, requestedEpisode)
                                 if (episodeUrl != null) {
                                     try {
@@ -2124,6 +2126,8 @@ class IptvRequestService(
                                         requestedFileSize = null
                                     }
                                 }
+                            } else if (requestedFileSize == null && isTestRequest) {
+                                logger.debug("Skipping file size fetch from episode URL for test request (qTest parameter only)")
                             }
                         }
                     }

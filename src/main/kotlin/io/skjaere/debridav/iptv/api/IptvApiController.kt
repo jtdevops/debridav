@@ -126,7 +126,7 @@ class IptvApiController(
         }
         
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest)
         
         // For test requests, only log if there are no results (WARN level)
         if (isTestRequest) {
