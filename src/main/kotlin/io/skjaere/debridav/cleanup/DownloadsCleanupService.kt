@@ -319,15 +319,23 @@ class DownloadsCleanupService(
      * - If time-based cleanup is enabled: It's older than the configured threshold
      * - If immediate cleanup (default): No age check, all orphaned content is removed
      * 
-     * This method is synchronized to prevent concurrent execution from multiple threads.
+     * This method uses a lock to prevent concurrent execution from multiple threads.
+     * The transaction is started inside the lock to ensure proper synchronization.
      */
-    @Transactional
     fun cleanupOrphanedTorrentsAndFiles(
         dryRun: Boolean = false
     ): CleanupResult {
         // Use lock to prevent concurrent cleanup operations
+        // The lock must be acquired BEFORE any transaction starts to prevent race conditions
+        val threadName = Thread.currentThread().name
+        logger.trace("Thread {} attempting to acquire cleanup lock", threadName)
         return cleanupLock.withLock {
-            cleanupOrphanedTorrentsAndFilesInternal(dryRun)
+            logger.debug("Thread {} acquired cleanup lock, starting cleanup", threadName)
+            try {
+                cleanupOrphanedTorrentsAndFilesInternal(dryRun)
+            } finally {
+                logger.trace("Thread {} releasing cleanup lock", threadName)
+            }
         }
     }
     
