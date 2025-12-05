@@ -2321,7 +2321,7 @@ class IptvRequestService(
                 size = estimatedSize,
                 quality = quality ?: "1080p" // Use adjusted quality (may be downgraded to 480p for non-EN languages)
             )
-        }
+        }.sortedBy { it.title }
     }
     
     private fun determineMimeType(title: String): String {
