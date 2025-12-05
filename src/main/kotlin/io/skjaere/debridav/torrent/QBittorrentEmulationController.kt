@@ -262,12 +262,36 @@ class QBittorrentEmulationController(
         consumes = [MediaType.APPLICATION_FORM_URLENCODED_VALUE]
     )
     fun deleteTorrents(
-        @RequestParam hashes: List<String>
+        @RequestParam hashes: List<String>,
+        request: HttpServletRequest
     ): ResponseEntity<String> {
+        // Resolve hostname from IP address
+        val remoteAddr = request.remoteAddr
+        val remoteInfo = try {
+            val hostname = java.net.InetAddress.getByName(remoteAddr).hostName
+            if (hostname != remoteAddr) {
+                "$remoteAddr/$hostname"
+            } else {
+                remoteAddr
+            }
+        } catch (e: Exception) {
+            remoteAddr
+        }
+        
+        logger.debug("Delete torrent request received - hashes={}, fullQueryString='{}'", 
+            hashes.size, request.queryString)
+        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, remoteInfo)
+        
+        // Log all request parameters for debugging
+        request.parameterMap.forEach { (key, values) ->
+            logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
+        }
+        
         hashes.forEach {
             torrentService.deleteTorrentByHash(it)
         }
 
+        logger.info("Deleted {} torrent(s): {}", hashes.size, hashes.joinToString(", "))
         return ResponseEntity.ok("ok")
     }
 
