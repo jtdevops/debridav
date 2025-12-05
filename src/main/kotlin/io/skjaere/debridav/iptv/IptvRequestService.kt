@@ -2197,11 +2197,22 @@ class IptvRequestService(
                 else -> year
             }
             // Get codec from metadata if available
-            val codecForTitle = when (entity.contentType) {
+            var codecForTitle = when (entity.contentType) {
                 ContentType.SERIES -> entityCodecs["${entity.providerName}_${entity.contentId}"]
                 ContentType.MOVIE -> entityMovieCodecs["${entity.providerName}_${entity.contentId}"]
                 else -> null
             }
+            
+            // If no codec found in metadata, check file extension to determine codec
+            // .avi files typically use XviD codec unless metadata says otherwise
+            if (codecForTitle == null) {
+                val mediaExtension = extractMediaExtensionFromUrl(entity.url)
+                if (mediaExtension != null && mediaExtension.equals("avi", ignoreCase = true)) {
+                    codecForTitle = "XviD"
+                    logger.debug("No codec found in metadata for ${entity.contentType} ${entity.contentId}, assuming XviD based on .avi extension")
+                }
+            }
+            
             var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode, codecForTitle)
             
             // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
