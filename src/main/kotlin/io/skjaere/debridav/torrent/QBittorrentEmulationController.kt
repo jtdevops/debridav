@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import io.skjaere.debridav.category.Category
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.configuration.RuntimeConfigurationService
 import io.skjaere.debridav.debrid.TorrentMagnet
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
@@ -25,7 +26,8 @@ class QBittorrentEmulationController(
     private val resourceLoader: ResourceLoader,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val categoryService: CategoryService,
-    private val torrentToMagnetConverter: TorrentToMagnetConverter
+    private val torrentToMagnetConverter: TorrentToMagnetConverter,
+    private val runtimeConfigurationService: RuntimeConfigurationService
 ) {
     companion object {
         const val API_VERSION = "2.9.3"
@@ -80,11 +82,16 @@ class QBittorrentEmulationController(
     @GetMapping("/api/v2/torrents/info")
     fun torrentsInfo(requestParams: TorrentsInfoRequestParams): List<TorrentsInfoResponse> {
         val category = requestParams.category ?: ""
+        // Get effective debug suffix (runtime override takes precedence)
+        val debugSuffix = runtimeConfigurationService.getEffectiveValue(
+            "debugArrTorrentInfoContentPathSuffix",
+            debridavConfigurationProperties.debugArrTorrentInfoContentPathSuffix
+        )
         return torrentService
             .getTorrentsByCategory(category)
             //.filter { it.files?.firstOrNull()?.originalPath != null }
             .map {
-                TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath, debridavConfigurationProperties.debugArrTorrentInfoContentPathSuffix)
+                TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath, debugSuffix)
             }
     }
 
