@@ -40,4 +40,14 @@ class CategoryService(
     fun findByName(name: String): Category? {
         return categoryRepository.findByNameIgnoreCase(name)
     }
+
+    /**
+     * Gets all categories that use the downloads folder (download_path='/downloads').
+     * These are typically ARR categories (radarr, sonarr, etc.) that Sonarr/Radarr
+     * can see via /api/v2/torrents/info?category=<category-name>
+     */
+    fun getArrCategories(downloadPath: String = debridavConfigurationProperties.downloadPath): List<String> {
+        return categoryRepository.findByDownloadPath(downloadPath)
+            .mapNotNull { it.name }
+    }
 }

@@ -15,6 +15,7 @@
 
 > **Quick links to new features:**
 > - [Fork Enhancements Overview](#fork-enhancements)
+> - [IPTV Movies/TV Shows Integration](#iptv-moviestv-shows-integration)
 > - [Enhanced Caching & Performance Options](#enhanced-caching--performance-options)
 > - [Streaming & Retry Configuration](#streaming--retry-configuration)
 > - [Download Tracking & Monitoring](#download-tracking--monitoring)
@@ -35,6 +36,7 @@ protocol so that they can be mounted.
 ## Features
 
 - Stream content from Real Debrid, Premiumize and Easynews with Plex/Jellyfin.
+- **IPTV Movies/TV Shows**: Index and stream VOD content from IPTV providers (Xtream Codes API and M3U playlists) alongside debrid content.
 - Sort your content as you would regular files. You can create directories, rename files, and move them around any way
   you like. No need to write regular expressions.
 - Seamless integration into the arr-ecosystem, providing a near identical experience to downloading torrents. DebriDav
@@ -42,6 +44,7 @@ protocol so that they can be mounted.
   so they can add content, and automatically move your files for you.
 - Supports multiple debrid providers. DebriDav supports enabling both Premiumize and Real Debrid concurrently with
   defined priorities. If a torrent is not cached in the primary provider, it will fall back to the secondary.
+- Supports multiple IPTV providers with configurable priority and automatic content syncing.
 
 ## Fork Enhancements
 
@@ -62,6 +65,15 @@ This fork adds several significant improvements and new features while maintaini
 - **Local Video File Serving**: Serve small, locally-hosted video files to ARR projects instead of actual media files, dramatically reducing bandwidth usage during library scans
 - **Automatic Link Refresh**: Automatic retry with fresh links when streaming errors occur
 - **Configurable Streaming Retries**: Fine-tune retry behavior with customizable delays and retry counts for different error types
+
+### 📺 IPTV Integration
+- **IPTV Movies/TV Shows Support**: Index and stream VOD content from IPTV providers alongside debrid content
+- **Xtream Codes API Support**: Full support for Xtream Codes IPTV providers with automatic content syncing
+- **M3U Playlist Support**: Support for M3U playlist-based IPTV providers (untested)
+- **Prowlarr Integration**: Custom indexer definition for searching IPTV content through Prowlarr
+- **Multiple Provider Support**: Configure multiple IPTV providers with priority-based fallback
+- **Metadata Integration**: Optional OMDB API integration for enhanced content metadata
+- **Direct Streaming**: IPTV content streams directly from providers without requiring debrid services
 
 ### 🔧 Developer Experience
 - **Multi-Stage Docker Build**: Optimized Docker builds with separate build and runtime stages
@@ -212,6 +224,8 @@ The `example.full` folder contains an optimized streaming configuration that inc
 - Pre-configured streaming optimizations (byte range chunking disabled, direct streaming enabled)
 - Enhanced caching configurations for reduced bandwidth usage
 - Local video file serving setup for ARR projects
+- IPTV integration configuration with example provider setups (Xtream Codes)
+- Prowlarr custom indexer definition for IPTV content searching
 - Complete docker-compose setup with all services (DebriDav, rclone, Sonarr, Radarr, Prowlarr, PostgreSQL)
 - Additional media server configurations (Plex, Jellyfin, Jellyseerr)
 
@@ -339,6 +353,110 @@ This feature dramatically reduces bandwidth usage when ARR projects (Radarr, Son
 | DEBRIDAV_RCLONE_ARRS_HOSTNAME_PATTERN          | Hostname pattern for detecting ARR requests. When requests come from matching hostnames, local video serving is applied. Example: `radarr` or `sonarr`                                                             |                  |
 
 For detailed information about the local video file approach, see [LOCAL_VIDEO_FOR_ARRS.md](LOCAL_VIDEO_FOR_ARRS.md).
+
+### IPTV Movies/TV Shows Integration
+
+The IPTV integration allows DebriDav to index and serve VOD (Video on Demand) content from IPTV providers. This content appears in the virtual filesystem alongside debrid content, making it accessible to Sonarr/Radarr through the existing download client interface and searchable through Prowlarr using a custom indexer definition.
+
+**Key Features:**
+- **Xtream Codes Support**: Full support for Xtream Codes API-based IPTV providers (thoroughly tested)
+- **M3U Playlist Support**: Support for M3U playlist-based IPTV providers (untested)
+- **Background Syncing**: Automatic periodic syncing of IPTV content catalogs
+- **Search API**: RESTful API endpoint for searching IPTV content by title, IMDb ID, TMDB ID, and more
+- **Prowlarr Integration**: Custom indexer definition (`debridav-iptv.yml`) for seamless integration with Prowlarr
+- **Multiple Providers**: Support for multiple IPTV providers with configurable priority
+- **Metadata Enhancement**: Optional OMDB API integration for enhanced movie/TV show metadata
+- **Direct Streaming**: IPTV content streams directly from providers without requiring debrid services
+- **Language Prefix Support**: Configurable language or source prefixes for content matching (e.g., "EN" for English, "UNV" for Universal Studios)
+
+**Configuration:**
+
+| NAME                                           | Explanation                                                                                                                                                                                                          | Default          |
+|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------|
+| IPTV_ENABLED                                   | Enable IPTV support. When enabled, DebriDav will sync and index IPTV content from configured providers.                                                                                                           | false            |
+| IPTV_SYNC_INTERVAL                             | Interval for automatic IPTV content syncing. Format: ISO8601 duration string (e.g., PT24H for 24 hours, PT12H for 12 hours, PT1H for 1 hour).                                                                      | PT24H            |
+| IPTV_PROVIDERS                                 | Comma-separated list of IPTV provider names to enable. Example: `provider1,provider2`. If not specified, all configured providers are enabled.                                                                     |                  |
+| IPTV_LANGUAGE_PREFIXES                         | Language or source prefixes to identify IPTV content. Format: comma-separated list. Example: `007,4K-A+,EN,NF,UNV,VP`. For prefixes with trailing spaces, use indexed format: `IPTV_LANGUAGE_PREFIXES_INDEX_0="AM| "`. Prefixes are used to match content titles (e.g., 'EN' for English, 'UNV' for Universal Studios). This is specific to each IPTV provider's content naming conventions. Predefined separators are automatically applied to each prefix. |                  |
+| IPTV_METADATA_OMDB_API_KEY                     | Optional OMDB API key for enhanced metadata retrieval. When provided, DebriDav will fetch additional movie/TV show metadata from OMDB.                                                                             |                  |
+| IPTV_INCLUDE_PROVIDER_IN_MAGNET_TITLE          | Include the IPTV provider name in the magnet URI title. Useful for identifying the source provider in search results.                                                                                             | false            |
+| IPTV_USE_LOCAL_RESPONSES                       | Cache IPTV API responses locally to reduce API calls and improve performance. When enabled, responses are saved to the folder specified by `IPTV_RESPONSE_SAVE_FOLDER`.                                            | false            |
+| IPTV_RESPONSE_SAVE_FOLDER                      | Folder path where cached IPTV responses are stored when `IPTV_USE_LOCAL_RESPONSES` is enabled. Example: `/iptv_cache`.                                                                                              |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_TYPE             | Type of IPTV provider. Valid values: `xtream_codes` (for Xtream Codes API) or `m3u` (for M3U playlists). Replace `{PROVIDER_NAME}` with your provider name (e.g., `provider1`).                                     |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_XTREAM_BASE_URL  | Base URL for Xtream Codes provider. Format: `https://example.com:8080` (include port if not 80/443). Required when `TYPE=xtream_codes`.                                                                              |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_XTREAM_USERNAME  | Username for Xtream Codes provider authentication. Required when `TYPE=xtream_codes`.                                                                                                                              |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_XTREAM_PASSWORD  | Password for Xtream Codes provider authentication. Required when `TYPE=xtream_codes`.                                                                                                                              |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_M3U_URL          | URL to M3U playlist file. Required when `TYPE=m3u`. Example: `https://example.com/playlist.m3u`.                                                                                                                   |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_M3U_FILE_PATH    | Local file path to M3U playlist file. Alternative to `M3U_URL` when playlist is stored locally. Required when `TYPE=m3u` and `M3U_URL` is not specified. Example: `/path/to/playlist.m3u`.                            |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_PRIORITY         | Priority for provider fallback. Lower numbers have higher priority. When searching, providers are queried in priority order. Example: `1` (highest priority), `2` (lower priority).                                 |                  |
+| IPTV_PROVIDER_{PROVIDER_NAME}_SYNC_ENABLED     | Enable or disable syncing for a specific provider. When disabled, the provider's content will not be synced. Useful for temporarily disabling problematic providers.                                              | true             |
+| DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_IPTV_BYPASS_PROVIDERS | Comma-separated list of IPTV provider names that should bypass local video file serving for ARR requests. Use `*` to bypass for all IPTV providers. When bypassed, IPTV content is served directly from the provider instead of local video files. |                  |
+
+**Example Configuration:**
+
+```yaml
+# Enable IPTV
+IPTV_ENABLED=true
+IPTV_SYNC_INTERVAL=PT24H
+
+# List of provider names (comma-separated)
+IPTV_PROVIDERS=provider1,provider2
+
+# Configure first provider (Xtream Codes)
+IPTV_PROVIDER_PROVIDER1_TYPE=xtream_codes
+IPTV_PROVIDER_PROVIDER1_XTREAM_BASE_URL=https://example.com:8080
+IPTV_PROVIDER_PROVIDER1_XTREAM_USERNAME=your_username
+IPTV_PROVIDER_PROVIDER1_XTREAM_PASSWORD=your_password
+IPTV_PROVIDER_PROVIDER1_PRIORITY=1
+
+# Configure second provider (M3U - untested)
+IPTV_PROVIDER_PROVIDER2_TYPE=m3u
+IPTV_PROVIDER_PROVIDER2_M3U_URL=https://example.com/playlist.m3u
+IPTV_PROVIDER_PROVIDER2_PRIORITY=2
+
+# Optional metadata enhancement
+IPTV_METADATA_OMDB_API_KEY=your_omdb_api_key
+
+# Optional: Language prefixes for content matching
+# Can be used to identify specific language or source prefixes to IPTV content.
+# For example 'EN' for English, or 'UNV' for Universal Studios.
+# This is specific to each IPTV provider and how they provide their content.
+IPTV_LANGUAGE_PREFIXES_INDEX_0="AM| "
+IPTV_LANGUAGE_PREFIXES="007,4K-A+,4K-AMZ,4K-D+,4K-EN,4K-MAX,4K-MRVL,4K-NF,4K-NF-DO,4M-AMZ,A+,AMZ,CR,D+,D+ ,DWA,EN,EN-TOP,EX,MRVL,Nf,NF,NF-DO,NICK,P+,PCOK,PRMT,SHWT,SKY,TOP,TOP-DO,UFC,UNV,VP"
+
+# Cache IPTV responses locally
+#IPTV_USE_LOCAL_RESPONSES=true
+IPTV_RESPONSE_SAVE_FOLDER=/iptv_cache
+
+# Bypass local video serving for all IPTV providers
+DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_IPTV_BYPASS_PROVIDERS=*
+```
+
+**Prowlarr Integration:**
+
+A custom indexer definition file (`debridav-iptv.yml`) is included in the `example.full/prowlarr-config/Definitions/Custom/` directory. To use it:
+
+1. Copy the file to your Prowlarr configuration directory: `prowlarr-config/Definitions/Custom/debridav-iptv.yml`
+2. Restart Prowlarr to load the custom indexer
+3. Add "DebriDav IPTV" as an indexer in Prowlarr settings
+4. Configure validation titles (optional) for testing the indexer connection
+5. Sync the indexer with Sonarr/Radarr
+
+The indexer supports searching by title, IMDb ID, TMDB ID, TVDB ID, and other metadata fields.
+
+**API Endpoints:**
+
+- `GET /api/iptv/search` - Search IPTV content (supports query parameters: `q`, `imdbid`, `tmdbid`, `tvdbid`, `year`, `type`, etc.)
+- `POST /api/iptv/sync` - Manually trigger IPTV content sync
+- `GET /api/iptv/status` - Get IPTV sync status
+
+**Important Notes:**
+
+- **M3U Playlist Support**: M3U playlist support is implemented but untested. Xtream Codes API support has been thoroughly tested and is recommended for production use.
+- **Direct Streaming**: IPTV content streams directly from the provider URL without requiring debrid services. This makes IPTV content available even without a debrid subscription.
+- **Content Syncing**: IPTV content is synced periodically in the background. The first sync may take some time depending on the size of your provider's catalog.
+- **Virtual Filesystem**: IPTV content appears in the same virtual filesystem as debrid content, making it transparent to Sonarr/Radarr.
+
+For detailed IPTV configuration and troubleshooting, see [IPTV_CONFIGURATION_GUIDE.md](IPTV_CONFIGURATION_GUIDE.md).
 
 ## Developing
 

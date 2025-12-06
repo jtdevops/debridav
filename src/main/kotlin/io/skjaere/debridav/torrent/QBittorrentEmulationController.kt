@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import io.skjaere.debridav.category.Category
 import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.configuration.RuntimeConfigurationService
 import io.skjaere.debridav.debrid.TorrentMagnet
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
@@ -24,7 +25,9 @@ class QBittorrentEmulationController(
     private val torrentService: TorrentService,
     private val resourceLoader: ResourceLoader,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
-    private val categoryService: CategoryService
+    private val categoryService: CategoryService,
+    private val torrentToMagnetConverter: TorrentToMagnetConverter,
+    private val runtimeConfigurationService: RuntimeConfigurationService
 ) {
     companion object {
         const val API_VERSION = "2.9.3"
@@ -79,11 +82,16 @@ class QBittorrentEmulationController(
     @GetMapping("/api/v2/torrents/info")
     fun torrentsInfo(requestParams: TorrentsInfoRequestParams): List<TorrentsInfoResponse> {
         val category = requestParams.category ?: ""
+        // Get effective debug suffix (runtime override takes precedence)
+        val debugSuffix = runtimeConfigurationService.getEffectiveValue(
+            "debugArrTorrentInfoContentPathSuffix",
+            debridavConfigurationProperties.debugArrTorrentInfoContentPathSuffix
+        )
         return torrentService
             .getTorrentsByCategory(category)
             //.filter { it.files?.firstOrNull()?.originalPath != null }
             .map {
-                TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath)
+                TorrentsInfoResponse.ofTorrent(it, debridavConfigurationProperties.mountPath, debugSuffix)
             }
     }
 
@@ -124,7 +132,40 @@ class QBittorrentEmulationController(
         @RequestPart category: String,
         request: HttpServletRequest,
     ): ResponseEntity<String> {
-        logger.info("${request.method} ${request.requestURL}")
+        // Resolve hostname from IP address
+        val remoteAddr = request.remoteAddr
+        val remoteInfo = try {
+            val hostname = java.net.InetAddress.getByName(remoteAddr).hostName
+            if (hostname != remoteAddr) {
+                "$remoteAddr/$hostname"
+            } else {
+                remoteAddr
+            }
+        } catch (e: Exception) {
+            remoteAddr
+        }
+        
+        logger.debug("Add torrent request received - category='{}', hasUrls={}, hasTorrents={}, fullQueryString='{}'", 
+            category, urls != null, torrents != null, request.queryString)
+        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, remoteInfo)
+        
+        // Log request parameters
+        request.parameterMap.forEach { (key, values) ->
+            logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
+        }
+        
+        // Log URLs if present (truncate if too long)
+        urls?.let {
+            val truncatedUrl = if (it.length > 200) "${it.take(200)}..." else it
+            logger.info("Adding torrent from URL(s): {}", truncatedUrl)
+        }
+        
+        // Log torrent file info if present
+        torrents?.let {
+            logger.info("Adding torrent from file: name='{}', size={} bytes, contentType='{}'", 
+                it.originalFilename, it.size, it.contentType)
+        }
+        
         val result = urls?.let {
             torrentService.addMagnet(category, TorrentMagnet(it))
         } ?: run {
@@ -132,11 +173,34 @@ class QBittorrentEmulationController(
                 torrentService.addTorrent(category, it)
             }
         }
-        return when (result) {
-            null -> ResponseEntity.badRequest().body("Request body must contain either urls or torrents")
-            true -> ResponseEntity.ok("ok")
-            false -> ResponseEntity.unprocessableEntity().build()
+        
+        val responseStatus = when (result) {
+            null -> {
+                logger.warn("Add torrent request rejected: Request body must contain either urls or torrents")
+                ResponseEntity.badRequest().body("Request body must contain either urls or torrents")
+            }
+            true -> {
+                // Get torrent details for logging
+                val magnet = urls?.let { TorrentMagnet(it) } ?: torrents?.let { 
+                    torrentToMagnetConverter.convertTorrentToMagnet(it.bytes) 
+                }
+                val torrentName = magnet?.let { TorrentService.getNameFromMagnet(it) } ?: "unknown"
+                val torrentHash = magnet?.let { TorrentService.getHashFromMagnet(it) }
+                val fileCount = torrentHash?.let { hash ->
+                    torrentService.getTorrentByHash(hash)?.files?.size
+                } ?: 0
+                
+                logger.info("Torrent added successfully: name='{}', category='{}', files={}", 
+                    torrentName, category, fileCount)
+                ResponseEntity.ok("ok")
+            }
+            false -> {
+                logger.warn("Failed to add torrent to category '{}'", category)
+                ResponseEntity.unprocessableEntity().build()
+            }
         }
+        
+        return responseStatus
     }
 
     @RequestMapping(
@@ -145,11 +209,51 @@ class QBittorrentEmulationController(
         consumes = [MediaType.APPLICATION_FORM_URLENCODED_VALUE]
     )
     fun addTorrentFile(
-        request: AddTorrentRequest
+        request: AddTorrentRequest,
+        httpRequest: HttpServletRequest
     ): ResponseEntity<String> {
-        return if (torrentService.addMagnet(request.category, TorrentMagnet(request.urls))) {
+        // Resolve hostname from IP address
+        val remoteAddr = httpRequest.remoteAddr
+        val remoteInfo = try {
+            val hostname = java.net.InetAddress.getByName(remoteAddr).hostName
+            if (hostname != remoteAddr) {
+                "$remoteAddr/$hostname"
+            } else {
+                remoteAddr
+            }
+        } catch (e: Exception) {
+            remoteAddr
+        }
+        
+        // Truncate URL if too long for logging
+        val truncatedUrl = if (request.urls.length > 200) "${request.urls.take(200)}..." else request.urls
+        
+        logger.debug("Add torrent request received (form-urlencoded) - category='{}', urlLength={}, fullQueryString='{}'", 
+            request.category, request.urls.length, httpRequest.queryString)
+        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", httpRequest.requestURI, httpRequest.method, remoteInfo)
+        logger.debug("Torrent URL(s): {}", truncatedUrl)
+        
+        // Log all request parameters for debugging
+        httpRequest.parameterMap.forEach { (key, values) ->
+            logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
+        }
+        
+        val success = torrentService.addMagnet(request.category, TorrentMagnet(request.urls))
+        
+        return if (success) {
+            // Get torrent details for logging
+            val magnet = TorrentMagnet(request.urls)
+            val torrentName = TorrentService.getNameFromMagnet(magnet) ?: "unknown"
+            val torrentHash = TorrentService.getHashFromMagnet(magnet)
+            val fileCount = torrentHash?.let { hash ->
+                torrentService.getTorrentByHash(hash)?.files?.size
+            } ?: 0
+            
+            logger.info("Torrent added successfully: name='{}', category='{}', files={}", 
+                torrentName, request.category, fileCount)
             ResponseEntity.ok("")
         } else {
+            logger.warn("Failed to add torrent to category '{}'", request.category)
             ResponseEntity.unprocessableEntity().build()
         }
     }
@@ -165,12 +269,36 @@ class QBittorrentEmulationController(
         consumes = [MediaType.APPLICATION_FORM_URLENCODED_VALUE]
     )
     fun deleteTorrents(
-        @RequestParam hashes: List<String>
+        @RequestParam hashes: List<String>,
+        request: HttpServletRequest
     ): ResponseEntity<String> {
+        // Resolve hostname from IP address
+        val remoteAddr = request.remoteAddr
+        val remoteInfo = try {
+            val hostname = java.net.InetAddress.getByName(remoteAddr).hostName
+            if (hostname != remoteAddr) {
+                "$remoteAddr/$hostname"
+            } else {
+                remoteAddr
+            }
+        } catch (e: Exception) {
+            remoteAddr
+        }
+        
+        logger.debug("Delete torrent request received - hashes={}, fullQueryString='{}'", 
+            hashes.size, request.queryString)
+        logger.debug("Request URI: {}, Method: {}, RemoteAddr: {}", request.requestURI, request.method, remoteInfo)
+        
+        // Log all request parameters for debugging
+        request.parameterMap.forEach { (key, values) ->
+            logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
+        }
+        
         hashes.forEach {
             torrentService.deleteTorrentByHash(it)
         }
 
+        logger.info("Deleted {} torrent(s): {}", hashes.size, hashes.joinToString(", "))
         return ResponseEntity.ok("ok")
     }
 

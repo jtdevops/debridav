@@ -22,8 +22,10 @@ import io.skjaere.debridav.fs.ClientError
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridCachedTorrentContent
 import io.skjaere.debridav.fs.DebridCachedUsenetReleaseContent
+import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.DebridFile
 import io.skjaere.debridav.fs.DebridFileContents
+import io.skjaere.debridav.fs.IptvFile
 import io.skjaere.debridav.fs.MissingFile
 import io.skjaere.debridav.fs.NetworkError
 import io.skjaere.debridav.fs.ProviderError
@@ -41,6 +43,9 @@ import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.support.TransactionTemplate
+import jakarta.persistence.EntityManager
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -57,10 +62,13 @@ class DebridLinkService(
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val debridClients: List<DebridCachedContentClient>,
     private val clock: Clock,
-    meterRegistry: MeterRegistry
+    meterRegistry: MeterRegistry,
+    private val transactionManager: PlatformTransactionManager,
+    private val entityManager: EntityManager
 ) {
 
     private val logger = LoggerFactory.getLogger(DebridLinkService::class.java)
+    private val transactionTemplate = TransactionTemplate(transactionManager)
 
     data class LinkLivenessCacheKey(val provider: String, val cachedFile: CachedFile)
 
@@ -69,7 +77,7 @@ class DebridLinkService(
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<LinkLivenessCacheKey, Boolean> { key ->
             runBlocking {
-                logger.info("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
+                logger.debug("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
                 logger.debug("LINK_ALIVE_CHECK: file={}, provider={}, link={}, size={} bytes", 
                     key.cachedFile.path, key.cachedFile.provider, key.cachedFile.link?.take(50) + "...", key.cachedFile.size)
                 val isAlive = debridClients
@@ -84,8 +92,13 @@ class DebridLinkService(
         .expireAfterWrite(debridavConfigurationProperties.cachedFileCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<RemotelyCachedEntity, CachedFile?> { entity ->
-            runBlocking {
-                getCachedFile(entity)
+            // Use TransactionTemplate to ensure we have a Hibernate session when accessing lazy-loaded properties
+            // Merge the entity to reattach it to the current session so lazy proxies can be initialized
+            transactionTemplate.execute<CachedFile?> {
+                val mergedEntity = entityManager.merge(entity)
+                runBlocking {
+                    getCachedFile(mergedEntity)
+                }
             }
         })
 
@@ -114,11 +127,49 @@ class DebridLinkService(
 
     suspend fun getCachedFileCached(file: RemotelyCachedEntity): CachedFile? = cachedFileCache.get(file)
 
-    suspend fun getCachedFile(file: RemotelyCachedEntity): CachedFile? = getCheckedLinks(file).firstOrNull()
+    suspend fun getCachedFile(file: RemotelyCachedEntity): CachedFile? {
+        val debridFileContents = file.contents!!
+        
+        // Handle IPTV content - convert IptvFile to CachedFile
+        if (debridFileContents is DebridIptvContent) {
+            val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
+            val tokenizedUrl = iptvFile?.link
+            if (iptvFile != null && tokenizedUrl != null) {
+                // Replace token with actual base URL if present
+                val link = if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
+                    val template = debridFileContents.iptvUrlTemplate
+                    if (template != null) {
+                        tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
+                    } else {
+                        logger.warn("Cannot reconstruct IPTV URL: template missing for content ${debridFileContents.iptvContentId}")
+                        return null
+                    }
+                } else {
+                    // Fallback for legacy records that still have full URL stored
+                    tokenizedUrl
+                }
+                
+                // Create a fs.CachedFile with a dummy provider for compatibility
+                return io.skjaere.debridav.fs.CachedFile(
+                    path = iptvFile.path ?: file.name ?: "",
+                    size = iptvFile.size ?: 0L,
+                    mimeType = iptvFile.mimeType ?: "video/mp4",
+                    link = link,
+                    params = iptvFile.params ?: emptyMap(),
+                    lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
+                    provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
+                )
+            }
+            return null
+        }
+        
+        return getCheckedLinks(file).firstOrNull()
+    }
+    
     suspend fun getCheckedLinks(file: RemotelyCachedEntity): Flow<CachedFile> {
         val debridFileContents = file.contents!!
         val started = Instant.now()
-        logger.info("Getting links for ${file.name} from ${debridFileContents.originalPath}")
+        logger.debug("Getting links for ${file.name} from ${debridFileContents.originalPath}")
         logger.debug("DEBRID_LINK_REQUEST: file={}, originalPath={}, debridLinksCount={}", 
             file.name, debridFileContents.originalPath, debridFileContents.debridLinks.size)
         return getFlowOfDebridLinks(debridFileContents)
@@ -127,12 +178,14 @@ class DebridLinkService(
                 logger.error("Uncaught exception encountered while getting links", e)
             }
             .transformWhile { debridLink ->
-                if (debridLink !is NetworkError) {
+                // Don't update IPTV links - they're stable and don't change
+                val isIptvContent = debridFileContents is DebridIptvContent || debridLink.provider == DebridProvider.IPTV
+                if (debridLink !is NetworkError && !isIptvContent) {
                     updateContentsOfDebridFile(file, debridFileContents, debridLink)
                 }
                 if (debridLink is CachedFile) {
                     val took = Duration.between(started, Instant.now()).toMillis().toDouble()
-                    logger.info("Found link for ${file.name} from ${debridLink.provider}. took $took ms")
+                    logger.debug("Found link for ${file.name} from ${debridLink.provider}. took $took ms")
                     logger.debug("DEBRID_LINK_FOUND: file={}, provider={}, link={}, size={} bytes, took={} ms", 
                         file.name, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size, took)
                     linkFindingDurationSummary.record(took)
@@ -161,6 +214,40 @@ class DebridLinkService(
     }
 
     private suspend fun getFlowOfDebridLinks(debridFileContents: DebridFileContents): Flow<DebridFile> = flow {
+        // Handle IPTV content - IPTV files don't use debrid clients
+        if (debridFileContents is DebridIptvContent) {
+            val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
+            val tokenizedUrl = iptvFile?.link
+            if (iptvFile != null && tokenizedUrl != null) {
+                // Replace token with actual base URL if present
+                val link = if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
+                    val template = debridFileContents.iptvUrlTemplate
+                    if (template != null) {
+                        tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
+                    } else {
+                        logger.warn("Cannot reconstruct IPTV URL: template missing for content ${debridFileContents.iptvContentId}")
+                        return@flow
+                    }
+                } else {
+                    // Fallback for legacy records that still have full URL stored
+                    tokenizedUrl
+                }
+                
+                // Convert IptvFile to CachedFile for streaming
+                // Use dummy provider - will be handled specially in StreamingService
+                emit(io.skjaere.debridav.fs.CachedFile(
+                    path = iptvFile.path ?: debridFileContents.originalPath ?: "",
+                    size = iptvFile.size ?: 0L,
+                    mimeType = iptvFile.mimeType ?: "video/mp4",
+                    link = link,
+                    params = iptvFile.params ?: emptyMap(),
+                    lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
+                    provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
+                ))
+            }
+            return@flow
+        }
+        
         debridavConfigurationProperties.debridClients
             .map { debridClients.getClient(it) }
             .map { debridClient ->
@@ -180,6 +267,24 @@ class DebridLinkService(
         debridFileContents: DebridFileContents,
         debridClient: DebridCachedContentClient
     ): DebridFile {
+        // IPTV content doesn't need fresh links - it's already resolved
+        if (debridFileContents is DebridIptvContent) {
+            val iptvFile = debridFileContents.debridLinks.firstOrNull() as? IptvFile
+            val link = iptvFile?.link
+            if (iptvFile != null && link != null) {
+                return io.skjaere.debridav.fs.CachedFile(
+                    path = iptvFile.path ?: debridFileContents.originalPath ?: "",
+                    size = iptvFile.size ?: 0L,
+                    mimeType = iptvFile.mimeType ?: "video/mp4",
+                    link = link,
+                    params = iptvFile.params ?: emptyMap(),
+                    lastChecked = iptvFile.lastChecked ?: Instant.now().toEpochMilli(),
+                    provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
+                )
+            }
+            return MissingFile(io.skjaere.debridav.debrid.DebridProvider.IPTV, clock.instant().toEpochMilli())
+        }
+        
         val key = when (debridFileContents) {
             is DebridCachedTorrentContent -> TorrentMagnet(debridFileContents.magnet!!)
             is DebridCachedUsenetReleaseContent -> UsenetRelease(debridFileContents.releaseName!!)
@@ -362,17 +467,35 @@ class DebridLinkService(
     suspend fun refreshLinkOnError(file: RemotelyCachedEntity, failedLink: CachedFile): CachedFile? {
         return try {
             val debridFileContents = file.contents ?: return null
-            val client = debridClients.getClient(failedLink.provider!!)
+            
+            // Handle null provider
+            val provider = failedLink.provider ?: run {
+                logger.warn("Cannot refresh link for ${file.name}: provider is null")
+                return null
+            }
+            
+            // IPTV files don't use debrid clients - they're handled differently
+            if (provider == DebridProvider.IPTV) {
+                logger.debug("Skipping link refresh for IPTV file ${file.name} - IPTV links don't use debrid clients")
+                return null
+            }
+            
+            // Find matching debrid client
+            val client = debridClients.firstOrNull { it.getProvider() == provider }
+            if (client == null) {
+                logger.warn("Cannot refresh link for ${file.name}: no debrid client found for provider ${provider}")
+                return null
+            }
 
-            logger.info("Refreshing link on error for ${file.name} from ${failedLink.provider}")
+            logger.info("Refreshing link on error for ${file.name} from ${provider}")
 
             val freshLink = getFreshDebridLink(debridFileContents, client)
             if (freshLink is CachedFile) {
                 updateContentsOfDebridFile(file, debridFileContents, freshLink)
-                logger.info("Successfully refreshed link for ${file.name} from ${failedLink.provider}")
+                logger.info("Successfully refreshed link for ${file.name} from ${provider}")
                 freshLink
             } else {
-                logger.warn("Failed to refresh link for ${file.name} from ${failedLink.provider}: got ${freshLink.javaClass.simpleName}")
+                logger.warn("Failed to refresh link for ${file.name} from ${provider}: got ${freshLink.javaClass.simpleName}")
                 null
             }
         } catch (e: RuntimeException) {

@@ -1,3 +1,3 @@
 package io.skjaere.debridav.debrid
 
-enum class DebridProvider { REAL_DEBRID, PREMIUMIZE, EASYNEWS, TORBOX }
+enum class DebridProvider { REAL_DEBRID, PREMIUMIZE, EASYNEWS, TORBOX, IPTV }

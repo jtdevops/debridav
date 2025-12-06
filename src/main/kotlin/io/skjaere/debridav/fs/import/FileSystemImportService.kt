@@ -309,6 +309,7 @@ class FileSystemImportService(
             DebridProvider.PREMIUMIZE -> DebridProvider.PREMIUMIZE
             DebridProvider.EASYNEWS -> DebridProvider.EASYNEWS
             DebridProvider.TORBOX -> DebridProvider.TORBOX
+            DebridProvider.IPTV -> DebridProvider.IPTV
         }
     }
 

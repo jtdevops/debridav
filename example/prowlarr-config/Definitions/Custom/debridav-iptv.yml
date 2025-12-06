@@ -1,0 +1,136 @@
+---
+id: debridav-iptv
+name: DebriDav IPTV
+description: "DebriDav IPTV Indexer - Search IPTV providers for Movies and TV Shows"
+language: en-US
+type: public
+encoding: UTF-8
+followredirect: false
+testlinktorrent: false
+requestDelay: 1
+links:
+  - http://debridav:8080
+caps:
+  categories:
+    Movies: Movies
+    TV: TV
+  modes:
+    search: [q]
+    movie-search: [q, imdbid, tmdbid, traktid, doubanid, year, genre]
+    tv-search: [q, season, ep, imdbid, tvdbid, rid, traktid, doubanid, year, genre]
+  allowrawsearch: false
+
+settings:
+  - name: validation_label
+    type: info
+    label: Validation settings (optional)
+  - name: validate_movie_title_label
+    type: info
+    label: The following help to validate an indexer in Radarr by confirming that the movie returns results
+  - name: validate_movie_title
+    type: text
+    label: Title of Movie or IMDb ID (e.g., "The Matrix" or "tt0133093") to use for Radarr validation (must exist in IPTV provider)
+  - name: validate_tv_title_label
+    type: info
+    label: The following help to validate an indexer in Sonarr by confirming that the show returns results
+  - name: validate_tv_title
+    type: text
+    label: Title of TV show or IMDb ID (e.g., "Breaking Bad" or "tt0903747") to use for Sonarr validation (must exist in IPTV provider)
+
+search:
+  headers:
+    User-Agent: ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0"]
+    Accept: ["application/json"]
+  paths:
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_movie_title }}&imdbid={{ .Query.IMDBID }}&tmdbid={{ .Query.TMDBID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=MOVIE"
+    # - path: "/api/iptv/search"
+      method: get
+      # inputs:
+      #   # Available variables: https://github.com/Jackett/Jackett/wiki/Definition-format#search-query-variables
+      #   q: "{{ .Query.Q }}"
+      #   query: "{{ .Config.validate_movie_title }}"
+      #   qTest: "{{ .Config.validate_movie_title }}"
+      #   imdbid: "{{ .Query.IMDBID }}"
+      #   tmdbid: "{{ .Query.TMDBID }}"
+      #   traktid: "{{ .Query.TraktID }}"
+      #   doubanid: "{{ .Query.DoubanID }}"
+      #   year: "{{ .Query.Year }}"
+      #   genre: "{{ .Query.Genre }}"
+      #   type: "MOVIE"
+      response:
+        type: json
+        noResultsMessage: "[]"
+      categories: [Movies]
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_tv_title }}&season={{ .Query.Season }}&ep={{ .Query.Ep }}&episode={{ .Query.Episode }}&imdbid={{ .Query.IMDBID }}&tvdbid={{ .Query.TVDBID }}&rid={{ .Query.TVRageID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=SERIES"
+    # - path: "/api/iptv/search"
+      method: get
+      # inputs:
+      #   # Available variables: https://github.com/Jackett/Jackett/wiki/Definition-format#search-query-variables
+      #   q: "{{ .Query.Q }}"
+      #   query: "{{ .Config.validate_tv_title }}"
+      #   qTest: "{{ .Config.validate_tv_title }}"
+      #   season: "{{ .Query.Season }}"
+      #   ep: "{{ .Query.Ep }}"
+      #   episode: "{{ .Query.Episode }}"
+      #   imdbid: "{{ .Query.IMDBID }}"
+      #   tvdbid: "{{ .Query.TVDBID }}"
+      #   rid: "{{ .Query.TVRageID }}"
+      #   traktid: "{{ .Query.TraktID }}"
+      #   doubanid: "{{ .Query.DoubanID }}"
+      #   year: "{{ .Query.Year }}"
+      #   genre: "{{ .Query.Genre }}"
+      #   type: "SERIES"
+      response:
+        type: json
+        noResultsMessage: "[]"
+      categories: [TV]
+
+  rows:
+    selector: "$"
+    missingAttributeEqualsNoResults: true
+
+  fields:
+    title:
+      selector: title
+    category:
+      selector: contentType
+      filters:
+        - name: replace
+          args: ["MOVIE", "Movies"]
+        - name: replace
+          args: ["SERIES", "TV"]
+    category_is_tv_show:
+      selector: contentType
+      filters:
+        - name: replace
+          args: ["SERIES", "true"]
+        - name: replace
+          args: ["MOVIE", "false"]
+    size:
+      selector: size
+    seeders:
+      text: "1"
+    leechers:
+      text: "0"
+    # details:
+    #   text: "/api/iptv"
+    infohash:
+      # Hash is now included in URL format: iptv://{hash}/{provider}/{contentId}
+      # Can extract from URL or use the infohash field directly
+      selector: infohash
+    magnet:
+      selector: magnetUri
+    guid:
+      selector: guid
+    downloadurl:
+      selector: url
+    year:
+      selector: title
+      filters:
+        - name: regexp
+          args: "(\\b(19|20)\\d\\d\\b)"
+    date:
+      text: "0 days"
+      filters:
+        - name: timeago
+

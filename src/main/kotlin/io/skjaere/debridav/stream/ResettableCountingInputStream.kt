@@ -14,6 +14,10 @@ class ResettableCountingInputStream(private val countingInputStream: CountingInp
         bytesTransferred = count
         return transferredSinceLastCheck
     }
+    
+    fun getTotalCount(): Long {
+        return countingInputStream.count
+    }
 
     override fun read(): Int {
         return countingInputStream.read()

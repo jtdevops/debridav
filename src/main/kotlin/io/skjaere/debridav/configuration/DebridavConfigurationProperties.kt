@@ -57,7 +57,12 @@ data class DebridavConfigurationProperties(
     val rcloneArrsLocalVideoPathRegex: String? = null, // Regex pattern to match file paths for local video serving
     val rcloneArrsLocalVideoMinSizeKb: Long? = null, // Minimum file size in KB to use local video (smaller files served externally)
     val rcloneArrsUserAgentPattern: String?, // User agent pattern for ARR detection
-    val rcloneArrsHostnamePattern: String? // Hostname pattern for ARR detection
+    val rcloneArrsHostnamePattern: String?, // Hostname pattern for ARR detection
+    val rcloneArrsLocalVideoFileIptvBypassProviders: String? = null, // Comma-separated list of IPTV provider names to bypass local video serving (use "*" for all providers)
+    val debugArrTorrentInfoContentPathSuffix: String? = null, // Optional suffix to append to contentPath in ARR torrent info API responses (qBittorrent emulation /api/v2/torrents/info endpoint used by Sonarr/Radarr) for debugging purposes (e.g., "__DEBUG_TESTING")
+    // Downloads cleanup configuration
+    val enableDownloadsCleanupTimeBased: Boolean = false, // If true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes. If false (default), cleanup is immediate (no age check).
+    val downloadsCleanupTimeBasedThresholdMinutes: Long = 10 // Time threshold in minutes for time-based cleanup (only used if enableDownloadsCleanupTimeBased is true)
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -112,11 +117,8 @@ data class DebridavConfigurationProperties(
             if (matches) {
                 return true
             }
-        } else if (userAgent != null) {
-            // Log when pattern is null to help debug configuration issues
-            org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
-                .debug("ARR_LOCAL_VIDEO: user-agent={}, but rcloneArrsUserAgentPattern is null (not configured)", userAgent)
         }
+        // Note: Removed TRACE logging for "not configured" case as it's expected when pattern is not configured
 
         // Check hostname
         val sourceInfo = httpRequestInfo.sourceInfo
@@ -154,6 +156,31 @@ data class DebridavConfigurationProperties(
         } catch (e: Exception) {
             false // Invalid regex, don't serve
         }
+    }
+    
+    /**
+     * Checks if an IPTV provider should bypass local video file serving for ARR requests.
+     * Returns true if the provider should bypass (use direct IPTV provider instead of local files).
+     * 
+     * @param iptvProviderName The IPTV provider name to check
+     * @return true if provider should bypass local video serving, false otherwise
+     */
+    fun shouldBypassLocalVideoForIptvProvider(iptvProviderName: String?): Boolean {
+        if (iptvProviderName == null || rcloneArrsLocalVideoFileIptvBypassProviders.isNullOrBlank()) {
+            return false
+        }
+        
+        val bypassProviders = rcloneArrsLocalVideoFileIptvBypassProviders.split(",")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        
+        // Check if "*" is in the list (all providers bypass)
+        if (bypassProviders.contains("*")) {
+            return true
+        }
+        
+        // Check if the specific provider is in the list
+        return bypassProviders.contains(iptvProviderName)
     }
 
     /**
