@@ -5,6 +5,7 @@ import io.milton.http.Range
 import io.milton.http.Request
 import io.milton.resource.GetableResource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.configuration.HostnameDetectionService
 import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DatabaseFileService
@@ -12,6 +13,9 @@ import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.IptvFile
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import org.springframework.boot.autoconfigure.web.ServerProperties
+import org.springframework.core.env.Environment
+import org.slf4j.LoggerFactory
 import java.io.OutputStream
 import java.time.Instant
 import java.util.*
@@ -24,25 +28,50 @@ class StrmFileResource(
     private val originalFile: DbEntity,
     private val originalFilePath: String,
     fileService: DatabaseFileService,
-    private val debridavConfigurationProperties: DebridavConfigurationProperties
+    private val debridavConfigurationProperties: DebridavConfigurationProperties,
+    private val serverProperties: ServerProperties? = null,
+    private val environment: Environment? = null,
+    private val hostnameDetectionService: HostnameDetectionService? = null
 ) : AbstractResource(fileService, originalFile), GetableResource {
 
-    // Lazy initialization to avoid Hibernate LazyInitializationException during directory listing
-    private val strmContent: String by lazy { computeStrmContent() }
-    private val strmContentBytes: ByteArray by lazy { strmContent.toByteArray(Charsets.UTF_8) }
+    private val logger = LoggerFactory.getLogger(StrmFileResource::class.java)
+
+    // Compute content dynamically (proxy URLs are generated when refresh is enabled)
+    private fun getStrmContent(): String = computeStrmContent()
+    
+    private fun getStrmContentBytes(): ByteArray = getStrmContent().toByteArray(Charsets.UTF_8)
 
     /**
      * Computes the content to write in the STRM file.
      * If external URL mode is enabled and available, returns the external URL.
      * Otherwise, returns the VFS path (with optional prefix).
+     * 
+     * Priority order:
+     * 1. Proxy URLs (if DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS is enabled for provider)
+     * 2. Direct external URLs (if DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS is enabled for provider)
+     * 3. VFS path (default)
      */
     private fun computeStrmContent(): String {
         if (originalFile is RemotelyCachedEntity) {
             // Determine the provider for provider-specific configuration checks
             val provider = determineProvider(originalFile)
             
-            // Check if we should use external URL (with provider-specific check if configured)
+            // Check if proxy URLs are enabled (takes priority - proxy URLs implicitly enable external URLs)
+            val shouldUseProxy = provider != null && 
+                provider != DebridProvider.IPTV &&
+                debridavConfigurationProperties.shouldUseProxyUrlForStrm(provider)
+            
+            if (shouldUseProxy) {
+                // Generate proxy URL (proxy URLs are external URLs, so this takes priority)
+                val proxyUrl = generateProxyUrl(originalFile)
+                if (proxyUrl != null) {
+                    return proxyUrl
+                }
+            }
+            
+            // Check if we should use direct external URL (only if proxy is not enabled)
             if (debridavConfigurationProperties.shouldUseExternalUrlForStrm(provider)) {
+                // Use direct external URL
                 val externalUrl = getExternalUrl(originalFile)
                 if (externalUrl != null) {
                     return externalUrl
@@ -75,6 +104,7 @@ class StrmFileResource(
 
     /**
      * Gets the external URL from a RemotelyCachedEntity if available.
+     * This returns the direct external URL without refresh checks (refresh is handled by proxy).
      * @param file The remotely cached entity
      * @return The external URL, or null if not available
      */
@@ -120,6 +150,36 @@ class StrmFileResource(
         return null
     }
 
+    /**
+     * Generates a proxy URL for the file that will redirect to the external URL after checking/refreshing it.
+     * @param file The remotely cached entity
+     * @return The proxy URL, or null if file ID or filename is not available
+     */
+    private fun generateProxyUrl(file: RemotelyCachedEntity): String? {
+        val fileId = file.id ?: return null
+        val fileName = file.name ?: return null
+        
+        // Get base URL from config or construct from detected hostname
+        val baseUrl = debridavConfigurationProperties.strmProxyBaseUrl
+            ?: run {
+                // Try to get hostname from detection service (network detection at startup)
+                val hostname = hostnameDetectionService?.getHostname()
+                    // Fall back to HOSTNAME environment variable if detection failed
+                    ?: environment?.getProperty("HOSTNAME")
+                    ?: throw IllegalStateException(
+                        "STRM proxy requires either DEBRIDAV_STRM_PROXY_BASE_URL to be set or hostname detection to succeed. " +
+                        "Hostname detection failed and HOSTNAME environment variable is not available."
+                    )
+                // Default port is 8080 (the server port)
+                "http://$hostname:8080"
+            }
+        
+        // Build proxy URL: {baseUrl}/strm-proxy/{fileId}/{filename}
+        // URL encode the filename to handle special characters
+        val encodedFileName = java.net.URLEncoder.encode(fileName, Charsets.UTF_8)
+        return "$baseUrl/strm-proxy/$fileId/$encodedFileName"
+    }
+
     override fun getUniqueId(): String {
         return "strm_${originalFile.id}"
     }
@@ -151,6 +211,8 @@ class StrmFileResource(
         params: MutableMap<String, String>?,
         contentType: String?
     ) {
+        // Compute content dynamically (proxy URLs are generated when refresh is enabled)
+        val strmContentBytes = getStrmContentBytes()
         if (range != null && range.start != null && range.finish != null) {
             // Handle range request
             val start = range.start.toInt().coerceAtLeast(0)
@@ -173,7 +235,7 @@ class StrmFileResource(
     }
 
     override fun getContentLength(): Long {
-        return strmContentBytes.size.toLong()
+        return getStrmContentBytes().size.toLong()
     }
 
     override fun isDigestAllowed(): Boolean {

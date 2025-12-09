@@ -70,7 +70,9 @@ data class DebridavConfigurationProperties(
     val strmFileExtensionMode: String = "REPLACE", // How to handle file extensions: REPLACE (episode.mkv -> episode.strm) or APPEND (episode.mkv -> episode.mkv.strm)
     val strmFileFilterMode: String = "MEDIA_ONLY", // Which files to convert: ALL (all files), MEDIA_ONLY (only media extensions), NON_STRM (all except .strm)
     val strmMediaExtensions: List<String> = listOf("mkv", "mp4", "avi", "mov", "m4v", "mpg", "mpeg", "wmv", "flv", "webm", "ts", "m2ts"), // List of media file extensions when filter mode is MEDIA_ONLY
-    val strmUseExternalUrlForProviders: String? = null // Comma-separated list of provider names for which to use external URLs. Supports ALL/* for all providers and ! prefix for negation.
+    val strmUseExternalUrlForProviders: String? = null, // Comma-separated list of provider names for which to use external URLs. Supports ALL/* for all providers and ! prefix for negation.
+    val strmProxyExternalUrlForProviders: String? = null, // Comma-separated list of provider names for which external URLs should use proxy URLs instead of direct URLs. Supports ALL/* for all providers and ! prefix for negation.
+    val strmProxyBaseUrl: String? = null // Base URL for STRM redirect proxy (e.g., http://debridav:8080). If not set, defaults to http://{detected-hostname}:8080
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -539,6 +541,90 @@ data class DebridavConfigurationProperties(
         }
         
         // If no configuration is set, default to false (use VFS paths)
+        return false
+    }
+
+    /**
+     * Parses the comma-separated list of providers for which external URLs should use proxy URLs in STRM files.
+     * Supports:
+     * - `ALL` or `*` to represent all providers
+     * - Negation with `!` prefix (e.g., `*,!REAL_DEBRID` means all providers except REAL_DEBRID)
+     * @return Pair of (allowed providers set, denied providers set), or null if not configured
+     */
+    private fun parseStrmProxyExternalUrlForProviders(): Pair<Set<String>, Set<String>>? {
+        val providers = strmProxyExternalUrlForProviders?.trim()
+        if (providers.isNullOrBlank()) {
+            return null
+        }
+        
+        val allowedProviders = mutableSetOf<String>()
+        val deniedProviders = mutableSetOf<String>()
+        var allowAll = false
+        
+        providers.split(",")
+            .map { it.trim().uppercase() }
+            .filter { it.isNotEmpty() }
+            .forEach { provider ->
+                when {
+                    provider == "ALL" || provider == "*" -> {
+                        allowAll = true
+                    }
+                    provider.startsWith("!") -> {
+                        val deniedProvider = provider.removePrefix("!")
+                        if (deniedProvider.isNotEmpty()) {
+                            deniedProviders.add(deniedProvider)
+                        }
+                    }
+                    else -> {
+                        allowedProviders.add(provider)
+                    }
+                }
+            }
+        
+        return if (allowAll) {
+            // If ALL/* is specified, return special marker
+            Pair(setOf("*"), deniedProviders)
+        } else if (allowedProviders.isNotEmpty() || deniedProviders.isNotEmpty()) {
+            Pair(allowedProviders, deniedProviders)
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Checks if STRM files should use proxy URLs instead of direct external URLs.
+     * @param provider Optional provider to check. If provided and strmProxyExternalUrlForProviders is set,
+     *                 checks if this specific provider should use proxy URLs.
+     * @return true if proxy URLs should be used, false otherwise
+     */
+    fun shouldUseProxyUrlForStrm(provider: io.skjaere.debridav.debrid.DebridProvider? = null): Boolean {
+        // Check provider-specific configuration
+        val providerConfig = parseStrmProxyExternalUrlForProviders()
+        if (providerConfig != null) {
+            val (allowedProviders, deniedProviders) = providerConfig
+            
+            return if (provider != null) {
+                val providerName = provider.name.uppercase()
+                
+                // First check if provider is explicitly denied
+                if (deniedProviders.contains(providerName)) {
+                    return false
+                }
+                
+                // Check if ALL/* is specified (all providers allowed)
+                if (allowedProviders.contains("*")) {
+                    return true
+                }
+                
+                // Check if this specific provider is in the allowed list
+                allowedProviders.contains(providerName)
+            } else {
+                // If no provider specified but provider-specific config exists, default to false
+                false
+            }
+        }
+        
+        // If no configuration is set, default to false (use direct URLs)
         return false
     }
 }

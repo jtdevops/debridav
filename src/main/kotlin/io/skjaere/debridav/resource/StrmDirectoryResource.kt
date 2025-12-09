@@ -5,10 +5,13 @@ import io.milton.http.Request
 import io.milton.resource.CollectionResource
 import io.milton.resource.Resource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.configuration.HostnameDetectionService
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalContentsService
+import org.springframework.boot.autoconfigure.web.ServerProperties
+import org.springframework.core.env.Environment
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
@@ -116,7 +119,10 @@ class StrmDirectoryResource(
                         entity,
                         fullOriginalPath,
                         fileService,
-                        debridavConfigurationProperties
+                        debridavConfigurationProperties,
+                        resourceFactory.serverProperties,
+                        resourceFactory.environment,
+                        resourceFactory.hostnameDetectionService
                     )
                 } else {
                     // Non-media files (like .srt subtitles) should appear as regular files

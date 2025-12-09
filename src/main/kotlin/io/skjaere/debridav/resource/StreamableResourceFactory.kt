@@ -6,6 +6,7 @@ import io.milton.http.exceptions.BadRequestException
 import io.milton.http.exceptions.NotAuthorizedException
 import io.milton.resource.Resource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.configuration.HostnameDetectionService
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DbDirectory
@@ -14,16 +15,21 @@ import io.skjaere.debridav.fs.LocalContentsService
 import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.stream.StreamingService
+import org.springframework.boot.autoconfigure.web.ServerProperties
+import org.springframework.core.env.Environment
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 
 class StreamableResourceFactory(
     private val fileService: DatabaseFileService,
-    private val debridService: DebridLinkService,
+    internal val debridService: DebridLinkService,
     private val streamingService: StreamingService,
     internal val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val localContentsService: LocalContentsService,
-    private val arrRequestDetector: ArrRequestDetector
+    private val arrRequestDetector: ArrRequestDetector,
+    internal val serverProperties: ServerProperties,
+    internal val environment: Environment,
+    internal val hostnameDetectionService: HostnameDetectionService
 ) : ResourceFactory {
     private val logger = LoggerFactory.getLogger(StreamableResourceFactory::class.java)
 
@@ -78,7 +84,10 @@ class StreamableResourceFactory(
                         originalFile,
                         fullOriginalPath,
                         fileService,
-                        debridavConfigurationProperties
+                        debridavConfigurationProperties,
+                        serverProperties,
+                        environment,
+                        hostnameDetectionService
                     )
                 } else {
                     // This could be a STRM directory request or a non-STRM file within a STRM directory
