@@ -1,5 +1,6 @@
 package io.skjaere.debridav.resource
 
+import io.milton.http.Range
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.debrid.DebridProvider
@@ -8,15 +9,23 @@ import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.repository.DebridFileContentsRepository
+import io.skjaere.debridav.stream.HttpRequestInfo
+import io.skjaere.debridav.stream.StreamResult
+import io.skjaere.debridav.stream.StreamingService
 import jakarta.servlet.http.HttpServletRequest
+import jakarta.servlet.http.HttpServletResponse
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
+import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
+import java.io.OutputStream
+import java.net.InetAddress
 
 /**
  * Redirect proxy controller for STRM external URLs.
@@ -29,7 +38,8 @@ class StrmRedirectProxyController(
     private val fileService: DatabaseFileService,
     private val debridLinkService: DebridLinkService,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
-    private val debridFileRepository: DebridFileContentsRepository
+    private val debridFileRepository: DebridFileContentsRepository,
+    private val streamingService: StreamingService
 ) {
     private val logger = LoggerFactory.getLogger(StrmRedirectProxyController::class.java)
 
@@ -47,7 +57,8 @@ class StrmRedirectProxyController(
     fun redirectToExternalUrl(
         @PathVariable fileId: Long,
         @PathVariable filename: String,
-        request: HttpServletRequest
+        request: HttpServletRequest,
+        response: HttpServletResponse
     ): ResponseEntity<Void> {
         val proxyUrl = "${request.scheme}://${request.serverName}:${request.serverPort}${request.requestURI}"
         val requestMethod = request.method
@@ -60,26 +71,26 @@ class StrmRedirectProxyController(
             val file = dbEntity as? RemotelyCachedEntity
             if (file == null) {
                 logger.warn("STRM proxy: File not found for ID: $fileId")
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).build()
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build<Void>()
             }
 
             // Reload to ensure contents are loaded
             val reloadedFile = fileService.reloadRemotelyCachedEntity(file)
             if (reloadedFile == null) {
                 logger.warn("STRM proxy: Could not reload file for ID: $fileId")
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).build()
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build<Void>()
             }
 
             val contents = reloadedFile.contents ?: run {
                 logger.warn("STRM proxy: File has no contents for ID: $fileId")
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).build()
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build<Void>()
             }
 
             // Determine the provider
             val provider = determineProvider(reloadedFile, contents)
             if (provider == null) {
                 logger.warn("STRM proxy: Could not determine provider for file ID: $fileId")
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build()
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build<Void>()
             }
 
             // Check if proxy URLs are enabled for this provider (proxy URLs always refresh)
@@ -94,19 +105,178 @@ class StrmRedirectProxyController(
 
             if (externalUrl == null) {
                 logger.warn("STRM proxy: No external URL available for file ID: $fileId")
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).build()
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build<Void>()
             }
 
             logger.info("STRM proxy: Final URL returned: $externalUrl (fileId: $fileId, provider: $provider, file: ${reloadedFile.name})")
             
-            // Redirect to the external URL
-            ResponseEntity.status(HttpStatus.TEMPORARY_REDIRECT)
-                .header("Location", externalUrl)
-                .build()
+            // Check if streaming mode is enabled
+            if (debridavConfigurationProperties.strmProxyStreamMode) {
+                streamContent(reloadedFile, contents, provider, rangeHeader, request, response)
+                return ResponseEntity.ok().build<Void>()
+            } else {
+                // Redirect to the external URL
+                return ResponseEntity.status(HttpStatus.TEMPORARY_REDIRECT)
+                    .header("Location", externalUrl)
+                    .build<Void>()
+            }
         } catch (e: Exception) {
-            logger.error("STRM proxy: Error processing redirect for file ID: $fileId", e)
-            ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build()
+            logger.error("STRM proxy: Error processing request for file ID: $fileId", e)
+            ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build<Void>()
         }
+    }
+    
+    /**
+     * Streams content directly through the proxy instead of redirecting.
+     */
+    private fun streamContent(
+        file: RemotelyCachedEntity,
+        contents: io.skjaere.debridav.fs.DebridFileContents,
+        provider: DebridProvider,
+        rangeHeader: String?,
+        request: HttpServletRequest,
+        response: HttpServletResponse
+    ) = runBlocking {
+        try {
+            val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+            if (cachedFile == null) {
+                logger.warn("STRM proxy: No CachedFile found for streaming, file ID: ${file.id}")
+                response.sendError(HttpServletResponse.SC_NOT_FOUND)
+                return@runBlocking
+            }
+            
+            // Parse Range header
+            val range = parseRangeHeader(rangeHeader, cachedFile.size ?: 0L)
+            
+            // Extract HTTP request info
+            val httpRequestInfo = extractHttpRequestInfo(request, file, range)
+            
+            logger.info("STRM proxy: Streaming content directly (fileId: ${file.id}, provider: $provider, range: ${range?.let { "${it.start}-${it.finish}" } ?: "full"})")
+            
+            // Set response headers
+            response.contentType = file.mimeType ?: MediaType.APPLICATION_OCTET_STREAM_VALUE
+            
+            // Set Content-Length and Content-Range headers for range requests
+            if (range != null && cachedFile.size != null) {
+                val contentLength = range.finish - range.start + 1
+                response.setHeader(HttpHeaders.CONTENT_LENGTH, contentLength.toString())
+                response.setHeader(HttpHeaders.CONTENT_RANGE, "bytes ${range.start}-${range.finish}/${cachedFile.size}")
+                response.status = HttpServletResponse.SC_PARTIAL_CONTENT
+            } else {
+                cachedFile.size?.let { response.setHeader(HttpHeaders.CONTENT_LENGTH, it.toString()) }
+            }
+            
+            // Stream the content
+            val result = streamingService.streamContents(
+                cachedFile,
+                range,
+                response.outputStream,
+                file,
+                httpRequestInfo
+            )
+            
+            when (result) {
+                StreamResult.OK -> {
+                    response.flushBuffer()
+                }
+                StreamResult.PROVIDER_ERROR -> {
+                    if (!response.isCommitted) {
+                        response.sendError(HttpServletResponse.SC_BAD_GATEWAY)
+                    }
+                }
+                StreamResult.IO_ERROR -> {
+                    if (!response.isCommitted) {
+                        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
+                    }
+                }
+                StreamResult.CLIENT_ERROR -> {
+                    if (!response.isCommitted) {
+                        response.sendError(HttpServletResponse.SC_BAD_REQUEST)
+                    }
+                }
+                else -> {
+                    if (!response.isCommitted) {
+                        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("STRM proxy: Error streaming content for file ID: ${file.id}", e)
+            if (!response.isCommitted) {
+                try {
+                    response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
+                } catch (_: Exception) {
+                    // Response may already be committed
+                }
+            }
+        }
+    }
+    
+    /**
+     * Parses Range header from HTTP request.
+     * Format: "bytes=start-end" or "bytes=start-"
+     */
+    private fun parseRangeHeader(rangeHeader: String?, fileSize: Long): Range? {
+        if (rangeHeader == null || !rangeHeader.startsWith("bytes=")) {
+            return null
+        }
+        
+        try {
+            val rangeValue = rangeHeader.substring(6) // Remove "bytes=" prefix
+            val parts = rangeValue.split("-")
+            
+            if (parts.size != 2) {
+                return null
+            }
+            
+            val start = parts[0].toLongOrNull() ?: return null
+            val end = if (parts[1].isEmpty()) {
+                fileSize - 1
+            } else {
+                parts[1].toLongOrNull() ?: return null
+            }
+            
+            return Range(start, end)
+        } catch (e: Exception) {
+            logger.warn("STRM proxy: Failed to parse Range header: $rangeHeader", e)
+            return null
+        }
+    }
+    
+    /**
+     * Extracts HTTP request info for streaming service.
+     */
+    private fun extractHttpRequestInfo(
+        request: HttpServletRequest,
+        file: RemotelyCachedEntity,
+        range: Range?
+    ): HttpRequestInfo {
+        val httpHeaders = mutableMapOf<String, String>()
+        
+        // Extract HTTP headers
+        request.headerNames?.toList()?.forEach { headerName ->
+            request.getHeaders(headerName)?.toList()?.forEach { headerValue ->
+                httpHeaders[headerName] = headerValue
+            }
+        }
+        
+        // Get source IP address
+        val sourceIpAddress = request.remoteAddr
+            ?: request.getHeader("X-Forwarded-For")?.split(",")?.first()?.trim()
+            ?: request.getHeader("X-Real-IP")
+            ?: "unknown"
+        
+        // Try to resolve hostname from IP address
+        var sourceHostname: String? = null
+        if (sourceIpAddress != "unknown") {
+            try {
+                sourceHostname = InetAddress.getByName(sourceIpAddress).hostName
+            } catch (e: Exception) {
+                // If hostname resolution fails, leave it null
+            }
+        }
+        
+        return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)
     }
 
     /**

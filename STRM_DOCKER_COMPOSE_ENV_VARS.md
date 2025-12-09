@@ -161,3 +161,20 @@ services:
   - **Use case**: In Docker Compose setups, media servers need to be able to reach the proxy endpoint. Using the container hostname ensures proper network resolution. The port defaults to 8080 (the server port).
   - **Note**: If hostname detection fails and `HOSTNAME` environment variable is not available and this is not set, the application will fail to start with a clear error message.
 
+- **DEBRIDAV_STRM_PROXY_STREAM_MODE**: 
+  - Enable streaming mode for STRM proxy (default: `false`)
+  - If `true`, content is streamed directly through the proxy instead of redirecting to external URLs
+  - If `false` (default), the proxy redirects to the external URL after verifying/refreshing it
+  - **When streaming mode is enabled**:
+    - Content is streamed directly through the proxy using the same streaming logic as VFS files
+    - Provides more control over content delivery
+    - Allows for better caching and monitoring
+    - Supports byte-range requests (for seeking in media players)
+    - URL verification and refresh still occurs before streaming
+  - **When streaming mode is disabled** (default):
+    - The proxy performs URL verification/refresh and then redirects (307) to the external URL
+    - Media servers handle the actual streaming from the external URL
+    - Lower server resource usage (no streaming through proxy)
+  - **Use case**: Enable streaming mode when you want more control over content delivery, need better monitoring/logging, or want to apply additional processing/filtering to the stream. Keep disabled if you prefer direct streaming from external URLs to reduce server load.
+  - **Example**: `DEBRIDAV_STRM_PROXY_STREAM_MODE=true`
+

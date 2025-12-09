@@ -211,6 +211,12 @@ services:
       # Format: http://hostname:port or https://hostname:port
       # Example: - DEBRIDAV_STRM_PROXY_BASE_URL=http://debridav:8080
       # - DEBRIDAV_STRM_PROXY_BASE_URL=
+      # Optional: Enable streaming mode for STRM proxy (default: false)
+      # If true, content is streamed directly through the proxy instead of redirecting
+      # Provides more control over content delivery and better caching/monitoring
+      # When false, the proxy redirects to external URLs after verifying/refreshing them
+      # When true, the proxy streams content directly using the same logic as VFS files
+      # - DEBRIDAV_STRM_PROXY_STREAM_MODE=false
 
     ports:
       - ${DEBRIDAV_PORT}:8080

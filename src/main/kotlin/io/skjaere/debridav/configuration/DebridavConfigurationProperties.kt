@@ -72,7 +72,8 @@ data class DebridavConfigurationProperties(
     val strmMediaExtensions: List<String> = listOf("mkv", "mp4", "avi", "mov", "m4v", "mpg", "mpeg", "wmv", "flv", "webm", "ts", "m2ts"), // List of media file extensions when filter mode is MEDIA_ONLY
     val strmUseExternalUrlForProviders: String? = null, // Comma-separated list of provider names for which to use external URLs. Supports ALL/* for all providers and ! prefix for negation.
     val strmProxyExternalUrlForProviders: String? = null, // Comma-separated list of provider names for which external URLs should use proxy URLs instead of direct URLs. Supports ALL/* for all providers and ! prefix for negation.
-    val strmProxyBaseUrl: String? = null // Base URL for STRM redirect proxy (e.g., http://debridav:8080). If not set, defaults to http://{detected-hostname}:8080
+    val strmProxyBaseUrl: String? = null, // Base URL for STRM redirect proxy (e.g., http://debridav:8080). If not set, defaults to http://{detected-hostname}:8080
+    val strmProxyStreamMode: Boolean = false // If true, stream content directly through proxy instead of redirecting. Provides more control over content delivery.
 ) {
     init {
         require(debridClients.isNotEmpty()) {
