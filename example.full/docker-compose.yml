@@ -122,6 +122,8 @@ services:
 
 #      - LOGGING_LEVEL_WEB=debug
 #      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV=DEBUG
+      # STRM Proxy Logging (set to DEBUG to see proxy URL processing steps)
+      # - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_RESOURCE_STRMREDIRECTPROXYCONTROLLER=DEBUG
 
       # IPTV Logging (set to DEBUG for detailed IPTV logs, INFO for normal operation)
       # Uncomment the lines below to enable IPTV-specific logging
