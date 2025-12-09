@@ -62,7 +62,14 @@ data class DebridavConfigurationProperties(
     val debugArrTorrentInfoContentPathSuffix: String? = null, // Optional suffix to append to contentPath in ARR torrent info API responses (qBittorrent emulation /api/v2/torrents/info endpoint used by Sonarr/Radarr) for debugging purposes (e.g., "__DEBUG_TESTING")
     // Downloads cleanup configuration
     val enableDownloadsCleanupTimeBased: Boolean = false, // If true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes. If false (default), cleanup is immediate (no age check).
-    val downloadsCleanupTimeBasedThresholdMinutes: Long = 10 // Time threshold in minutes for time-based cleanup (only used if enableDownloadsCleanupTimeBased is true)
+    val downloadsCleanupTimeBasedThresholdMinutes: Long = 10, // Time threshold in minutes for time-based cleanup (only used if enableDownloadsCleanupTimeBased is true)
+    // STRM file configuration
+    val strmEnabled: Boolean = false, // Enable/disable STRM feature
+    val strmFolderMappings: String? = null, // Maps root folders to STRM folders (e.g., tv=tv_strm,movies=movies_strm)
+    val strmRootPathPrefix: String? = null, // Optional prefix for paths written in STRM files (e.g., /media)
+    val strmFileExtensionMode: String = "REPLACE", // How to handle file extensions: REPLACE (episode.mkv -> episode.strm) or APPEND (episode.mkv -> episode.mkv.strm)
+    val strmFileFilterMode: String = "MEDIA_ONLY", // Which files to convert: ALL (all files), MEDIA_ONLY (only media extensions), NON_STRM (all except .strm)
+    val strmMediaExtensions: List<String> = listOf("mkv", "mp4", "avi", "mov", "m4v", "mpg", "mpeg", "wmv", "flv", "webm", "ts", "m2ts") // List of media file extensions when filter mode is MEDIA_ONLY
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -283,5 +290,170 @@ data class DebridavConfigurationProperties(
         
         val minSizeBytes = rcloneArrsLocalVideoMinSizeKb * 1024 // Convert KB to bytes
         return fileSizeBytes >= minSizeBytes
+    }
+
+    /**
+     * Checks if STRM feature is enabled.
+     * @return true if STRM is enabled, false otherwise
+     */
+    fun isStrmEnabled(): Boolean {
+        return strmEnabled
+    }
+
+    /**
+     * Parses the strmFolderMappings string into a map.
+     * Format: "tv=tv_strm,movies=movies_strm"
+     * Returns empty map if STRM is disabled or mappings are not configured.
+     */
+    fun parseStrmFolderMappings(): Map<String, String> {
+        if (!strmEnabled || strmFolderMappings.isNullOrBlank()) {
+            return emptyMap()
+        }
+
+        return strmFolderMappings.split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .mapNotNull { entry ->
+                if (entry.contains("=")) {
+                    val parts = entry.split("=", limit = 2)
+                    if (parts.size == 2) {
+                        val originalFolder = parts[0].trim().removePrefix("/")
+                        val strmFolder = parts[1].trim().removePrefix("/")
+                        if (originalFolder.isNotEmpty() && strmFolder.isNotEmpty()) {
+                            originalFolder to strmFolder
+                        } else null
+                    } else null
+                } else null
+            }.toMap()
+    }
+
+    /**
+     * Checks if a path is a STRM folder path.
+     * @param path The path to check (e.g., "/tv_strm" or "/tv_strm/show")
+     * @return true if the path is a STRM folder, false otherwise
+     */
+    fun isStrmPath(path: String): Boolean {
+        if (!strmEnabled) {
+            return false
+        }
+
+        val mappings = parseStrmFolderMappings()
+        if (mappings.isEmpty()) {
+            return false
+        }
+
+        val normalizedPath = path.removePrefix("/").removeSuffix("/")
+        if (normalizedPath.isEmpty()) {
+            return false
+        }
+
+        val firstSegment = normalizedPath.split("/").first()
+        return mappings.values.contains(firstSegment)
+    }
+
+    /**
+     * Gets the original folder path from a STRM folder path.
+     * @param strmPath The STRM path (e.g., "/tv_strm" or "/tv_strm/show")
+     * @return The original path (e.g., "/tv" or "/tv/show"), or null if not a STRM path
+     */
+    fun getOriginalPathFromStrm(strmPath: String): String? {
+        if (!strmEnabled) {
+            return null
+        }
+
+        val mappings = parseStrmFolderMappings()
+        if (mappings.isEmpty()) {
+            return null
+        }
+
+        val normalizedPath = strmPath.removePrefix("/").removeSuffix("/")
+        if (normalizedPath.isEmpty()) {
+            return null
+        }
+
+        val pathSegments = normalizedPath.split("/")
+        val firstSegment = pathSegments.first()
+
+        // Find the original folder name for this STRM folder
+        val originalFolder = mappings.entries.find { it.value == firstSegment }?.key
+            ?: return null
+
+        // Reconstruct the original path
+        val remainingSegments = pathSegments.drop(1)
+        return if (remainingSegments.isEmpty()) {
+            "/$originalFolder"
+        } else {
+            "/$originalFolder/${remainingSegments.joinToString("/")}"
+        }
+    }
+
+    /**
+     * Checks if a file should be converted to a STRM file based on filter mode and extensions.
+     * @param fileName The file name to check
+     * @return true if the file should be converted to STRM, false otherwise
+     */
+    fun shouldCreateStrmFile(fileName: String): Boolean {
+        if (!strmEnabled) {
+            return false
+        }
+
+        when (strmFileFilterMode.uppercase()) {
+            "ALL" -> return true
+            "NON_STRM" -> return !fileName.lowercase().endsWith(".strm")
+            "MEDIA_ONLY" -> {
+                val extension = fileName.substringAfterLast(".", "").lowercase()
+                return strmMediaExtensions.any { it.lowercase() == extension }
+            }
+            else -> return false
+        }
+    }
+
+    /**
+     * Gets the STRM file name from the original file name based on extension mode.
+     * @param originalFileName The original file name (e.g., "episode.mkv")
+     * @return The STRM file name (e.g., "episode.strm" or "episode.mkv.strm")
+     */
+    fun getStrmFileName(originalFileName: String): String {
+        if (!strmEnabled) {
+            return originalFileName
+        }
+
+        return when (strmFileExtensionMode.uppercase()) {
+            "APPEND" -> "$originalFileName.strm"
+            "REPLACE" -> {
+                val lastDotIndex = originalFileName.lastIndexOf(".")
+                if (lastDotIndex > 0) {
+                    originalFileName.substring(0, lastDotIndex) + ".strm"
+                } else {
+                    "$originalFileName.strm"
+                }
+            }
+            else -> {
+                // Default to REPLACE behavior
+                val lastDotIndex = originalFileName.lastIndexOf(".")
+                if (lastDotIndex > 0) {
+                    originalFileName.substring(0, lastDotIndex) + ".strm"
+                } else {
+                    "$originalFileName.strm"
+                }
+            }
+        }
+    }
+
+    /**
+     * Gets the content path to write in a STRM file.
+     * This includes the optional prefix if configured.
+     * @param originalPath The original file path (e.g., "/tv/show/episode.mkv")
+     * @return The content path to write in the STRM file (e.g., "/media/tv/show/episode.mkv" or "/tv/show/episode.mkv")
+     */
+    fun getStrmContentPath(originalPath: String): String {
+        val prefix = strmRootPathPrefix?.trim()
+        return if (prefix.isNullOrBlank()) {
+            originalPath
+        } else {
+            val normalizedPrefix = prefix.removeSuffix("/")
+            val normalizedPath = originalPath.removePrefix("/")
+            "$normalizedPrefix/$normalizedPath"
+        }
     }
 }

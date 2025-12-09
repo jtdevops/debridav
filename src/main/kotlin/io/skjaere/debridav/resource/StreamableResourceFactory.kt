@@ -14,13 +14,14 @@ import io.skjaere.debridav.fs.LocalContentsService
 import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.stream.StreamingService
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 
 class StreamableResourceFactory(
     private val fileService: DatabaseFileService,
     private val debridService: DebridLinkService,
     private val streamingService: StreamingService,
-    private val debridavConfigurationProperties: DebridavConfigurationProperties,
+    internal val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val localContentsService: LocalContentsService,
     private val arrRequestDetector: ArrRequestDetector
 ) : ResourceFactory {
@@ -41,6 +42,64 @@ class StreamableResourceFactory(
     @Suppress("TooGenericExceptionCaught")
     private fun getResourceAtPath(path: String): Resource? {
         return try {
+            // Check if this is a STRM path
+            if (debridavConfigurationProperties.isStrmEnabled() && debridavConfigurationProperties.isStrmPath(path)) {
+                // Get the original path from the STRM path
+                var originalPath = debridavConfigurationProperties.getOriginalPathFromStrm(path)
+                    ?: return null
+                
+                // If the path ends with .strm, we need to find the original file
+                // by removing .strm and trying to find a matching file
+                if (path.endsWith(".strm")) {
+                    // This is a STRM file request - need to find the original file
+                    val strmFileName = path.substringAfterLast("/")
+                    val strmDirPath = path.substringBeforeLast("/")
+                    val originalDirPath = debridavConfigurationProperties.getOriginalPathFromStrm(strmDirPath)
+                        ?: return null
+                    
+                    // Try to find the original file by checking files in the directory
+                    val originalDir = fileService.getFileAtPath(originalDirPath) as? DbDirectory
+                        ?: return null
+                    
+                    // Get all files in the directory and find one that would generate this STRM file
+                    val children = kotlinx.coroutines.runBlocking { fileService.getChildren(originalDir) }
+                    val originalFile = children.firstOrNull { file ->
+                        val fileName = file.name ?: return@firstOrNull false
+                        if (debridavConfigurationProperties.shouldCreateStrmFile(fileName)) {
+                            val strmFileNameForFile = debridavConfigurationProperties.getStrmFileName(fileName)
+                            strmFileNameForFile == strmFileName
+                        } else {
+                            false
+                        }
+                    } ?: return null
+                    
+                    val fullOriginalPath = "$originalDirPath/${originalFile.name}"
+                    return StrmFileResource(
+                        originalFile,
+                        fullOriginalPath,
+                        fileService,
+                        debridavConfigurationProperties
+                    )
+                } else {
+                    // This is a STRM directory request
+                    val originalEntity = fileService.getFileAtPath(originalPath) ?: return null
+                    
+                    if (originalEntity is DbDirectory) {
+                        return StrmDirectoryResource(
+                            originalEntity,
+                            path,
+                            this,
+                            localContentsService,
+                            fileService,
+                            debridavConfigurationProperties
+                        )
+                    }
+                    // Not a directory, return null
+                    return null
+                }
+            }
+            
+            // Not a STRM path, handle normally
             fileService.getFileAtPath(path)
                 ?.let {
                     if (it is DbDirectory) {

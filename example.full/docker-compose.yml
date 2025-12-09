@@ -185,6 +185,15 @@ services:
 
       # Query the IPTV Provider directly for media details
       - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_IPTV_BYPASS_PROVIDERS=*
+
+      # STRM Configuration
+      - DEBRIDAV_STRM_ENABLED=false
+      - DEBRIDAV_STRM_FOLDER_MAPPINGS=tv=tv_strm,movies=movies_strm
+      - DEBRIDAV_STRM_ROOT_PATH_PREFIX=/data
+      - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
+      - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
+      - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+
     ports:
       - ${DEBRIDAV_PORT}:8080
       - "8000:8000"
