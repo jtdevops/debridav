@@ -193,7 +193,8 @@ services:
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
       - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
-      - DEBRIDAV_STRM_USE_EXTERNAL_URL=false
+      # Optional: Use external URLs only for specific providers (e.g., IPTV)
+      # - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV
 
     ports:
       - ${DEBRIDAV_PORT}:8080

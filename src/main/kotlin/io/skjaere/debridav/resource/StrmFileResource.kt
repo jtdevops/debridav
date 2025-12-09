@@ -5,6 +5,7 @@ import io.milton.http.Range
 import io.milton.http.Request
 import io.milton.resource.GetableResource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DbEntity
@@ -36,15 +37,40 @@ class StrmFileResource(
      * Otherwise, returns the VFS path (with optional prefix).
      */
     private fun computeStrmContent(): String {
-        // Check if we should use external URL
-        if (debridavConfigurationProperties.shouldUseExternalUrlForStrm() && originalFile is RemotelyCachedEntity) {
-            val externalUrl = getExternalUrl(originalFile)
-            if (externalUrl != null) {
-                return externalUrl
+        if (originalFile is RemotelyCachedEntity) {
+            // Determine the provider for provider-specific configuration checks
+            val provider = determineProvider(originalFile)
+            
+            // Check if we should use external URL (with provider-specific check if configured)
+            if (debridavConfigurationProperties.shouldUseExternalUrlForStrm(provider)) {
+                val externalUrl = getExternalUrl(originalFile)
+                if (externalUrl != null) {
+                    return externalUrl
+                }
             }
         }
         // Fall back to VFS path
         return debridavConfigurationProperties.getStrmContentPath(originalFilePath)
+    }
+
+    /**
+     * Determines the provider for a RemotelyCachedEntity.
+     * @param file The remotely cached entity
+     * @return The provider, or null if unable to determine
+     */
+    private fun determineProvider(file: RemotelyCachedEntity): DebridProvider? {
+        // Reload the entity to ensure contents are loaded
+        val reloadedFile = fileService.reloadRemotelyCachedEntity(file) ?: return null
+        val contents = reloadedFile.contents ?: return null
+        
+        // Check if it's IPTV content
+        if (contents is DebridIptvContent) {
+            return DebridProvider.IPTV
+        }
+        
+        // Try to get provider from debridLinks
+        val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+        return cachedFile?.provider
     }
 
     /**
