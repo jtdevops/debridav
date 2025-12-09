@@ -47,6 +47,13 @@ class DatabaseFileService(
     }
 
     @Transactional
+    fun createIptvFile(
+        path: String, hash: String, debridIptvContent: io.skjaere.debridav.fs.DebridIptvContent
+    ): RemotelyCachedEntity = runBlocking {
+        createDebridFile(path, hash, debridIptvContent)
+    }
+
+    @Transactional
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents
     ): RemotelyCachedEntity = runBlocking {
@@ -59,6 +66,10 @@ class DatabaseFileService(
             when (it.contents) {
                 is DebridCachedTorrentContent -> debridFileRepository.unlinkFileFromTorrents(it)
                 is DebridCachedUsenetReleaseContent -> debridFileRepository.unlinkFileFromUsenet(it)
+                is io.skjaere.debridav.fs.DebridIptvContent -> {
+                    // IPTV content can also be linked to torrents, so unlink it before deletion
+                    debridFileRepository.unlinkFileFromTorrents(it)
+                }
             }
             fileChunkCachingService.deleteChunksForFile(it)
             debridFileRepository.deleteDbEntityByHash(it.hash!!) // TODO: why doesn't debridFileRepository.delete() work?
@@ -178,6 +189,10 @@ class DatabaseFileService(
         when (file.contents) {
             is DebridCachedTorrentContent -> debridFileRepository.unlinkFileFromTorrents(file)
             is DebridCachedUsenetReleaseContent -> debridFileRepository.unlinkFileFromUsenet(file)
+            is io.skjaere.debridav.fs.DebridIptvContent -> {
+                // IPTV content can also be linked to torrents, so unlink it before deletion
+                debridFileRepository.unlinkFileFromTorrents(file)
+            }
         }
         fileChunkCachingService.deleteChunksForFile(file)
         debridFileRepository.delete(file)

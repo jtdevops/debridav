@@ -80,7 +80,15 @@ data class TorrentsInfoResponse(
     val upSpeed: Int
 ) {
     companion object {
-        fun ofTorrent(torrent: Torrent, downloadDir: String): TorrentsInfoResponse {
+        fun ofTorrent(torrent: Torrent, downloadDir: String, debugSuffix: String? = null): TorrentsInfoResponse {
+            // For IPTV torrents, contentPath should be the folder path only (same as regular torrents)
+            // Check if this is an IPTV torrent by checking if files contain DebridIptvContent
+            // Regular torrents use DebridCachedTorrentContent, so they won't match this check
+            // Both IPTV and regular torrents return folder path only in contentPath
+            // savePath is relative to mount path (e.g., /downloads/TorrentName), so combine with downloadDir
+            val baseContentPath = "$downloadDir${torrent.savePath}"
+            val contentPath = if (debugSuffix != null) "$baseContentPath$debugSuffix" else baseContentPath
+            
             return TorrentsInfoResponse(
                 addedOn = torrent.created!!.toEpochMilli().toInt(),
                 amountLeft = 0,
@@ -89,7 +97,7 @@ data class TorrentsInfoResponse(
                 category = torrent.category!!.name!!,
                 completed = 1,
                 completionOn = torrent.created!!.toEpochMilli().toInt(),
-                contentPath = "$downloadDir${torrent.savePath}",
+                contentPath = contentPath,
                 dlLimit = 0,
                 dlSpeed = 0,
                 downloaded = 100,
@@ -111,6 +119,8 @@ data class TorrentsInfoResponse(
                 progress = 1.0.toFloat(),
                 ratio = 1.0.toFloat(),
                 ratioLimit = 1.0.toFloat(),
+                // savePath should be the base download directory (mountPath + downloadPath)
+                // This matches qBittorrent's behavior where savePath is the root download directory
                 savePath = downloadDir,
                 seedingTime = 0,
                 seedingTimeLimit = 0,
