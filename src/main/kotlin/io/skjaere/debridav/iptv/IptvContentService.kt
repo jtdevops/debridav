@@ -1,0 +1,700 @@
+package io.skjaere.debridav.iptv
+
+import io.skjaere.debridav.fs.DebridIptvContent
+import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
+import io.skjaere.debridav.iptv.model.ContentType
+import io.skjaere.debridav.repository.DebridFileContentsRepository
+import jakarta.annotation.PostConstruct
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
+import java.net.URI
+
+@Service
+class IptvContentService(
+    private val iptvContentRepository: IptvContentRepository,
+    private val iptvCategoryRepository: IptvCategoryRepository,
+    private val iptvSyncHashRepository: IptvSyncHashRepository,
+    private val iptvSeriesMetadataRepository: IptvSeriesMetadataRepository,
+    private val iptvMovieMetadataRepository: IptvMovieMetadataRepository,
+    private val iptvConfigurationService: IptvConfigurationService,
+    private val iptvConfigurationProperties: IptvConfigurationProperties,
+    private val debridFileContentsRepository: DebridFileContentsRepository
+) {
+    private val logger = LoggerFactory.getLogger(IptvContentService::class.java)
+
+    @PostConstruct
+    fun logLanguagePrefixes() {
+        val indexedPrefixes = iptvConfigurationProperties.languagePrefixesIndex
+        val commaSeparatedPrefixes = iptvConfigurationProperties.languagePrefixes
+        val combinedPrefixes = iptvConfigurationProperties.combinedLanguagePrefixes
+        val expandedPrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
+        
+        if (combinedPrefixes.isNotEmpty()) {
+            logger.info("IPTV language prefixes configured:")
+            if (indexedPrefixes.isNotEmpty()) {
+                logger.info("  Indexed prefixes: $indexedPrefixes (count: ${indexedPrefixes.size})")
+            }
+            if (commaSeparatedPrefixes.isNotEmpty()) {
+                logger.info("  Comma-separated prefixes: $commaSeparatedPrefixes (count: ${commaSeparatedPrefixes.size})")
+            }
+            logger.info("  Combined prefixes: $combinedPrefixes (count: ${combinedPrefixes.size})")
+            logger.info("  Expanded language prefixes: $expandedPrefixes (count: ${expandedPrefixes.size})")
+            combinedPrefixes.forEachIndexed { index, prefix ->
+                val cleaned = stripQuotes(prefix)
+                logger.info("  [$index] Original: '$prefix' -> Cleaned: '$cleaned'")
+            }
+        } else {
+            logger.debug("No IPTV language prefixes configured")
+        }
+    }
+
+    fun searchContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvContentEntity> {
+        val normalizedTitle = normalizeTitle(title)
+        
+        // Get currently configured providers sorted by priority (lower number = higher priority)
+        val configuredProviders = iptvConfigurationService.getProviderConfigurations()
+        val configuredProviderNames = configuredProviders.map { it.name }.toSet()
+        // Create a map of provider name to priority for sorting results
+        val providerPriorityMap = configuredProviders.associate { it.name to it.priority }
+        
+        // Search by title only (year excluded from search)
+        // First try word boundary matching to prevent partial word matches (e.g., "twister" won't match "twisters")
+        val results = mutableListOf<IptvContentEntity>()
+        
+        // Try word boundary matching first
+        val wordBoundaryResults = if (contentType != null) {
+            iptvContentRepository.findByNormalizedTitleWordBoundaryAndContentType(normalizedTitle, contentType)
+        } else {
+            iptvContentRepository.findByNormalizedTitleWordBoundary(normalizedTitle)
+        }
+        results.addAll(wordBoundaryResults)
+        
+        // If no results with word boundary matching, try fuzzy matching with LIKE
+        // This handles cases where the title might have articles or other words in between
+        // For example: searching "breakfast club" should match "en the breakfast club"
+        // The fuzzy search will catch article variations automatically, so we don't need to try them explicitly
+        if (results.isEmpty()) {
+            logger.debug("Word boundary search returned 0 results, trying fuzzy LIKE search for: $normalizedTitle")
+            val fuzzyResults = if (contentType != null) {
+                iptvContentRepository.findByNormalizedTitleContainingAndContentType(normalizedTitle, contentType)
+            } else {
+                iptvContentRepository.findByNormalizedTitleContaining(normalizedTitle)
+            }
+            
+            // Filter fuzzy results to only include those that contain the search terms as whole words/phrases
+            // This prevents partial matches like "breakfast" matching "breakfasting"
+            // This also handles article variations automatically (e.g., "breakfast club" matches "the breakfast club")
+            val filteredFuzzyResults = fuzzyResults.filter { entity ->
+                val entityTitle = entity.normalizedTitle ?: ""
+                // Check if all words from the search query appear as whole words in the entity title
+                val searchWords = normalizedTitle.split("\\s+".toRegex()).filter { it.isNotBlank() }
+                searchWords.all { word ->
+                    // Match whole word boundaries: word at start, end, or surrounded by spaces/non-word chars
+                    // Use word boundary regex that works in Kotlin
+                    Regex("(^|[^a-z0-9])$word([^a-z0-9]|$)", RegexOption.IGNORE_CASE).containsMatchIn(entityTitle)
+                }
+            }
+            
+            results.addAll(filteredFuzzyResults)
+        }
+        
+        // Remove duplicates (same entity might match multiple variations)
+        val uniqueResults = results.distinctBy { it.id }
+        
+        // Filter to only include content from currently configured providers
+        val filteredResults = uniqueResults.filter { it.providerName in configuredProviderNames }
+        
+        // Filter by year if provided, then filter spin-offs, then sort by relevance and provider priority
+        // Note: For now, we only pass year (startYear) - year range support can be added later if needed
+        val yearFiltered = filterByYear(filteredResults, year)
+        val spinOffFiltered = filterSpinOffs(yearFiltered, normalizedTitle)
+        val finalResults = sortByRelevanceAndProviderPriority(spinOffFiltered, normalizedTitle, year, providerPriorityMap)
+        
+        // Log search results summary at INFO level
+        if (finalResults.isEmpty()) {
+            logger.info("IPTV search returned 0 results for title='$title'${year?.let { ", year=$it" } ?: ""}${contentType?.let { ", type=$it" } ?: ""}")
+        } else {
+            logger.debug("IPTV search returned ${finalResults.size} results for title='$title'${year?.let { ", year=$it" } ?: ""}${contentType?.let { ", type=$it" } ?: ""}")
+        }
+        
+        return finalResults
+    }
+    
+    /**
+     * Sorts search results by relevance score (higher is better) first, then by provider priority.
+     * Relevance scoring prioritizes exact matches and closer matches.
+     * Optionally limits results based on configuration.
+     */
+    private fun sortByRelevanceAndProviderPriority(
+        results: List<IptvContentEntity>,
+        searchTitle: String,
+        searchYear: Int?,
+        providerPriorityMap: Map<String, Int>
+    ): List<IptvContentEntity> {
+        if (results.isEmpty()) {
+            return results
+        }
+        
+        val scoredResults = results.map { entity ->
+            val score = calculateRelevanceScore(entity, searchTitle, searchYear)
+            logger.trace("Relevance score for '${entity.title}': $score (search: '$searchTitle', year: $searchYear)")
+            Pair(entity, score)
+        }
+        
+        val sorted = scoredResults.sortedWith(compareByDescending<Pair<IptvContentEntity, Int>> { it.second }
+            .thenBy { entity ->
+                // Secondary sort by provider priority (lower number = higher priority)
+                providerPriorityMap[entity.first.providerName] ?: Int.MAX_VALUE
+            })
+        
+        val maxResults = iptvConfigurationProperties.maxSearchResults
+        val limitedResults = if (maxResults > 0 && sorted.size > maxResults) {
+            logger.debug("Limiting results from ${sorted.size} to $maxResults (top scores: ${sorted.take(maxResults).joinToString { "${it.first.title}=${it.second}" }})")
+            sorted.take(maxResults)
+        } else {
+            logger.debug("Sorted ${sorted.size} results by relevance score (top 3 scores: ${sorted.take(3).joinToString { "${it.first.title}=${it.second}" }})")
+            sorted
+        }
+        
+        return limitedResults.map { it.first }
+    }
+    
+    /**
+     * Calculates a relevance score for a search result.
+     * Higher scores indicate better matches.
+     * 
+     * Scoring factors:
+     * - Exact normalized title match: 1000 points
+     * - Title starts with search query: 500 points
+     * - Title contains search query as whole words: 300 points
+     * - Title contains all search words: 100 points
+     * - Year match bonus: +200 points (if year provided and matches)
+     * - Year mismatch penalty: -100 points (if year provided but doesn't match)
+     */
+    private fun calculateRelevanceScore(entity: IptvContentEntity, searchTitle: String, searchYear: Int?): Int {
+        var entityNormalizedTitle = entity.normalizedTitle ?: ""
+        
+        // Strip language prefixes from entity title for comparison
+        // Language prefixes are typically in format "en " or "nl| " at the start
+        val languagePrefixPattern = Regex("^[a-z]{2,3}\\s*[|\\-]?\\s+", RegexOption.IGNORE_CASE)
+        entityNormalizedTitle = languagePrefixPattern.replace(entityNormalizedTitle, "").trim()
+        
+        var score = 0
+        
+        // Exact match (highest priority)
+        if (entityNormalizedTitle == searchTitle) {
+            score += 1000
+        }
+        // Starts with search query
+        else if (entityNormalizedTitle.startsWith(searchTitle)) {
+            score += 500
+            // Bonus for shorter titles (more specific matches)
+            // If title is just the search query plus a small amount, give bonus
+            val remainingAfterSearch = entityNormalizedTitle.removePrefix(searchTitle).trim()
+            if (remainingAfterSearch.isEmpty() || remainingAfterSearch.length <= 10) {
+                score += 50 // Bonus for very close matches
+            }
+        }
+        // Contains search query as whole phrase (word boundary match)
+        else {
+            val searchWords = searchTitle.split("\\s+".toRegex()).filter { it.isNotBlank() }
+            val allWordsMatch = searchWords.all { word ->
+                Regex("(^|[^a-z0-9])$word([^a-z0-9]|$)", RegexOption.IGNORE_CASE).containsMatchIn(entityNormalizedTitle)
+            }
+            
+            if (allWordsMatch) {
+                // Check if words appear in order as a phrase
+                val searchPhrase = searchWords.joinToString("\\s+")
+                if (Regex(searchPhrase, RegexOption.IGNORE_CASE).containsMatchIn(entityNormalizedTitle)) {
+                    score += 300 // Whole phrase match
+                } else {
+                    score += 100 // All words present but not as phrase
+                }
+            }
+        }
+        
+        // Year match bonus/penalty
+        if (searchYear != null) {
+            val entityYear = extractYearFromTitle(entity.title)
+            when {
+                entityYear == searchYear -> score += 200 // Year match bonus
+                entityYear != null -> score -= 100 // Year mismatch penalty
+                // No year in entity title: no penalty (neutral)
+            }
+        }
+        
+        return score
+    }
+    
+    /**
+     * Sorts search results by provider priority (lower priority number = higher priority).
+     * Results from providers with lower priority numbers will appear first.
+     * @deprecated Use sortByRelevanceAndProviderPriority instead for better search accuracy
+     */
+    @Deprecated("Use sortByRelevanceAndProviderPriority for better search accuracy")
+    private fun sortByProviderPriority(results: List<IptvContentEntity>, providerPriorityMap: Map<String, Int>): List<IptvContentEntity> {
+        return results.sortedBy { entity ->
+            // Get priority for this provider, default to Int.MAX_VALUE if not found (shouldn't happen)
+            providerPriorityMap[entity.providerName] ?: Int.MAX_VALUE
+        }
+    }
+    
+    /**
+     * Filters out spin-off titles that contain non-alphanumeric characters like ':' or '-' after the main title.
+     * Spin-offs are typically indicated by these characters (e.g., "Dexter: New Blood", "Dexter - Resurrection").
+     * 
+     * Filtering rules:
+     * - If there are results without spin-off indicators, exclude those with spin-off indicators
+     * - If ALL results have spin-off indicators, return all results (don't filter everything out)
+     * - Language prefixes are stripped before checking for spin-off indicators
+     */
+    private fun filterSpinOffs(results: List<IptvContentEntity>, searchTitle: String): List<IptvContentEntity> {
+        if (results.isEmpty()) {
+            return results
+        }
+        
+        logger.debug("Filtering ${results.size} results for spin-offs (search title: '$searchTitle')")
+        
+        // Characters that typically indicate spin-offs when appearing after the main title
+        val spinOffIndicators = listOf(':', '-', '–', '—')
+        
+        // Categorize results by spin-off status
+        val resultsWithoutSpinOffs = mutableListOf<IptvContentEntity>()
+        val resultsWithSpinOffs = mutableListOf<IptvContentEntity>()
+        
+        results.forEach { entity ->
+            // Remove language prefixes before checking for spin-off indicators
+            val titleWithoutPrefix = removeLanguagePrefixesForSpinOffCheck(entity.title)
+            
+            // Check if title contains spin-off indicators after the main title
+            // Look for patterns like "Title: Subtitle" or "Title - Subtitle"
+            val hasSpinOffIndicator = spinOffIndicators.any { indicator ->
+                // Check if indicator appears after the main title (not at the very beginning)
+                val indicatorIndex = titleWithoutPrefix.indexOf(indicator)
+                if (indicatorIndex > 0) {
+                    // Make sure it's not part of a year pattern like "(2006-2013)" or "2006-2013"
+                    val beforeIndicator = titleWithoutPrefix.substring(0, indicatorIndex).trim()
+                    val afterIndicator = titleWithoutPrefix.substring(indicatorIndex + 1).trim()
+                    
+                    // Skip if it's a year range pattern (e.g., "2006-2013" or "(2006-2013)")
+                    val yearRangePattern = Regex("""\d{4}[-–—]\d{4}""")
+                    if (yearRangePattern.containsMatchIn(titleWithoutPrefix)) {
+                        false
+                    } else {
+                        // Check if there's meaningful content after the indicator (not just whitespace)
+                        afterIndicator.isNotBlank() && afterIndicator.length > 2
+                    }
+                } else {
+                    false
+                }
+            }
+            
+            if (hasSpinOffIndicator) {
+                resultsWithSpinOffs.add(entity)
+                logger.trace("Result '${entity.title}' detected as spin-off (contains spin-off indicator)")
+            } else {
+                resultsWithoutSpinOffs.add(entity)
+                logger.trace("Result '${entity.title}' is not a spin-off")
+            }
+        }
+        
+        // Determine which results to return
+        val filtered = when {
+            // If we have results without spin-offs, exclude those with spin-offs
+            resultsWithoutSpinOffs.isNotEmpty() -> {
+                logger.debug("Spin-off filter: Found ${resultsWithoutSpinOffs.size} results without spin-offs and ${resultsWithSpinOffs.size} results with spin-offs. Excluding spin-offs.")
+                resultsWithoutSpinOffs
+            }
+            // If ALL results have spin-off indicators, return all results (don't filter everything out)
+            else -> {
+                logger.debug("Spin-off filter: All ${results.size} results have spin-off indicators. Returning all results.")
+                results
+            }
+        }
+        
+        logger.debug("Spin-off filter returned ${filtered.size} results (from ${results.size} total)")
+        return filtered
+    }
+    
+    /**
+     * Removes language prefixes from title for spin-off detection.
+     * Handles patterns like "EN| ", "EN - ", "NL| ", etc.
+     */
+    private fun removeLanguagePrefixesForSpinOffCheck(title: String): String {
+        // First try configured language prefixes
+        val languagePrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
+        for (prefix in languagePrefixes) {
+            val cleanedPrefix = stripQuotes(prefix)
+            if (title.startsWith(cleanedPrefix, ignoreCase = false)) {
+                return title.removePrefix(cleanedPrefix).trimStart()
+            }
+        }
+        
+        // Fallback to regex pattern for language codes
+        val languagePrefixPattern = Regex("^[A-Z]{2,}\\s*[|\\-]\\s+", RegexOption.IGNORE_CASE)
+        return languagePrefixPattern.replace(title, "").trimStart()
+    }
+    
+    /**
+     * Filters search results by year if year is provided.
+     * Year filtering is optional and follows these rules:
+     * - If no year is provided, return all results
+     * - If year is provided:
+     *   - Include results with matching year OR results that fall within year range (if endYear provided)
+     *   - Include results with no year
+     *   - Exclude results with non-matching year ONLY if there are results with matching year or no year
+     *   - If ALL results have non-matching years (and none have matching year or no year), return all results
+     */
+    private fun filterByYear(results: List<IptvContentEntity>, year: Int?, startYear: Int? = null, endYear: Int? = null): List<IptvContentEntity> {
+        val searchStartYear = startYear ?: year
+        if (searchStartYear == null) {
+            logger.debug("No year filter specified, returning all ${results.size} results")
+            return results
+        }
+        
+        val yearRangeStr = if (endYear != null) "$searchStartYear–$endYear" else "$searchStartYear"
+        logger.debug("Filtering ${results.size} results by year: $yearRangeStr")
+        
+        // Categorize results by year match status
+        val resultsWithMatchingYear = mutableListOf<IptvContentEntity>()
+        val resultsWithNoYear = mutableListOf<IptvContentEntity>()
+        val resultsWithNonMatchingYear = mutableListOf<IptvContentEntity>()
+        
+        results.forEach { entity ->
+            val extractedYear = extractYearFromTitle(entity.title)
+            when {
+                extractedYear == null -> {
+                    resultsWithNoYear.add(entity)
+                    logger.trace("Result '${entity.title}' has no year - will be included")
+                }
+                extractedYear == searchStartYear -> {
+                    // Exact match
+                    resultsWithMatchingYear.add(entity)
+                    logger.trace("Result '${entity.title}' (year: $extractedYear) matches filter year: $searchStartYear - will be included")
+                }
+                endYear != null && extractedYear >= searchStartYear && extractedYear <= endYear -> {
+                    // Falls within year range (extractedYear is guaranteed to be non-null here since first branch handles null)
+                    resultsWithMatchingYear.add(entity)
+                    logger.trace("Result '${entity.title}' (year: $extractedYear) falls within year range $yearRangeStr - will be included")
+                }
+                else -> {
+                    resultsWithNonMatchingYear.add(entity)
+                    logger.trace("Result '${entity.title}' (year: $extractedYear) does not match filter year: $yearRangeStr - may be excluded")
+                }
+            }
+        }
+        
+        // Determine which results to return
+        val filtered = when {
+            // If we have results with matching year or no year, exclude non-matching year results
+            resultsWithMatchingYear.isNotEmpty() || resultsWithNoYear.isNotEmpty() -> {
+                val included = resultsWithMatchingYear + resultsWithNoYear
+                logger.debug("Year filter: Found ${resultsWithMatchingYear.size} results with matching year and ${resultsWithNoYear.size} results with no year. Excluding ${resultsWithNonMatchingYear.size} results with non-matching year.")
+                included
+            }
+            // If ALL results have non-matching years, return all results (year filter is optional)
+            else -> {
+                logger.debug("Year filter: All ${results.size} results have non-matching years. Returning all results (year filter is optional).")
+                results
+            }
+        }
+        
+        logger.debug("Year filter returned ${filtered.size} results (from ${results.size} total)")
+        return filtered
+    }
+    
+    /**
+     * Extracts year from a title string.
+     * Handles formats like:
+     * - "Title (1996)"
+     * - "Title 1996"
+     * - "Title (1996) Extra"
+     * Returns null if no valid year is found.
+     */
+    private fun extractYearFromTitle(title: String): Int? {
+        // Try to match year in parentheses first: "Title (1996)"
+        val parenthesesPattern = Regex("""\((\d{4})\)""")
+        val parenthesesMatch = parenthesesPattern.find(title)
+        if (parenthesesMatch != null) {
+            return parenthesesMatch.groupValues[1].toIntOrNull()
+        }
+        
+        // Try to match year as standalone 4-digit number: "Title 1996" (but not "Title 1996-1997")
+        // Look for 4-digit years that are likely release years (1900-2099)
+        val yearPattern = Regex("""\b(19\d{2}|20\d{2})\b""")
+        val yearMatch = yearPattern.find(title)
+        if (yearMatch != null) {
+            return yearMatch.groupValues[1].toIntOrNull()
+        }
+        
+        return null
+    }
+
+    fun findExactMatch(title: String, contentType: ContentType?): IptvContentEntity? {
+        val normalizedTitle = normalizeTitle(title)
+        val candidates = searchContent(normalizedTitle, null, contentType)
+        
+        // Find exact match (normalized titles match exactly)
+        return candidates.firstOrNull { it.normalizedTitle == normalizedTitle }
+    }
+
+    fun getContentByProviderAndId(providerName: String, contentId: String): IptvContentEntity? {
+        // Verify provider is still configured
+        val configuredProviderNames = iptvConfigurationService.getProviderConfigurations()
+            .map { it.name }
+            .toSet()
+        
+        if (providerName !in configuredProviderNames) {
+            logger.warn("Requested content from removed provider: $providerName")
+            return null
+        }
+        
+        val content = iptvContentRepository.findByProviderNameAndContentId(providerName, contentId)
+        
+        // Also check if content is active
+        return if (content != null && content.isActive) content else null
+    }
+
+    fun deleteProviderContent(providerName: String): Int {
+        // Delete content items (streams)
+        val contentToDelete = iptvContentRepository.findByProviderName(providerName)
+        val contentCount = contentToDelete.size
+        
+        if (contentCount > 0) {
+            logger.info("Deleting $contentCount content items for provider: $providerName")
+            iptvContentRepository.deleteAll(contentToDelete)
+        } else {
+            logger.info("No content found for provider: $providerName")
+        }
+        
+        // Delete categories
+        val categoriesToDelete = iptvCategoryRepository.findByProviderName(providerName)
+        val categoryCount = categoriesToDelete.size
+        if (categoryCount > 0) {
+            logger.info("Deleting $categoryCount categories for provider: $providerName")
+            iptvCategoryRepository.deleteByProviderName(providerName)
+        }
+        
+        // Delete sync hashes
+        val hashesToDelete = iptvSyncHashRepository.findByProviderName(providerName)
+        val hashCount = hashesToDelete.size
+        if (hashCount > 0) {
+            logger.info("Deleting $hashCount sync hashes for provider: $providerName")
+            iptvSyncHashRepository.deleteByProviderName(providerName)
+        }
+        
+        // Delete series metadata cache
+        val metadataCount = iptvSeriesMetadataRepository.countByProviderName(providerName)
+        if (metadataCount > 0) {
+            logger.info("Deleting $metadataCount series metadata cache entries for provider: $providerName")
+            iptvSeriesMetadataRepository.deleteByProviderName(providerName)
+        }
+        
+        logger.info("Deleted all data for provider: $providerName (content: $contentCount, categories: $categoryCount, hashes: $hashCount, metadata: $metadataCount)")
+        return contentCount
+    }
+
+    fun normalizeTitle(title: String): String {
+        return title
+            .lowercase()
+            .replace(Regex("[^a-z0-9\\s]"), "") // Remove special characters
+            .replace(Regex("\\s+"), " ") // Normalize whitespace
+            .trim()
+    }
+
+    /**
+     * Strips surrounding single or double quotes from a string if present.
+     * This helps preserve trailing spaces when configuring prefixes in properties files.
+     * Examples:
+     *   "EN - " -> EN - 
+     *   'EN| ' -> EN| 
+     *   EN |  -> EN |  (no quotes, unchanged)
+     */
+    private fun stripQuotes(value: String): String {
+        return when {
+            (value.startsWith("\"") && value.endsWith("\"")) || 
+            (value.startsWith("'") && value.endsWith("'")) -> {
+                value.substring(1, value.length - 1)
+            }
+            else -> value
+        }
+    }
+
+    fun resolveIptvUrl(tokenizedUrl: String, providerName: String): String {
+        // Check if this is a series placeholder URL (should not be resolved)
+        if (tokenizedUrl.startsWith("SERIES_PLACEHOLDER:")) {
+            throw IllegalArgumentException("Cannot resolve series placeholder URL. Episodes must be fetched on-demand.")
+        }
+        
+        val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+        val providerConfig = providerConfigs.find { it.name == providerName }
+            ?: throw IllegalArgumentException("IPTV provider $providerName not found")
+        
+        var resolved = tokenizedUrl
+        
+        // Replace placeholders with actual values
+        when (providerConfig.type) {
+            io.skjaere.debridav.iptv.IptvProvider.M3U -> {
+                providerConfig.m3uUrl?.let { m3uUrl ->
+                    try {
+                        val uri = URI(m3uUrl)
+                        val baseUrl = "${uri.scheme}://${uri.host}${uri.port.takeIf { it != -1 }?.let { ":$it" } ?: ""}"
+                        resolved = resolved.replace("{BASE_URL}", baseUrl)
+                    } catch (e: Exception) {
+                        logger.warn("Could not extract base URL from m3u-url: $m3uUrl", e)
+                    }
+                }
+            }
+            io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES -> {
+                providerConfig.xtreamBaseUrl?.let { 
+                    resolved = resolved.replace("{BASE_URL}", it)
+                }
+                providerConfig.xtreamUsername?.let {
+                    resolved = resolved.replace("{USERNAME}", it)
+                }
+                providerConfig.xtreamPassword?.let {
+                    resolved = resolved.replace("{PASSWORD}", it)
+                }
+            }
+        }
+        
+        // Also handle URL-encoded placeholders
+        resolved = resolved.replace("%7BBASE_URL%7D", providerConfig.xtreamBaseUrl ?: "")
+        resolved = resolved.replace("%7BUSERNAME%7D", providerConfig.xtreamUsername ?: "")
+        resolved = resolved.replace("%7BPASSWORD%7D", providerConfig.xtreamPassword ?: "")
+        
+        return resolved
+    }
+    
+    /**
+     * Finds files (RemotelyCachedEntity) that are linked to inactive IPTV content items.
+     * Returns a map of inactive IPTV content to their linked files.
+     */
+    fun findFilesLinkedToInactiveContent(): Map<IptvContentEntity, List<RemotelyCachedEntity>> {
+        val inactiveContent = iptvContentRepository.findInactiveContent()
+        logger.debug("Found ${inactiveContent.size} inactive IPTV content items")
+        
+        val result = mutableMapOf<IptvContentEntity, List<RemotelyCachedEntity>>()
+        
+        inactiveContent.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isNotEmpty()) {
+                result[content] = files
+                logger.debug("Found ${files.size} files linked to inactive content: ${content.title} (id: ${content.id})")
+            }
+        }
+        
+        logger.info("Found ${result.size} inactive IPTV content items with linked files (total ${result.values.sumOf { it.size }} files)")
+        return result
+    }
+    
+    /**
+     * Deletes inactive IPTV content items that are not linked to any files.
+     * Also deletes metadata (movie and series) linked to the deleted content items.
+     * Returns the number of deleted items.
+     */
+    @Transactional
+    fun deleteInactiveContentWithoutFiles(): Int {
+        val inactiveContent = iptvContentRepository.findInactiveContent()
+        logger.debug("Found ${inactiveContent.size} inactive IPTV content items to check")
+        
+        val contentToDelete = mutableListOf<IptvContentEntity>()
+        
+        inactiveContent.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isEmpty()) {
+                contentToDelete.add(content)
+            } else {
+                logger.debug("Skipping deletion of inactive content ${content.title} (id: ${content.id}) - has ${files.size} linked files")
+            }
+        }
+        
+        if (contentToDelete.isNotEmpty()) {
+            logger.info("Deleting ${contentToDelete.size} inactive IPTV content items without linked files")
+            
+            // Group content by provider and content type for efficient metadata deletion
+            val contentByProvider = contentToDelete.groupBy { it.providerName }
+            
+            contentByProvider.forEach { (providerName, contentList) ->
+                // Separate movies and series
+                val movieIds = contentList.filter { it.contentType == ContentType.MOVIE }.map { it.contentId }
+                val seriesIds = contentList.filter { it.contentType == ContentType.SERIES }.map { it.contentId }
+                
+                // Delete movie metadata
+                if (movieIds.isNotEmpty()) {
+                    val deletedMovieMetadata = iptvMovieMetadataRepository.deleteByProviderNameAndMovieIds(providerName, movieIds)
+                    logger.debug("Deleted $deletedMovieMetadata movie metadata entries for provider $providerName")
+                }
+                
+                // Delete series metadata
+                if (seriesIds.isNotEmpty()) {
+                    val deletedSeriesMetadata = iptvSeriesMetadataRepository.deleteByProviderNameAndSeriesIds(providerName, seriesIds)
+                    logger.debug("Deleted $deletedSeriesMetadata series metadata entries for provider $providerName")
+                }
+            }
+            
+            // Delete the content items
+            iptvContentRepository.deleteAll(contentToDelete)
+            logger.info("Deleted ${contentToDelete.size} inactive IPTV content items and their associated metadata")
+        } else {
+            logger.info("No inactive IPTV content items to delete (all have linked files)")
+        }
+        
+        return contentToDelete.size
+    }
+    
+    /**
+     * Deletes inactive IPTV content items for a specific provider that are not linked to any files.
+     * Also deletes metadata (movie and series) linked to the deleted content items.
+     * Returns the number of deleted items.
+     */
+    @Transactional
+    fun deleteInactiveContentWithoutFilesForProvider(providerName: String): Int {
+        val inactiveContent = iptvContentRepository.findInactiveContent()
+            .filter { it.providerName == providerName }
+        logger.debug("Found ${inactiveContent.size} inactive IPTV content items for provider $providerName to check")
+        
+        val contentToDelete = mutableListOf<IptvContentEntity>()
+        
+        inactiveContent.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isEmpty()) {
+                contentToDelete.add(content)
+            } else {
+                logger.debug("Skipping deletion of inactive content ${content.title} (id: ${content.id}) for provider $providerName - has ${files.size} linked files")
+            }
+        }
+        
+        if (contentToDelete.isNotEmpty()) {
+            logger.info("Deleting ${contentToDelete.size} inactive IPTV content items without linked files for provider $providerName")
+            
+            // Separate movies and series
+            val movieIds = contentToDelete.filter { it.contentType == ContentType.MOVIE }.map { it.contentId }
+            val seriesIds = contentToDelete.filter { it.contentType == ContentType.SERIES }.map { it.contentId }
+            
+            // Delete movie metadata
+            if (movieIds.isNotEmpty()) {
+                val deletedMovieMetadata = iptvMovieMetadataRepository.deleteByProviderNameAndMovieIds(providerName, movieIds)
+                logger.debug("Deleted $deletedMovieMetadata movie metadata entries for provider $providerName")
+            }
+            
+            // Delete series metadata
+            if (seriesIds.isNotEmpty()) {
+                val deletedSeriesMetadata = iptvSeriesMetadataRepository.deleteByProviderNameAndSeriesIds(providerName, seriesIds)
+                logger.debug("Deleted $deletedSeriesMetadata series metadata entries for provider $providerName")
+            }
+            
+            // Delete the content items
+            iptvContentRepository.deleteAll(contentToDelete)
+            logger.info("Deleted ${contentToDelete.size} inactive IPTV content items and their associated metadata for provider $providerName")
+        } else {
+            logger.debug("No inactive IPTV content items to delete for provider $providerName (all have linked files)")
+        }
+        
+        return contentToDelete.size
+    }
+}
+

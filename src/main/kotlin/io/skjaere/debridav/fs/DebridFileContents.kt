@@ -11,11 +11,15 @@ import jakarta.persistence.Column
 import jakarta.persistence.DiscriminatorColumn
 import jakarta.persistence.DiscriminatorType
 import jakarta.persistence.Entity
+import jakarta.persistence.FetchType
+import jakarta.persistence.ForeignKey
 import jakarta.persistence.GeneratedValue
 import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Inheritance
 import jakarta.persistence.InheritanceType
+import jakarta.persistence.JoinColumn
+import jakarta.persistence.ManyToOne
 import org.hibernate.annotations.Type
 import java.io.Serializable
 
@@ -105,6 +109,43 @@ open class DebridUsenetContents : DebridFileContents() {
     //open var mimeType: String? = null
 }
 
+@Entity
+open class DebridIptvContent() : DebridFileContents() {
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(
+        name = "iptv_url_template_id",
+        foreignKey = ForeignKey(name = "fk_debrid_iptv_content_url_template")
+    )
+    open var iptvUrlTemplate: io.skjaere.debridav.iptv.IptvUrlTemplateEntity? = null
+    
+    @Column(name = "iptv_provider_name", length = 255)
+    open var iptvProviderName: String? = null
+    
+    @Column(name = "iptv_content_id", length = 512)
+    open var iptvContentId: String? = null
+    
+    @Column(name = "iptv_content_ref_id")
+    open var iptvContentRefId: Long? = null // Foreign key reference to iptv_content.id for cascading deletes
+
+    constructor(
+        originalPath: String?,
+        size: Long?,
+        modified: Long?,
+        iptvProviderName: String?,
+        iptvContentId: String?,
+        mimeType: String?,
+        debridLinks: MutableList<DebridFile>
+    ) : this() {
+        this.originalPath = originalPath
+        this.size = size
+        this.modified = modified
+        this.iptvProviderName = iptvProviderName
+        this.iptvContentId = iptvContentId
+        this.debridLinks = debridLinks
+        this.mimeType = mimeType
+    }
+}
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 @JsonTypeInfo(
     use = JsonTypeInfo.Id.NAME,
@@ -118,6 +159,7 @@ open class DebridUsenetContents : DebridFileContents() {
         JsonSubTypes.Type(ClientError::class, name = "ClientError"),
         JsonSubTypes.Type(NetworkError::class, name = "NetworkError"),
         JsonSubTypes.Type(UnknownDebridLinkError::class, name = "UnknownError"),
+        JsonSubTypes.Type(IptvFile::class, name = "IptvFile"),
     ]
 )
 
@@ -239,5 +281,35 @@ open class UnknownDebridLinkError() : DebridFile() {
     constructor(debridProvider: DebridProvider, lastChecked: Long) : this() {
         this.provider = debridProvider
         this.lastChecked = lastChecked
+    }
+}
+
+@JsonTypeName("IptvFile")
+open class IptvFile() : DebridFile() {
+    @JsonProperty("@type")
+    open var type: String = "IptvFile"
+    open var path: String? = null
+    open var size: Long? = null
+    open var mimeType: String? = null
+    open var link: String? = null
+    open var params: Map<String, String>? = mutableMapOf()
+
+    @Suppress("LongParameterList")
+    constructor(
+        path: String,
+        size: Long,
+        mimeType: String,
+        link: String,
+        params: Map<String, String>?,
+        lastChecked: Long
+    ) : this() {
+        this.path = path
+        this.size = size
+        this.mimeType = mimeType
+        this.link = link
+        this.params = params
+        this.lastChecked = lastChecked
+        // IPTV files use the IPTV provider
+        this.provider = io.skjaere.debridav.debrid.DebridProvider.IPTV
     }
 }

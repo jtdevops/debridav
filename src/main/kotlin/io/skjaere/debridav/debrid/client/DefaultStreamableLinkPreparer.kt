@@ -29,7 +29,14 @@ class DefaultStreamableLinkPreparer(
     private val rateLimiter: RateLimiter,
     private val userAgent: String?
 ) : StreamableLinkPreparable {
-    private val logger = LoggerFactory.getLogger(RealDebridClient::class.java)
+    private val logger = LoggerFactory.getLogger(DefaultStreamableLinkPreparer::class.java)
+
+    init {
+        // Log the effective logger level at startup for debugging
+        logger.debug("DefaultStreamableLinkPreparer logger initialized: loggerName={}, effectiveLevel={}", 
+            DefaultStreamableLinkPreparer::class.java.name,
+            if (logger.isTraceEnabled) "TRACE" else if (logger.isDebugEnabled) "DEBUG" else if (logger.isInfoEnabled) "INFO" else if (logger.isWarnEnabled) "WARN" else "ERROR")
+    }
 
     constructor(
         httpClient: HttpClient,
@@ -37,27 +44,77 @@ class DefaultStreamableLinkPreparer(
         rateLimiter: RateLimiter
     ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null)
 
+    /**
+     * Detects if a URL is likely an IPTV content URL.
+     * IPTV URLs typically come from Xtream Codes providers and have patterns like:
+     * - {baseUrl}/movie/{username}/{password}/{id}.{ext}
+     * - {baseUrl}/series/{username}/{password}/{id}.{ext}
+     * - {baseUrl}/live/{username}/{password}/{id}.{ext}
+     * - Or M3U playlist URLs
+     */
+    private fun isIptvUrl(url: String): Boolean {
+        if (url.isBlank()) {
+            return false
+        }
+        
+        // Check for Xtream Codes patterns (most common IPTV format)
+        // Pattern: /movie/ or /series/ or /live/ followed by username/password/id.ext
+        val xtreamPattern = Regex(".*/(movie|series|live)/[^/]+/[^/]+/[^/]+\\.(mp4|mkv|avi|ts|mov|m4v|m2ts|mts|vob|flv|webm|m3u8)$", RegexOption.IGNORE_CASE)
+        if (xtreamPattern.matches(url)) {
+            return true
+        }
+        
+        // Check for M3U playlist URLs
+        if (url.contains(".m3u", ignoreCase = true)) {
+            return true
+        }
+        
+        // Check if provider is not a known debrid provider (heuristic)
+        // This is detected at the StreamingService level, but we can also check URL patterns
+        // If URL doesn't match known debrid patterns, it might be IPTV
+        val debridPatterns = listOf(
+            "real-debrid.com",
+            "premiumize.me",
+            "easynews.com",
+            "torbox.app"
+        )
+        val isDebridUrl = debridPatterns.any { url.contains(it, ignoreCase = true) }
+        
+        // If it's not a debrid URL and matches video file patterns, assume IPTV
+        if (!isDebridUrl && url.matches(Regex(".*\\.(mp4|mkv|avi|ts|mov|m4v|m2ts|mts|vob|flv|webm|m3u8)$", RegexOption.IGNORE_CASE))) {
+            return true
+        }
+        
+        return false
+    }
+
     @Suppress("MagicNumber")
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
-        return rateLimiter.executeSuspendFunction {
-            httpClient.prepareGet(debridLink.link!!) {
+        val isIptv = isIptvUrl(debridLink.link ?: "")
+        
+        return try {
+            rateLimiter.executeSuspendFunction {
+                httpClient.prepareGet(debridLink.link!!) {
                 headers {
-                    // Always handle byte range requests - the chunking control is internal
+                    // Apply Range headers to the original URL (including IPTV URLs)
+                    // Range headers will be re-applied to redirect URLs in StreamingService to ensure providers honor the requested range
                     range?.let { range ->
                         getByteRange(range, debridLink.size!!)?.let { byteRange ->
                             // Only apply byte range if chunking is not disabled
                             if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
-                                logger.info(
+                                logger.debug(
                                     "Applying byteRange $byteRange " +
                                             "for ${debridLink.link}" +
-                                            " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
+                                            " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) " +
+                                            if (isIptv) "(IPTV - Range header will be re-applied on redirect URLs)" else ""
                                 )
 
                                 if (!(range.start == 0L && range.finish == debridLink.size)) {
                                     append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
                                 }
                             } else {
-                                logger.info("Byte range chunking disabled - using exact user range")
+                                logger.debug("Byte range chunking disabled - using exact user range" +
+                                        if (isIptv) " (IPTV - Range header will be re-applied on redirect URLs)" else "")
                                 // When chunking is disabled, use the exact range requested by user
                                 if (!(range.start == 0L && range.finish == debridLink.size)) {
                                     append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
@@ -71,6 +128,11 @@ class DefaultStreamableLinkPreparer(
                         append(HttpHeaders.UserAgent, it)
                     }
                 }
+                
+                if (isIptv) {
+                    logger.debug("Detected IPTV URL - Range headers applied to original URL, will be re-applied on redirect URLs: ${debridLink.link?.take(100)}")
+                }
+                
                 timeout {
                     requestTimeoutMillis = 20_000_000
                     socketTimeoutMillis = 10_000
@@ -78,16 +140,34 @@ class DefaultStreamableLinkPreparer(
                 }
             }
         }
+        } catch (e: Exception) {
+            // TRACE level logging for HTTP request exceptions with full stack trace
+            logger.trace("HTTP_REQUEST_EXCEPTION: Exception preparing HTTP request: path={}, link={}, provider={}, exceptionClass={}", 
+                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+            // Explicitly log stack trace to ensure it appears
+            logger.trace("HTTP_REQUEST_EXCEPTION_STACK_TRACE", e)
+            throw e
+        }
     }
 
     override suspend fun isLinkAlive(debridLink: CachedFile): Boolean = flow {
         logger.debug("LINK_ALIVE_HTTP_CHECK: file={}, provider={}, link={}, size={} bytes", 
             debridLink.path, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size)
-        rateLimiter.executeSuspendFunction {
-            val result = httpClient.head(debridLink.link!!).status.isSuccess()
-            logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
-                debridLink.path, debridLink.provider, result)
-            emit(result)
+        val isIptv = isIptvUrl(debridLink.link ?: "")
+        try {
+            rateLimiter.executeSuspendFunction {
+                val result = httpClient.head(debridLink.link!!).status.isSuccess()
+                logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
+                    debridLink.path, debridLink.provider, result)
+                emit(result)
+            }
+        } catch (e: Exception) {
+            // TRACE level logging for HTTP HEAD request exceptions with full stack trace
+            logger.trace("HTTP_HEAD_EXCEPTION: Exception checking link alive: path={}, link={}, provider={}, exceptionClass={}", 
+                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+            // Explicitly log stack trace to ensure it appears
+            logger.trace("HTTP_HEAD_EXCEPTION_STACK_TRACE", e)
+            throw e
         }
     }.retry(RETRIES)
         .first()
