@@ -81,7 +81,7 @@ class StreamableResourceFactory(
                         debridavConfigurationProperties
                     )
                 } else {
-                    // This is a STRM directory request
+                    // This could be a STRM directory request or a non-STRM file within a STRM directory
                     val originalEntity = fileService.getFileAtPath(originalPath) ?: return null
                     
                     if (originalEntity is DbDirectory) {
@@ -93,9 +93,11 @@ class StreamableResourceFactory(
                             fileService,
                             debridavConfigurationProperties
                         )
+                    } else {
+                        // This is a non-STRM file within a STRM directory path (e.g., subtitle.srt)
+                        // Return the regular file resource so it appears in the STRM folder
+                        return toFileResource(originalEntity)
                     }
-                    // Not a directory, return null
-                    return null
                 }
             }
             

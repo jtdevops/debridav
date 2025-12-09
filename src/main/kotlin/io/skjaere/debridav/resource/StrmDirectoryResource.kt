@@ -109,6 +109,7 @@ class StrmDirectoryResource(
                 // For files, check if they should be converted to STRM
                 val fileName = entity.name ?: return null
                 if (debridavConfigurationProperties.shouldCreateStrmFile(fileName)) {
+                    // Convert media files to STRM files
                     val originalPath = originalDirectory.fileSystemPath() ?: return null
                     val fullOriginalPath = "$originalPath/$fileName"
                     StrmFileResource(
@@ -118,8 +119,9 @@ class StrmDirectoryResource(
                         debridavConfigurationProperties
                     )
                 } else {
-                    // File doesn't match filter criteria, skip it
-                    null
+                    // Non-media files (like .srt subtitles) should appear as regular files
+                    // without the .strm extension
+                    resourceFactory.toFileResource(entity)
                 }
             }
         }
