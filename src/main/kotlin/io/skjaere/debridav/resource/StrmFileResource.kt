@@ -162,13 +162,11 @@ class StrmFileResource(
         // Get base URL from config or construct from detected hostname
         val baseUrl = debridavConfigurationProperties.strmProxyBaseUrl
             ?: run {
-                // Try to get hostname from detection service (network detection at startup)
+                // Get hostname from detection service (checks HOSTNAME env var first, then network detection)
                 val hostname = hostnameDetectionService?.getHostname()
-                    // Fall back to HOSTNAME environment variable if detection failed
-                    ?: environment?.getProperty("HOSTNAME")
                     ?: throw IllegalStateException(
                         "STRM proxy requires either DEBRIDAV_STRM_PROXY_BASE_URL to be set or hostname detection to succeed. " +
-                        "Hostname detection failed and HOSTNAME environment variable is not available."
+                        "Hostname detection failed (checked HOSTNAME environment variable and network detection)."
                     )
                 // Default port is 8080 (the server port)
                 "http://$hostname:8080"

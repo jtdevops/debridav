@@ -49,6 +49,9 @@ class StrmRedirectProxyController(
         @PathVariable filename: String,
         request: HttpServletRequest
     ): ResponseEntity<Void> {
+        val proxyUrl = "${request.scheme}://${request.serverName}:${request.serverPort}${request.requestURI}"
+        logger.debug("STRM proxy: Received request for proxy URL: $proxyUrl (fileId: $fileId, filename: $filename)")
+        
         return try {
             // Load the file entity by ID
             val dbEntity = debridFileRepository.findById(fileId).orElse(null)
@@ -92,7 +95,7 @@ class StrmRedirectProxyController(
                 return ResponseEntity.status(HttpStatus.NOT_FOUND).build()
             }
 
-            logger.debug("STRM proxy: Redirecting file ID: $fileId to external URL (provider: $provider)")
+            logger.debug("STRM proxy: Final URL returned: $externalUrl (fileId: $fileId, provider: $provider, file: ${reloadedFile.name})")
             
             // Redirect to the external URL
             ResponseEntity.status(HttpStatus.TEMPORARY_REDIRECT)
@@ -127,9 +130,12 @@ class StrmRedirectProxyController(
         provider: DebridProvider
     ): String? = runBlocking {
         val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
-        if (cachedFile?.link == null) {
+        val originalUrl = cachedFile?.link
+        if (originalUrl == null) {
             return@runBlocking null
         }
+
+        logger.debug("STRM proxy: Initial URL from database: $originalUrl (fileId: ${file.id}, provider: $provider)")
 
         try {
             // Check if link is alive using the cache
@@ -137,26 +143,33 @@ class StrmRedirectProxyController(
                 provider.toString(),
                 cachedFile
             )
+            logger.debug("STRM proxy: Verifying URL is active: $originalUrl")
             val isAlive = debridLinkService.isLinkAliveCache.get(cacheKey)
             
-            if (!isAlive) {
+            val finalUrl = if (!isAlive) {
                 logger.info("STRM proxy: External URL expired for ${file.name} from $provider, refreshing...")
                 // Refresh the link
                 val refreshedLink = debridLinkService.refreshLinkOnError(file, cachedFile)
                 if (refreshedLink != null) {
                     logger.info("STRM proxy: Successfully refreshed external URL for ${file.name} from $provider")
+                    logger.debug("STRM proxy: Refreshed URL returned: ${refreshedLink.link}")
                     refreshedLink.link
                 } else {
                     logger.warn("STRM proxy: Failed to refresh external URL for ${file.name} from $provider, using original URL")
-                    cachedFile.link
+                    logger.debug("STRM proxy: Using original URL (refresh failed): $originalUrl")
+                    originalUrl
                 }
             } else {
                 // URL is still alive, use it
-                cachedFile.link
+                logger.debug("STRM proxy: URL verified active, using original URL: $originalUrl")
+                originalUrl
             }
+            
+            return@runBlocking finalUrl
         } catch (e: Exception) {
             logger.warn("STRM proxy: Error checking/refreshing external URL for ${file.name} from $provider: ${e.message}, using original URL", e)
-            cachedFile.link
+            logger.debug("STRM proxy: Using original URL (error occurred): $originalUrl")
+            originalUrl
         }
     }
 

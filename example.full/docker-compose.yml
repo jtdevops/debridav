@@ -44,6 +44,7 @@ services:
     #   context: ..
     image: ghcr.io/jtdevops/debridav:latest
     container_name: debridav
+    hostname: debridav
     restart: unless-stopped
     environment:
       - PUID=${PUID}
@@ -195,6 +196,19 @@ services:
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
       # Optional: Use external URLs only for specific providers (e.g., IPTV)
       # - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV
+      # Optional: Use proxy URLs for external URLs (for providers with expiring URLs like PREMIUMIZE)
+      # Proxy URLs ensure expired URLs are automatically refreshed when accessed
+      # Takes priority over DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS
+      # Examples:
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE,REAL_DEBRID
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=ALL
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=*,!IPTV
+      # - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=
+      # Optional: Base URL for STRM redirect proxy (defaults to detected hostname:8080)
+      # Format: http://hostname:port or https://hostname:port
+      # Example: - DEBRIDAV_STRM_PROXY_BASE_URL=http://debridav:8080
+      # - DEBRIDAV_STRM_PROXY_BASE_URL=
 
     ports:
       - ${DEBRIDAV_PORT}:8080

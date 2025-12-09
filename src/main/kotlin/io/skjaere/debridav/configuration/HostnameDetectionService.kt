@@ -2,24 +2,37 @@ package io.skjaere.debridav.configuration
 
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
+import org.springframework.core.env.Environment
 import org.springframework.stereotype.Service
 import java.net.InetAddress
 
 /**
- * Service that detects the container/host hostname at startup using network detection.
- * This is more reliable than relying on environment variables.
+ * Service that detects the container/host hostname at startup.
+ * First checks the HOSTNAME environment variable, then falls back to network detection.
  */
 @Service
-class HostnameDetectionService {
+class HostnameDetectionService(
+    private val environment: Environment
+) {
     private val logger = LoggerFactory.getLogger(HostnameDetectionService::class.java)
     
     private var detectedHostname: String? = null
     
     /**
-     * Detects the hostname at startup using network detection.
+     * Detects the hostname at startup.
+     * Priority: 1) HOSTNAME environment variable, 2) Network detection
      */
     @PostConstruct
     fun detectHostname() {
+        // First, check HOSTNAME environment variable
+        val envHostname = environment.getProperty("HOSTNAME")
+        if (!envHostname.isNullOrBlank()) {
+            detectedHostname = envHostname
+            logger.info("Using hostname from HOSTNAME environment variable: $envHostname")
+            return
+        }
+        
+        // Fall back to network detection
         try {
             val localHost = InetAddress.getLocalHost()
             // Try canonical hostname first (usually the FQDN)
@@ -33,9 +46,9 @@ class HostnameDetectionService {
             }
             
             detectedHostname = finalHostname
-            logger.info("Detected container hostname: $finalHostname (from ${localHost.hostAddress})")
+            logger.info("Detected container hostname via network detection: $finalHostname (from ${localHost.hostAddress})")
         } catch (e: Exception) {
-            logger.warn("Failed to detect hostname using network detection: ${e.message}. Will fall back to environment variable or require explicit configuration.", e)
+            logger.warn("Failed to detect hostname using network detection: ${e.message}. Hostname detection failed and HOSTNAME environment variable is not available.", e)
             detectedHostname = null
         }
     }
