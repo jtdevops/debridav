@@ -26,15 +26,16 @@ class StrmFileResource(
     private val debridavConfigurationProperties: DebridavConfigurationProperties
 ) : AbstractResource(fileService, originalFile), GetableResource {
 
-    private val strmContent: String = getStrmContent()
-    private val strmContentBytes: ByteArray = strmContent.toByteArray(Charsets.UTF_8)
+    // Lazy initialization to avoid Hibernate LazyInitializationException during directory listing
+    private val strmContent: String by lazy { computeStrmContent() }
+    private val strmContentBytes: ByteArray by lazy { strmContent.toByteArray(Charsets.UTF_8) }
 
     /**
-     * Gets the content to write in the STRM file.
+     * Computes the content to write in the STRM file.
      * If external URL mode is enabled and available, returns the external URL.
      * Otherwise, returns the VFS path (with optional prefix).
      */
-    private fun getStrmContent(): String {
+    private fun computeStrmContent(): String {
         // Check if we should use external URL
         if (debridavConfigurationProperties.shouldUseExternalUrlForStrm() && originalFile is RemotelyCachedEntity) {
             val externalUrl = getExternalUrl(originalFile)
@@ -52,7 +53,9 @@ class StrmFileResource(
      * @return The external URL, or null if not available
      */
     private fun getExternalUrl(file: RemotelyCachedEntity): String? {
-        val contents = file.contents ?: return null
+        // Reload the entity within a transaction to ensure contents and debridLinks are loaded
+        val reloadedFile = fileService.reloadRemotelyCachedEntity(file) ?: return null
+        val contents = reloadedFile.contents ?: return null
         
         // Try to get a CachedFile link first (for debrid providers)
         val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
@@ -67,11 +70,18 @@ class StrmFileResource(
             if (tokenizedUrl != null) {
                 // Resolve IPTV template URL if needed
                 return if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
-                    val template = contents.iptvUrlTemplate
-                    if (template != null) {
-                        tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
-                    } else {
-                        // Template missing, return null to fall back to VFS path
+                    try {
+                        val template = contents.iptvUrlTemplate
+                        if (template != null) {
+                            // Access baseUrl - may throw LazyInitializationException if outside session
+                            tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
+                        } else {
+                            // Template missing, return null to fall back to VFS path
+                            null
+                        }
+                    } catch (e: org.hibernate.LazyInitializationException) {
+                        // Template is lazy-loaded and we're outside a Hibernate session
+                        // Fall back to VFS path
                         null
                     }
                 } else {

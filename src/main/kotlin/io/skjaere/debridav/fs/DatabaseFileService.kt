@@ -18,7 +18,9 @@ import org.apache.commons.lang.StringUtils
 import org.hibernate.engine.jdbc.BlobProxy
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionTemplate
 import java.io.InputStream
 import java.time.Instant
 
@@ -33,9 +35,11 @@ class DatabaseFileService(
     private val usenetRepository: UsenetRepository,
     private val fileChunkCachingService: FileChunkCachingService,
     private val entityManager: EntityManager,
+    private val transactionManager: PlatformTransactionManager,
 ) {
     private val logger = LoggerFactory.getLogger(DatabaseFileService::class.java)
     private val lock = Mutex()
+    private val transactionTemplate = TransactionTemplate(transactionManager)
     private val defaultDirectories = listOf("/", "/downloads", "/tv", "/movies")
 
     init {
@@ -334,5 +338,25 @@ class DatabaseFileService(
 
     private fun directoriesHaveSameParent(first: String, second: String): Boolean {
         return first.getDirectoryFromPath() == second
+    }
+
+    /**
+     * Reloads a RemotelyCachedEntity with its contents and debridLinks within a transaction.
+     * This is useful when accessing lazy-loaded properties outside of a Hibernate session.
+     * @param entity The entity to reload
+     * @return The reloaded entity with contents loaded, or null if the entity doesn't exist
+     */
+    fun reloadRemotelyCachedEntity(entity: RemotelyCachedEntity): RemotelyCachedEntity? {
+        return transactionTemplate.execute<RemotelyCachedEntity?> {
+            val mergedEntity = entityManager.merge(entity) as? RemotelyCachedEntity
+            // Force initialization of contents and debridLinks by accessing them
+            val contents = mergedEntity?.contents
+            contents?.debridLinks?.size
+            // Also initialize iptvUrlTemplate if this is IPTV content
+            if (contents is io.skjaere.debridav.fs.DebridIptvContent) {
+                contents.iptvUrlTemplate?.baseUrl
+            }
+            mergedEntity
+        }
     }
 }
