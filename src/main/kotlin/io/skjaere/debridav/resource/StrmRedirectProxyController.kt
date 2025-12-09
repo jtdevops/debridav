@@ -50,7 +50,9 @@ class StrmRedirectProxyController(
         request: HttpServletRequest
     ): ResponseEntity<Void> {
         val proxyUrl = "${request.scheme}://${request.serverName}:${request.serverPort}${request.requestURI}"
-        logger.info("STRM proxy: Received request for proxy URL: $proxyUrl (fileId: $fileId, filename: $filename)")
+        val requestMethod = request.method
+        val rangeHeader = request.getHeader("Range")
+        logger.info("STRM proxy: Received request - Method: $requestMethod, Range: ${rangeHeader ?: "none"}, fileId: $fileId, filename: $filename")
         
         return try {
             // Load the file entity by ID
@@ -143,8 +145,16 @@ class StrmRedirectProxyController(
                 provider.toString(),
                 cachedFile
             )
-            logger.info("STRM proxy: Verifying URL is active: $originalUrl")
-            val isAlive = debridLinkService.isLinkAliveCache.get(cacheKey)
+            
+            // Check if value is already cached (without triggering a load)
+            val cachedValue = debridLinkService.isLinkAliveCache.getIfPresent(cacheKey)
+            val isAlive = if (cachedValue != null) {
+                logger.info("STRM proxy: URL status from cache (cached): $originalUrl")
+                cachedValue
+            } else {
+                logger.info("STRM proxy: Verifying URL is active (cache miss): $originalUrl")
+                debridLinkService.isLinkAliveCache.get(cacheKey)
+            }
             
             val finalUrl = if (!isAlive) {
                 logger.info("STRM proxy: External URL expired for ${file.name} from $provider, refreshing...")
