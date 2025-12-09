@@ -177,7 +177,16 @@ class StrmRedirectProxyController(
             
             when (result) {
                 StreamResult.OK -> {
-                    response.flushBuffer()
+                    try {
+                        response.flushBuffer()
+                    } catch (e: Exception) {
+                        // Handle expected exceptions when response is already committed/closed
+                        if (isExpectedResponseException(e)) {
+                            logger.debug("STRM proxy: Response already committed/closed (expected): fileId=${file.id}, exceptionClass=${e::class.simpleName}")
+                        } else {
+                            throw e
+                        }
+                    }
                 }
                 StreamResult.PROVIDER_ERROR -> {
                     if (!response.isCommitted) {
@@ -201,12 +210,17 @@ class StrmRedirectProxyController(
                 }
             }
         } catch (e: Exception) {
-            logger.error("STRM proxy: Error streaming content for file ID: ${file.id}", e)
-            if (!response.isCommitted) {
-                try {
-                    response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
-                } catch (_: Exception) {
-                    // Response may already be committed
+            // Check if this is an expected exception (client disconnect, response already committed, etc.)
+            if (isExpectedResponseException(e)) {
+                logger.debug("STRM proxy: Expected exception during streaming (client disconnect/response committed): fileId=${file.id}, exceptionClass=${e::class.simpleName}")
+            } else {
+                logger.error("STRM proxy: Error streaming content for file ID: ${file.id}", e)
+                if (!response.isCommitted) {
+                    try {
+                        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
+                    } catch (_: Exception) {
+                        // Response may already be committed
+                    }
                 }
             }
         }
@@ -390,6 +404,44 @@ class StrmRedirectProxyController(
         }
         
         return null
+    }
+    
+    /**
+     * Checks if an exception is an expected response exception (client disconnect, response already committed, etc.).
+     * These exceptions should be logged at DEBUG level without stacktraces.
+     */
+    private fun isExpectedResponseException(e: Exception): Boolean {
+        // Check for AsyncRequestNotUsableException (Spring wrapper for client disconnects and response errors)
+        if (e.javaClass.simpleName == "AsyncRequestNotUsableException") {
+            return true
+        }
+        // Check for messages indicating response is already committed/closed
+        if (e.message?.contains("Response not usable") == true ||
+            e.message?.contains("Response already committed") == true ||
+            e.message?.contains("Response has been closed") == true) {
+            return true
+        }
+        // Check for connection reset messages
+        if (e.message?.contains("Connection reset") == true ||
+            e.message?.contains("Connection reset by peer") == true ||
+            e.message?.contains("Broken pipe") == true) {
+            return true
+        }
+        // Check cause chain
+        var cause: Throwable? = e.cause
+        while (cause != null) {
+            if (cause.javaClass.simpleName == "AsyncRequestNotUsableException" ||
+                cause.message?.contains("Response not usable") == true ||
+                cause.message?.contains("Response already committed") == true ||
+                cause.message?.contains("Response has been closed") == true ||
+                cause.message?.contains("Connection reset") == true ||
+                cause.message?.contains("Connection reset by peer") == true ||
+                cause.message?.contains("Broken pipe") == true) {
+                return true
+            }
+            cause = cause.cause
+        }
+        return false
     }
 }
 

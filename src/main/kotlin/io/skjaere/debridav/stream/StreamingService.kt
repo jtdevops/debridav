@@ -1161,6 +1161,7 @@ class StreamingService(
             return true
         }
         // Check for AsyncRequestNotUsableException (Spring wrapper for client disconnects)
+        // This includes both "Connection reset" and "Response not usable after response errors" cases
         if (e.javaClass.simpleName == "AsyncRequestNotUsableException") {
             return true
         }
