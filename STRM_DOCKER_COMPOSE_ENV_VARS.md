@@ -12,6 +12,7 @@ The following environment variables can be used in Docker Compose to configure t
 | `DEBRIDAV_STRM_FILE_EXTENSION_MODE` | How to handle file extensions: `REPLACE` (episode.mkv -> episode.strm) or `APPEND` (episode.mkv -> episode.mkv.strm) | `REPLACE` | `REPLACE` or `APPEND` |
 | `DEBRIDAV_STRM_FILE_FILTER_MODE` | Which files to convert: `ALL` (all files), `MEDIA_ONLY` (only media extensions), `NON_STRM` (all except .strm) | `MEDIA_ONLY` | `ALL`, `MEDIA_ONLY`, or `NON_STRM` |
 | `DEBRIDAV_STRM_MEDIA_EXTENSIONS` | Comma-separated list of media file extensions when filter mode is `MEDIA_ONLY` | `mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts` | `mkv,mp4,avi,mov` |
+| `DEBRIDAV_STRM_USE_EXTERNAL_URL` | If `true`, use external URL from VFS/debrid provider instead of VFS path in STRM files | `false` | `true` or `false` |
 
 ## Docker Compose Example
 
@@ -33,6 +34,7 @@ services:
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
       - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+      - DEBRIDAV_STRM_USE_EXTERNAL_URL=false
 ```
 
 ## .env File Example
@@ -47,6 +49,7 @@ DEBRIDAV_STRM_ROOT_PATH_PREFIX=/media
 DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
 DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
 DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+DEBRIDAV_STRM_USE_EXTERNAL_URL=false
 ```
 
 Then reference them in docker-compose.yml:
@@ -61,6 +64,7 @@ services:
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=${DEBRIDAV_STRM_FILE_EXTENSION_MODE:-REPLACE}
       - DEBRIDAV_STRM_FILE_FILTER_MODE=${DEBRIDAV_STRM_FILE_FILTER_MODE:-MEDIA_ONLY}
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=${DEBRIDAV_STRM_MEDIA_EXTENSIONS:-mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts}
+      - DEBRIDAV_STRM_USE_EXTERNAL_URL=${DEBRIDAV_STRM_USE_EXTERNAL_URL:-false}
 ```
 
 ## Notes
@@ -76,4 +80,9 @@ services:
   - `MEDIA_ONLY`: Only convert files with extensions listed in `DEBRIDAV_STRM_MEDIA_EXTENSIONS`
   - `NON_STRM`: Convert all files except `.strm` files
 - **DEBRIDAV_STRM_MEDIA_EXTENSIONS**: Comma-separated list of file extensions (without dots). Only used when `DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY`.
+- **DEBRIDAV_STRM_USE_EXTERNAL_URL**: 
+  - When `false` (default): STRM files contain the VFS path (with optional prefix), e.g., `/media/tv/show/episode.mkv`
+  - When `true`: STRM files contain the external URL from the debrid provider or IPTV service, e.g., `https://real-debrid.com/dl/...` or `https://iptv-provider.com/stream/...`
+  - If external URL is not available, falls back to VFS path
+  - Useful for remote access scenarios where you want STRM files to point directly to the debrid provider URLs
 

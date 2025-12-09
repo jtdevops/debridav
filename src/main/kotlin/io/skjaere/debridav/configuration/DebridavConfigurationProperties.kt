@@ -69,7 +69,8 @@ data class DebridavConfigurationProperties(
     val strmRootPathPrefix: String? = null, // Optional prefix for paths written in STRM files (e.g., /media)
     val strmFileExtensionMode: String = "REPLACE", // How to handle file extensions: REPLACE (episode.mkv -> episode.strm) or APPEND (episode.mkv -> episode.mkv.strm)
     val strmFileFilterMode: String = "MEDIA_ONLY", // Which files to convert: ALL (all files), MEDIA_ONLY (only media extensions), NON_STRM (all except .strm)
-    val strmMediaExtensions: List<String> = listOf("mkv", "mp4", "avi", "mov", "m4v", "mpg", "mpeg", "wmv", "flv", "webm", "ts", "m2ts") // List of media file extensions when filter mode is MEDIA_ONLY
+    val strmMediaExtensions: List<String> = listOf("mkv", "mp4", "avi", "mov", "m4v", "mpg", "mpeg", "wmv", "flv", "webm", "ts", "m2ts"), // List of media file extensions when filter mode is MEDIA_ONLY
+    val strmUseExternalUrl: Boolean = false // If true, use external URL from VFS/debrid provider instead of VFS path in STRM files
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -455,5 +456,13 @@ data class DebridavConfigurationProperties(
             val normalizedPath = originalPath.removePrefix("/")
             "$normalizedPrefix/$normalizedPath"
         }
+    }
+
+    /**
+     * Checks if STRM files should use external URLs instead of VFS paths.
+     * @return true if external URLs should be used, false otherwise
+     */
+    fun shouldUseExternalUrlForStrm(): Boolean {
+        return strmUseExternalUrl
     }
 }
