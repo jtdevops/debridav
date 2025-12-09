@@ -335,10 +335,25 @@ class StreamingService(
             val isConnectTimeout = e.javaClass.simpleName == "ConnectTimeoutException" || 
                                    e.message?.contains("Connect timeout") == true
             
+            // Check if this is a client abort exception (expected when client disconnects)
+            val isClientAbort = isClientAbortException(e) ||
+                               e.message?.contains("Connection reset") == true ||
+                               e.message?.contains("Connection reset by peer") == true ||
+                               e.message?.contains("Broken pipe") == true ||
+                               e.cause?.message?.contains("Connection reset") == true ||
+                               e.cause?.message?.contains("Connection reset by peer") == true ||
+                               e.cause?.message?.contains("Broken pipe") == true
+            
             if (isConnectTimeout) {
                 // Reduced logging for handled ConnectTimeoutException - fallback will handle it
                 logger.debug("STREAMING_IO_EXCEPTION: Connect timeout during streaming: path={}, link={}, provider={}, exceptionClass={}", 
                     debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName)
+                result = StreamResult.IO_ERROR
+            } else if (isClientAbort) {
+                // Client disconnect is expected behavior, log at DEBUG level
+                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}", 
+                    debridLink.path, e::class.simpleName)
+                result = StreamResult.OK
             } else {
                 // TRACE level logging for other streaming IO exceptions with full stack trace
                 logger.trace("STREAMING_IO_EXCEPTION: IOException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
@@ -346,18 +361,32 @@ class StreamingService(
                 // Explicitly log stack trace to ensure it appears
                 logger.trace("STREAMING_IO_EXCEPTION_STACK_TRACE", e)
                 logger.error("IOError occurred during streaming", e)
+                result = StreamResult.IO_ERROR
             }
-            result = StreamResult.IO_ERROR
         } catch (e: CancellationException) {
             throw e
         } catch (e: RuntimeException) {
-            // TRACE level logging for streaming runtime exceptions with full stack trace
-            logger.trace("STREAMING_RUNTIME_EXCEPTION: RuntimeException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
-                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
-            // Explicitly log stack trace to ensure it appears
-            logger.trace("STREAMING_RUNTIME_EXCEPTION_STACK_TRACE", e)
-            logger.error("An error occurred during streaming ${debridLink.path}", e)
-            result = StreamResult.UNKNOWN_ERROR
+            // Check if this is a client abort exception (expected when client disconnects)
+            if (isClientAbortException(e) || 
+                e.javaClass.simpleName == "AsyncRequestNotUsableException" ||
+                e.message?.contains("Connection reset") == true ||
+                e.message?.contains("Connection reset by peer") == true ||
+                e.message?.contains("Broken pipe") == true ||
+                e.cause?.message?.contains("Connection reset") == true ||
+                e.cause?.message?.contains("Connection reset by peer") == true ||
+                e.cause?.message?.contains("Broken pipe") == true) {
+                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}", 
+                    debridLink.path, e::class.simpleName)
+                result = StreamResult.OK
+            } else {
+                // TRACE level logging for streaming runtime exceptions with full stack trace
+                logger.trace("STREAMING_RUNTIME_EXCEPTION: RuntimeException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
+                    debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+                // Explicitly log stack trace to ensure it appears
+                logger.trace("STREAMING_RUNTIME_EXCEPTION_STACK_TRACE", e)
+                logger.error("An error occurred during streaming ${debridLink.path}", e)
+                result = StreamResult.UNKNOWN_ERROR
+            }
         }
         
         // Fallback to local video files if IPTV provider streaming failed and bypass was configured
@@ -968,8 +997,20 @@ class StreamingService(
         } catch (_: ClientAbortException) {
             cancel()
         } catch (e: Exception) {
-            logger.error("An error occurred during streaming", e)
-            throw StreamToClientException("An error occurred during streaming", e)
+            // Check if this is a client abort exception (expected when client disconnects)
+            if (isClientAbortException(e) || 
+                e.javaClass.simpleName == "AsyncRequestNotUsableException" ||
+                e.cause?.message?.contains("Connection reset") == true ||
+                e.cause?.message?.contains("Connection reset by peer") == true ||
+                e.message?.contains("Connection reset") == true ||
+                e.message?.contains("Connection reset by peer") == true) {
+                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}", 
+                    remotelyCachedEntity.name, e::class.simpleName)
+                cancel()
+            } else {
+                logger.error("An error occurred during streaming", e)
+                throw StreamToClientException("An error occurred during streaming", e)
+            }
         } finally {
             gaugeContext.outputStream.close()
             activeOutputStream.removeStream(gaugeContext)
@@ -1119,20 +1160,38 @@ class StreamingService(
         if (e is ClientAbortException) {
             return true
         }
+        // Check for AsyncRequestNotUsableException (Spring wrapper for client disconnects)
+        if (e.javaClass.simpleName == "AsyncRequestNotUsableException") {
+            return true
+        }
+        // Check for connection reset messages in exception message
+        if (e.message?.contains("Connection reset") == true || 
+            e.message?.contains("Connection reset by peer") == true ||
+            e.message?.contains("Broken pipe") == true) {
+            return true
+        }
         // Check if CancellationException is caused by ClientAbortException
         if (e is CancellationException) {
             var cause: Throwable? = e.cause
             while (cause != null) {
-                if (cause is ClientAbortException) {
+                if (cause is ClientAbortException || 
+                    cause.javaClass.simpleName == "AsyncRequestNotUsableException" ||
+                    cause.message?.contains("Connection reset") == true ||
+                    cause.message?.contains("Connection reset by peer") == true ||
+                    cause.message?.contains("Broken pipe") == true) {
                     return true
                 }
                 cause = cause.cause
             }
         }
-        // Check if any exception in the chain is ClientAbortException
+        // Check if any exception in the chain is ClientAbortException or has connection reset message
         var cause: Throwable? = e.cause
         while (cause != null) {
-            if (cause is ClientAbortException) {
+            if (cause is ClientAbortException || 
+                cause.javaClass.simpleName == "AsyncRequestNotUsableException" ||
+                cause.message?.contains("Connection reset") == true ||
+                cause.message?.contains("Connection reset by peer") == true ||
+                cause.message?.contains("Broken pipe") == true) {
                 return true
             }
             cause = cause.cause
