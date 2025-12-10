@@ -238,12 +238,18 @@ class TorBoxClient(
 
     @RateLimiter(name = "TORBOX")
     override suspend fun isLinkAlive(debridLink: CachedFile): Boolean {
-        return httpClient.head(debridLink.link!!) {
+        // Use GET with Range header (bytes=0-0) instead of HEAD
+        // HEAD requests are not supported by all servers, but byte range requests are more universally supported
+        return httpClient.get(debridLink.link!!) {
             headers {
                 userAgent(USER_AGENT)
                 bearerAuth(torBoxConfiguration.apiKey)
+                append(io.ktor.http.HttpHeaders.Range, "bytes=0-0")
+            }
+            timeout {
+                requestTimeoutMillis = 5000 // 5 second timeout - fail fast
+                connectTimeoutMillis = 2000 // 2 second connect timeout
             }
         }.status.isSuccess()
-
     }
 }

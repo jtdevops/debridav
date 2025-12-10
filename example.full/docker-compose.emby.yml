@@ -1,29 +1,25 @@
 ---
 services:
-  jellyfin:
-    image: jellyfin/jellyfin:latest
-    container_name: jellyfin-debridav
+  emby:
+    image: ghcr.io/linuxserver/emby
+    container_name: emby
     restart: unless-stopped
     environment:
       - TZ=${TZ}
       - PUID=${PUID}
       - PGID=${PGID}
-      - JELLYFIN_FFmpeg__probesize=30M
-      - JELLYFIN_FFmpeg__analyzeduration=10M
-      # - JELLYFIN_PublishedServerUrl=${JELLYFIN_PUBLISHED_SERVER_URL} #optional
       # Uncomment the lines below to use Nvidia GPUs for Hardware Transcoding
       # - NVIDIA_VISIBLE_DEVICES=all
       # - NVIDIA_DRIVER_CAPABILITIES=all
     depends_on:
       - rclone
-    ports:
-      - "8096:8096"
-      - "8920:8920" #optional
-      - "7359:7359/udp" #optional
-      #- 1900:1900/udp #optional
     volumes:
-      - ./jellyfin-config:/config
+      - ./emby-config:/config
       - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+#      - /opt/vc/lib:/opt/vc/lib #optional
+    ports:
+      - 8096:8096
+#      - 8920:8920 #optional
     # devices:
     #   - /dev/dvb:/dev/dvb # Uncomment this device for typical USB TV Tuner cards
     #   - /dev/dri:/dev/dri # Uncomment this to use intel GPUs for Hardware Transcoding

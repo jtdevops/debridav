@@ -22,7 +22,7 @@ import java.util.*
 class DirectoryResource(
     val directory: DbDirectory,
     //private val directoryChildren: List<Resource>,
-    private val resourceFactory: StreamableResourceFactory,
+    val resourceFactory: StreamableResourceFactory,
     private val localContentsService: LocalContentsService,
     fileService: DatabaseFileService
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
@@ -79,7 +79,35 @@ class DirectoryResource(
     }
 
     override fun getChildren(): List<Resource> {
-        return directoryChildren ?: getChildren(directory).toMutableList()
+        val children = directoryChildren ?: getChildren(directory).toMutableList()
+        
+        // If this is the root directory and STRM is enabled, add STRM folders
+        val directoryPath = directory.fileSystemPath()
+        if (directoryPath == "/" && resourceFactory.debridavConfigurationProperties.isStrmEnabled()) {
+            val strmMappings = resourceFactory.debridavConfigurationProperties.parseStrmFolderMappings()
+            
+            strmMappings.forEach { (originalFolder, strmFolder) ->
+                // Check if the original folder exists
+                val originalPath = "/$originalFolder"
+                val originalDir = fileService.getFileAtPath(originalPath)
+                
+                if (originalDir is DbDirectory) {
+                    // Create a STRM directory resource for this folder
+                    val strmPath = "/$strmFolder"
+                    val strmDirResource = StrmDirectoryResource(
+                        originalDir,
+                        strmPath,
+                        resourceFactory,
+                        localContentsService,
+                        fileService,
+                        resourceFactory.debridavConfigurationProperties
+                    )
+                    children.add(strmDirResource)
+                }
+            }
+        }
+        
+        return children
     }
 
     override fun createNew(newName: String, inputStream: InputStream, length: Long?, contentType: String?): Resource {
