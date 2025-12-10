@@ -4,6 +4,7 @@ import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Service
@@ -20,6 +21,7 @@ class IptvImdbMetadataPurgeService(
     @Scheduled(
         fixedDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('iptv.imdb-metadata-purge-interval', 'PT24H')).toMillis()}"
     )
+    @Transactional
     fun purgeExpiredMetadata() {
         if (!iptvConfigurationProperties.enabled) {
             return

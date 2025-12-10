@@ -44,6 +44,7 @@ services:
     #   context: ..
     image: ghcr.io/jtdevops/debridav:latest
     container_name: debridav
+    hostname: debridav
     restart: unless-stopped
     environment:
       - PUID=${PUID}
@@ -121,6 +122,8 @@ services:
 
 #      - LOGGING_LEVEL_WEB=debug
 #      - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV=DEBUG
+      # STRM Proxy Logging (set to DEBUG to see proxy URL processing steps)
+      # - LOGGING_LEVEL_IO_SKJAERE_DEBRIDAV_RESOURCE_STRMREDIRECTPROXYCONTROLLER=DEBUG
 
       # IPTV Logging (set to DEBUG for detailed IPTV logs, INFO for normal operation)
       # Uncomment the lines below to enable IPTV-specific logging
@@ -185,6 +188,36 @@ services:
 
       # Query the IPTV Provider directly for media details
       - DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_IPTV_BYPASS_PROVIDERS=*
+
+      # STRM Configuration
+      - DEBRIDAV_STRM_ENABLED=false
+      - DEBRIDAV_STRM_FOLDER_MAPPINGS=tv=tv_strm,movies=movies_strm
+      - DEBRIDAV_STRM_ROOT_PATH_PREFIX=/data
+      - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
+      - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
+      - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+      # Optional: Use external URLs only for specific providers (e.g., IPTV)
+      # - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV
+      # Optional: Use proxy URLs for external URLs (for providers with expiring URLs like PREMIUMIZE)
+      # Proxy URLs ensure expired URLs are automatically refreshed when accessed
+      # Takes priority over DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS
+      # Examples:
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE,REAL_DEBRID
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=ALL
+      #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=*,!IPTV
+      # - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=
+      # Optional: Base URL for STRM redirect proxy (defaults to detected hostname:8080)
+      # Format: http://hostname:port or https://hostname:port
+      # Example: - DEBRIDAV_STRM_PROXY_BASE_URL=http://debridav:8080
+      # - DEBRIDAV_STRM_PROXY_BASE_URL=
+      # Optional: Enable streaming mode for STRM proxy (default: false)
+      # If true, content is streamed directly through the proxy instead of redirecting
+      # Provides more control over content delivery and better caching/monitoring
+      # When false, the proxy redirects to external URLs after verifying/refreshing them
+      # When true, the proxy streams content directly using the same logic as VFS files
+      # - DEBRIDAV_STRM_PROXY_STREAM_MODE=false
+
     ports:
       - ${DEBRIDAV_PORT}:8080
       - "8000:8000"
