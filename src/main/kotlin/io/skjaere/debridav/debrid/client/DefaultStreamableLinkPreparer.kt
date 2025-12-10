@@ -5,7 +5,7 @@ import io.github.resilience4j.kotlin.ratelimiter.executeSuspendFunction
 import io.github.resilience4j.ratelimiter.RateLimiter
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.timeout
-import io.ktor.client.request.head
+import io.ktor.client.request.get
 import io.ktor.client.request.headers
 import io.ktor.client.request.prepareGet
 import io.ktor.client.statement.HttpStatement
@@ -156,17 +156,27 @@ class DefaultStreamableLinkPreparer(
         val isIptv = isIptvUrl(debridLink.link ?: "")
         try {
             rateLimiter.executeSuspendFunction {
-                val result = httpClient.head(debridLink.link!!).status.isSuccess()
+                // Use GET with Range header (bytes=0-0) instead of HEAD
+                // HEAD requests are not supported by all servers, but byte range requests are more universally supported
+                val result = httpClient.get(debridLink.link!!) {
+                    headers {
+                        append(io.ktor.http.HttpHeaders.Range, "bytes=0-0")
+                    }
+                    timeout {
+                        requestTimeoutMillis = 5000 // 5 second timeout - fail fast
+                        connectTimeoutMillis = 2000 // 2 second connect timeout
+                    }
+                }.status.isSuccess()
                 logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
                     debridLink.path, debridLink.provider, result)
                 emit(result)
             }
         } catch (e: Exception) {
-            // TRACE level logging for HTTP HEAD request exceptions with full stack trace
-            logger.trace("HTTP_HEAD_EXCEPTION: Exception checking link alive: path={}, link={}, provider={}, exceptionClass={}", 
+            // TRACE level logging for HTTP request exceptions with full stack trace
+            logger.trace("HTTP_RANGE_REQUEST_EXCEPTION: Exception checking link alive: path={}, link={}, provider={}, exceptionClass={}", 
                 debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
             // Explicitly log stack trace to ensure it appears
-            logger.trace("HTTP_HEAD_EXCEPTION_STACK_TRACE", e)
+            logger.trace("HTTP_RANGE_REQUEST_EXCEPTION_STACK_TRACE", e)
             throw e
         }
     }.retry(RETRIES)

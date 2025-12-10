@@ -63,7 +63,7 @@ class DebridavConfiguration {
         registration.filter = SpringMiltonFilter()
         registration.setName("MiltonFilter")
         registration.addUrlPatterns("/*")
-        registration.addInitParameter("milton.exclude.paths", "/files,/api,/version,/sabnzbd,/actuator")
+        registration.addInitParameter("milton.exclude.paths", "/files,/api,/version,/sabnzbd,/actuator,/strm-proxy")
         registration.addInitParameter(
             "resource.factory.class", "io.skjaere.debrid.resource.StreamableResourceFactory"
         )

@@ -22,10 +22,10 @@ services:
       # Uncomment the lines below to use Nvidia GPUs for Hardware Transcoding
       # - NVIDIA_VISIBLE_DEVICES=all
       # - NVIDIA_DRIVER_CAPABILITIES=all
-    # depends_on:
-    #   - rclone
+    depends_on:
+      - rclone
     volumes:
-      - ./config:/config
+      - ./plex-config:/config
       - /etc/localtime:/etc/localtime:ro # Sync the container's time to the host's time
       - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
     # devices:
