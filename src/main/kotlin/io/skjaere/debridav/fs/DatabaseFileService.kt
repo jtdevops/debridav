@@ -128,8 +128,17 @@ class DatabaseFileService(
                         "${debridavConfigurationProperties.localEntityMaxSizeMb}"
             )
         }
-        dbItem.blob!!.localContents = BlobProxy.generateProxy(contents, size)
-        debridFileRepository.save(dbItem)
+        // Merge the entity to attach it to the current session and initialize lazy properties
+        val mergedEntity = entityManager.merge(dbItem) as LocalEntity
+        // Ensure blob is initialized by accessing it
+        val blob = mergedEntity.blob
+        if (blob == null) {
+            // Create a new blob if it doesn't exist
+            mergedEntity.blob = Blob(BlobProxy.generateProxy(contents, size), size)
+        } else {
+            blob.localContents = BlobProxy.generateProxy(contents, size)
+        }
+        debridFileRepository.save(mergedEntity)
     }
 
     @Transactional
