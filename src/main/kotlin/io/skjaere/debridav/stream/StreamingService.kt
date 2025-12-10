@@ -449,6 +449,13 @@ class StreamingService(
             // Cleanup
         } finally {
             this.coroutineContext.cancelChildren()
+            
+            // Get bytes downloaded before completing tracking (which removes the context)
+            val actualBytesDownloaded = trackingId?.let { id -> 
+                activeDownloads[id]?.bytesDownloaded?.get() ?: 0L
+            } ?: 0L
+            val actualBytesDownloadedMB = String.format("%.2f", actualBytesDownloaded / 1_000_000.0)
+            
             trackingId?.let { id -> completeDownloadTracking(id, result) }
             
             // Log video download completion at INFO level (only for external requests, not internal operations)
@@ -465,11 +472,11 @@ class StreamingService(
             val shouldLog = !httpRequestInfo.isInternal && !isSmallRange
             
             if (shouldLog) {
-                logger.info("Video download stopped [id={}]: file={}, size={} bytes ({} MB), status={}", 
-                    logId, fileNameForCompletion, requestedSize, requestedSizeMB, status)
+                logger.info("Video download stopped [id={}]: file={}, size={} bytes ({} MB), downloaded={} bytes ({} MB), status={}", 
+                    logId, fileNameForCompletion, requestedSize, requestedSizeMB, actualBytesDownloaded, actualBytesDownloadedMB, status)
             } else {
-                logger.debug("Video download stopped (internal/small) [id={}]: file={}, size={} bytes ({} MB), status={}, isInternal={}, isSmallRange={}", 
-                    logId, fileNameForCompletion, requestedSize, requestedSizeMB, status, httpRequestInfo.isInternal, isSmallRange)
+                logger.debug("Video download stopped (internal/small) [id={}]: file={}, size={} bytes ({} MB), downloaded={} bytes ({} MB), status={}, isInternal={}, isSmallRange={}", 
+                    logId, fileNameForCompletion, requestedSize, requestedSizeMB, actualBytesDownloaded, actualBytesDownloadedMB, status, httpRequestInfo.isInternal, isSmallRange)
             }
         }
         logger.debug("done streaming ${debridLink.path}: $result")
