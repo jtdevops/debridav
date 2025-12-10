@@ -11,4 +11,4 @@ services:
     ports:
       - 5055:5055
     volumes:
-      - ./config:/app/config
+      - ./jellyseerr-config:/app/config

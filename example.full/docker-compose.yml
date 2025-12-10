@@ -3,6 +3,7 @@
 #  - path:
     # - docker-compose.plex.yml
     # - docker-compose.jellyfin.yml
+    # - docker-compose.emby.yml
     # - docker-compose.jellyseerr.yml
 
 x-rclone-base: &rclone-base
