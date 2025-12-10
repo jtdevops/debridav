@@ -2,6 +2,7 @@ package io.skjaere.debridav.stream
 
 import com.fasterxml.jackson.annotation.JsonFormat
 import org.apache.commons.io.FileUtils
+import org.springframework.boot.actuate.endpoint.annotation.DeleteOperation
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
@@ -81,6 +82,11 @@ class StreamingDownloadTrackingActuatorEndpoint(
             metrics = metricsByFilePath,
             details = trackingInfoList
         )
+    }
+
+    @DeleteOperation
+    fun clearMetrics() {
+        streamingService.clearCompletedDownloads()
     }
 
     data class TrackingResponse(

@@ -1060,6 +1060,10 @@ class StreamingService(
         return completedDownloads.toList()
     }
 
+    fun clearCompletedDownloads() {
+        completedDownloads.clear()
+    }
+
     fun initializeDownloadTracking(debridLink: CachedFile, range: Range?, remotelyCachedEntity: RemotelyCachedEntity, httpRequestInfo: HttpRequestInfo): String? {
         if (!debridavConfigProperties.enableStreamingDownloadTracking) return null
         

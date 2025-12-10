@@ -128,6 +128,7 @@ class DebriDavApplication : SpringBootServletInitializer() {
             val enableTracking = environment.getProperty("debridav.enable-streaming-download-tracking", Boolean::class.java, false)
             if (enableTracking) {
                 logger.info("  GET     $baseUrl/actuator/streaming-download-tracking")
+                logger.info("  DELETE  $baseUrl/actuator/streaming-download-tracking")
             }
             
             logger.info("")
