@@ -327,6 +327,9 @@ class StrmRedirectProxyController(
             // Check if link is alive using the cache
             val cacheKey = io.skjaere.debridav.debrid.DebridLinkService.LinkLivenessCacheKey(
                 provider.toString(),
+                cachedFile.path,
+                cachedFile.size,
+                file.id, // Use RemotelyCachedEntity.id as entity identifier
                 cachedFile
             )
             

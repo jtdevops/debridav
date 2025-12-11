@@ -294,11 +294,22 @@ class QBittorrentEmulationController(
             logger.debug("Request parameter: {} = {}", key, values.joinToString(", "))
         }
         
-        hashes.forEach {
-            torrentService.deleteTorrentByHash(it)
+        val deletedHashes = mutableListOf<String>()
+        hashes.forEach { hash ->
+            try {
+                torrentService.deleteTorrentByHash(hash)
+                deletedHashes.add(hash)
+            } catch (e: Exception) {
+                logger.error("Failed to delete torrent with hash: $hash", e)
+            }
         }
 
-        logger.info("Deleted {} torrent(s): {}", hashes.size, hashes.joinToString(", "))
+        if (deletedHashes.isNotEmpty()) {
+            logger.info("Deleted {} torrent(s) via qBittorrent API: {}", deletedHashes.size, deletedHashes.joinToString(", "))
+        }
+        if (deletedHashes.size < hashes.size) {
+            logger.warn("Some torrents failed to delete. Requested: {}, Deleted: {}", hashes.size, deletedHashes.size)
+        }
         return ResponseEntity.ok("ok")
     }
 

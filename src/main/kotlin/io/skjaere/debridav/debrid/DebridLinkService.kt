@@ -70,21 +70,52 @@ class DebridLinkService(
     private val logger = LoggerFactory.getLogger(DebridLinkService::class.java)
     private val transactionTemplate = TransactionTemplate(transactionManager)
 
-    data class LinkLivenessCacheKey(val provider: String, val cachedFile: CachedFile)
+    /**
+     * Cache key for link liveness checks.
+     * Uses only immutable identifying fields (provider, path, size, entityId) to avoid
+     * cache key hash code changes when CachedFile.link is mutated.
+     * The entityId provides a unique identifier that remains stable even when links are refreshed.
+     */
+    data class LinkLivenessCacheKey(
+        val provider: String,
+        val path: String?,
+        val size: Long?,
+        val entityId: Long?, // RemotelyCachedEntity.id or DebridFileContents.id for uniqueness
+        val cachedFile: CachedFile // Kept for cache loader access, but not used in equals/hashCode
+    ) {
+        // Override equals and hashCode to use only immutable fields
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as LinkLivenessCacheKey
+            return provider == other.provider &&
+                    path == other.path &&
+                    size == other.size &&
+                    entityId == other.entityId
+        }
+
+        override fun hashCode(): Int {
+            var result = provider.hashCode()
+            result = 31 * result + (path?.hashCode() ?: 0)
+            result = 31 * result + (size?.hashCode() ?: 0)
+            result = 31 * result + (entityId?.hashCode() ?: 0)
+            return result
+        }
+    }
 
     val isLinkAliveCache: LoadingCache<LinkLivenessCacheKey, Boolean> = Caffeine.newBuilder()
         .expireAfterWrite(debridavConfigurationProperties.linkLivenessCacheDuration)
         .maximumSize(CACHE_SIZE)
         .build(CacheLoader<LinkLivenessCacheKey, Boolean> { key ->
             runBlocking {
-                logger.debug("Checking if link is alive for ${key.cachedFile.provider} ${key.cachedFile.path}")
+                logger.debug("Checking if link is alive for ${key.provider} ${key.path}")
                 logger.debug("LINK_ALIVE_CHECK: file={}, provider={}, link={}, size={} bytes", 
-                    key.cachedFile.path, key.cachedFile.provider, key.cachedFile.link?.take(50) + "...", key.cachedFile.size)
+                    key.path, key.provider, key.cachedFile.link?.take(50) + "...", key.size)
                 val isAlive = debridClients
                     .firstOrNull { it.getProvider().toString() == key.provider }?.isLinkAlive(key.cachedFile)
                     ?: false
                 logger.debug("LINK_ALIVE_RESULT: file={}, provider={}, isAlive={}", 
-                    key.cachedFile.path, key.cachedFile.provider, isAlive)
+                    key.path, key.provider, isAlive)
                 isAlive
             }
         })
@@ -413,7 +444,13 @@ class DebridLinkService(
                 .isLinkAlive(debridFile)
         )*/
         if (isLinkAliveCache.get(
-                LinkLivenessCacheKey(debridProvider.toString(), debridFile)
+                LinkLivenessCacheKey(
+                    debridProvider.toString(),
+                    debridFile.path,
+                    debridFile.size,
+                    debridFileContents.id, // Use DebridFileContents.id as entity identifier
+                    debridFile
+                )
             )
         ) {
             emit(debridFile)
