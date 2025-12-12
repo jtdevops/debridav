@@ -6,6 +6,7 @@ import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.configuration.RuntimeConfigurationService
 import io.skjaere.debridav.debrid.TorrentMagnet
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
 import org.springframework.core.io.ResourceLoader
@@ -297,8 +298,41 @@ class QBittorrentEmulationController(
         val deletedHashes = mutableListOf<String>()
         hashes.forEach { hash ->
             try {
-                torrentService.deleteTorrentByHash(hash)
-                deletedHashes.add(hash)
+                // Get torrent details before deletion for enhanced logging
+                val torrent = torrentService.getTorrentByHash(TorrentHash(hash))
+                if (torrent != null) {
+                    val torrentName = torrent.name ?: "unknown"
+                    val fileCount = torrent.files.size
+                    val fileDetails = torrent.files.mapNotNull { file ->
+                        when (file) {
+                            is RemotelyCachedEntity -> {
+                                val fileName = file.name ?: "unknown"
+                                val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+                                "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
+                            }
+                            else -> {
+                                val fileName = file.name ?: "unknown"
+                                "$fileName (id: ${file.id}, type: ${file.javaClass.simpleName})"
+                            }
+                        }
+                    }
+                    
+                    logger.info("Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount")
+                    if (fileDetails.isNotEmpty()) {
+                        logger.info("Deleting associated files: ${fileDetails.joinToString("; ")}")
+                    }
+                    
+                    torrentService.deleteTorrentByHash(hash)
+                    deletedHashes.add(hash)
+                    
+                    // Log completion with details (using values captured before deletion)
+                    logger.info("Deleted torrent: hash=$hash, name='$torrentName', removed $fileCount file(s)")
+                } else {
+                    logger.info("Deleting torrent: hash=$hash (not found in database)")
+                    torrentService.deleteTorrentByHash(hash)
+                    deletedHashes.add(hash)
+                    logger.info("Deleted torrent: hash=$hash")
+                }
             } catch (e: Exception) {
                 logger.error("Failed to delete torrent with hash: $hash", e)
             }
