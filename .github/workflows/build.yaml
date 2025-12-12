@@ -1,40 +1,29 @@
 name: Master build
 
 on:
-  push:
-    branches: [ main ]
+  # Auto-build disabled - use manual workflow_dispatch for controlled versioning
+  # push:
+  #   branches: [ main ]
   workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type (patch, minor, major). Leave empty for auto patch increment.'
+        required: false
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
 
 permissions:
   contents: write
   packages: write
 
 jobs:
-  check-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      should-build: ${{ steps.filter.outputs.should-build }}
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 2
-      
-      - name: Check for code changes
-        id: filter
-        uses: dorny/paths-filter@v2
-        with:
-          filters: |
-            should-build:
-              - 'src/**'
-              - 'build.gradle.kts'
-              - 'settings.gradle.kts'
-              - 'gradle/**'
-              - 'Dockerfile'
-              - '.github/workflows/build.yaml'
-
   build:
-    needs: check-changes
-    if: ${{ needs.check-changes.outputs.should-build == 'true' || github.event_name == 'workflow_dispatch' }}
+    # Manual builds only - auto-build disabled for controlled versioning
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -45,19 +34,90 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Get next version
-        id: get_next_version
-        uses: thenativeweb/get-next-version@main
+      - name: Get latest version from tags
+        id: get_latest_version
+        run: |
+          LATEST_TAG=$(git tag --sort=-version:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 | sed 's/^v//')
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="0.0.0"
+          fi
+          echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest version found: $LATEST_TAG"
 
-      - name: Has next version?
-        run: echo 'hasNextVersion ${{ steps.get_next_version.outputs.hasNextVersion }}'
+      - name: Calculate next version
+        id: calculate_version
+        run: |
+          CURRENT_VERSION="${{ steps.get_latest_version.outputs.version }}"
+          VERSION_BUMP="${{ github.event.inputs.version_bump }}"
+          
+          # Default to patch if not specified
+          if [ -z "$VERSION_BUMP" ]; then
+            VERSION_BUMP="patch"
+          fi
+          
+          # Parse current version
+          IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+          
+          # Increment based on bump type
+          case "$VERSION_BUMP" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch|*)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          
+          NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "bumpType=$VERSION_BUMP" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+          echo "Calculated next version: $NEXT_VERSION (bump type: $VERSION_BUMP)"
+          
+          # Check if this is a new version (not equal to current)
+          if [ "$NEXT_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "isNewVersion=true" >> $GITHUB_OUTPUT
+          else
+            echo "isNewVersion=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine version to use
+        id: version_to_use
+        run: |
+          # Always use the calculated next version for manual builds
+          # This ensures we create a new version based on the selected bump type
+          VERSION="${{ steps.calculate_version.outputs.version }}"
+          USE_NEXT_VERSION="true"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "useNextVersion=$USE_NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Using version: $VERSION (will create new release)"
 
       - name: Parse semver string
         id: semver_parser
         uses: booxmedialtd/ws-action-parse-semver@v1
         with:
-          input_string: '${{ steps.get_next_version.outputs.version }}'
-        if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
+          input_string: '${{ steps.version_to_use.outputs.version }}'
+
+      - name: Create release
+        id: create-release
+        uses: actions/create-release@latest
+        env:
+          GITHUB_TOKEN: ${{secrets.PERSONAL_ACCESS_TOKEN}}
+        with:
+          tag_name: v${{ steps.version_to_use.outputs.version }}
+          release_name: v${{ steps.version_to_use.outputs.version }}
+          draft: false
+          prerelease: false
+        if: ${{ steps.version_to_use.outputs.useNextVersion == 'true' }}
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -65,7 +125,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-        if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' || github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push docker image
         uses: docker/build-push-action@v5
@@ -73,17 +132,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/jtdevops/debridav:v${{ steps.get_next_version.outputs.version }}
+            ghcr.io/jtdevops/debridav:v${{ steps.version_to_use.outputs.version }}
             ghcr.io/jtdevops/debridav:v${{ steps.semver_parser.outputs.major }}
             ghcr.io/jtdevops/debridav:v${{ steps.semver_parser.outputs.major }}.${{ steps.semver_parser.outputs.minor }}
             ghcr.io/jtdevops/debridav:latest
-        if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
-
-      - name: Build and push docker image (manual trigger)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/jtdevops/debridav:latest
-        if: ${{ github.event_name == 'workflow_dispatch' && steps.get_next_version.outputs.hasNextVersion != 'true' }}
 

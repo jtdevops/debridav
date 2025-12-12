@@ -360,10 +360,35 @@ class TorrentService(
         // First, get the torrent to clean up associated files
         val torrent = torrentRepository.getByHashIgnoreCase(hash)
         if (torrent != null) {
+            val torrentName = torrent.name ?: "unknown"
+            val fileCount = torrent.files.size
+            val fileDetails = torrent.files.mapNotNull { file ->
+                when (file) {
+                    is RemotelyCachedEntity -> {
+                        val fileName = file.name ?: "unknown"
+                        val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+                        "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
+                    }
+                    else -> {
+                        val fileName = file.name ?: "unknown"
+                        "$fileName (id: ${file.id}, type: ${file.javaClass.simpleName})"
+                    }
+                }
+            }
+            
+            logger.info("Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount")
+            if (fileDetails.isNotEmpty()) {
+                logger.info("Deleting associated files: ${fileDetails.joinToString("; ")}")
+            }
+            
             // Clean up associated files
             torrent.files.forEach { file ->
                 fileService.deleteFile(file)
             }
+            
+            logger.info("Deleted torrent: hash=$hash, name='$torrentName', removed $fileCount file(s)")
+        } else {
+            logger.warn("Torrent not found for deletion: hash=$hash")
         }
         
         return torrentRepository.deleteByHashIgnoreCase(hash)
