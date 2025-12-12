@@ -26,7 +26,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{secrets.PERSONAL_ACCESS_TOKEN}}
@@ -103,18 +103,25 @@ jobs:
 
       - name: Parse semver string
         id: semver_parser
-        uses: booxmedialtd/ws-action-parse-semver@v1
-        with:
-          input_string: '${{ steps.version_to_use.outputs.version }}'
+        run: |
+          VERSION="${{ steps.version_to_use.outputs.version }}"
+          IFS='.' read -ra VERSION_PARTS <<< "$VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+          echo "major=$MAJOR" >> $GITHUB_OUTPUT
+          echo "minor=$MINOR" >> $GITHUB_OUTPUT
+          echo "patch=$PATCH" >> $GITHUB_OUTPUT
+          echo "Parsed version: major=$MAJOR, minor=$MINOR, patch=$PATCH"
 
       - name: Create release
         id: create-release
-        uses: actions/create-release@latest
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{secrets.PERSONAL_ACCESS_TOKEN}}
         with:
           tag_name: v${{ steps.version_to_use.outputs.version }}
-          release_name: v${{ steps.version_to_use.outputs.version }}
+          name: v${{ steps.version_to_use.outputs.version }}
           draft: false
           prerelease: false
         if: ${{ steps.version_to_use.outputs.useNextVersion == 'true' }}
