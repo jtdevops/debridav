@@ -15,6 +15,7 @@ private const val DEFAULT_STREAMING_CLIENT_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_PROVIDER_ERROR_WAIT_MINUTES = 1L
 private const val DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS = 24L
 private const val DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS = 30L
+private const val DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB = 1024L // 1 GB - warn when chunks exceed this size
 
 @ConfigurationProperties(prefix = "debridav")
 data class DebridavConfigurationProperties(
@@ -51,6 +52,7 @@ data class DebridavConfigurationProperties(
     val enableStreamingDownloadTracking: Boolean = false,
     val streamingDownloadTrackingCacheExpirationHours: Duration = Duration.ofHours(DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS),
     val debridDirectDlResponseCacheExpirationSeconds: Duration = Duration.ofSeconds(DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS),
+    val streamingMaxChunkSizeWarningMb: Long = DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB, // Warn when chunk size exceeds this threshold (in MB)
     // Local video file approach for ARR projects
     val enableRcloneArrsLocalVideo: Boolean = false, // Enable serving local video files for ARR requests
     val rcloneArrsLocalVideoFilePaths: String? = null, // Video file mapping as comma-separated key=value pairs
