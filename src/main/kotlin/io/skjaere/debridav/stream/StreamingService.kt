@@ -484,6 +484,25 @@ class StreamingService(
     }
     
 
+    /**
+     * Calculates dynamic socket timeout based on chunk size.
+     * Larger chunks need more time to download, especially from slower IPTV providers.
+     * 
+     * Formula: base timeout (10s) + 1 second per 10 MB of chunk size, capped at 300 seconds (5 minutes)
+     * 
+     * @param chunkSizeBytes The size of the chunk in bytes
+     * @return Socket timeout in milliseconds
+     */
+    private fun calculateSocketTimeout(chunkSizeBytes: Long): Long {
+        val baseTimeoutMs = 10_000L // 10 seconds base timeout
+        val chunkSizeMB = chunkSizeBytes / (1024 * 1024) // Convert bytes to MB
+        val additionalTimeoutMs = chunkSizeMB * 1000L // 1 second per MB
+        val maxTimeoutMs = 300_000L // 5 minutes maximum timeout
+        
+        val calculatedTimeout = baseTimeoutMs + additionalTimeoutMs
+        return minOf(calculatedTimeout, maxTimeoutMs)
+    }
+
     private suspend fun streamBytes(
         remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream, trackingId: String?
     ) = coroutineScope {
@@ -666,19 +685,26 @@ class StreamingService(
                     // Apply Range headers to redirect URLs to ensure the provider honors the requested range
                     // Some providers don't preserve Range headers through redirects, so we must re-apply them
                     // Use prepareGet().execute() to stream the response instead of buffering it
+                    
+                    // Calculate dynamic socket timeout based on chunk size
+                    val chunkSizeBytes = source.range.last - source.range.first + 1 // Both are inclusive
+                    val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
+                    
                     val redirectStatement = httpClient.prepareGet(redirectUrl) {
                         headers {
                             // Apply Range headers to redirect URLs to preserve range requests (e.g., when skipping in video)
                             val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
                             append(HttpHeaders.Range, rangeHeader)
-                            logger.debug("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}, isIptv={}", redirectUrl.take(100), rangeHeader, isIptv)
+                            logger.debug("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}, isIptv={}, chunkSize={} bytes ({}), timeout={} ms", 
+                                redirectUrl.take(100), rangeHeader, isIptv, chunkSizeBytes, 
+                                org.apache.commons.io.FileUtils.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
                             iptvConfigurationProperties?.userAgent?.let {
                                 append(HttpHeaders.UserAgent, it)
                             }
                         }
                         timeout {
                             requestTimeoutMillis = 20_000_000
-                            socketTimeoutMillis = debridavConfigProperties.readTimeoutMilliseconds
+                            socketTimeoutMillis = dynamicSocketTimeout
                             connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
                         }
                     }
