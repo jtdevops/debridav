@@ -664,6 +664,10 @@ class StreamingService(
                     val chunkSizeBytes = source.range.last - source.range.first + 1
                     val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
                     
+                    // Use shorter connect timeout for redirects (2 seconds) since redirects are typically fast
+                    // This reduces latency when following redirect chains
+                    val redirectConnectTimeout = minOf(2000L, debridavConfigProperties.connectTimeoutMilliseconds)
+                    
                     val redirectStatement = httpClient.prepareGet(redirectUrl) {
                         headers {
                             val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
@@ -675,7 +679,7 @@ class StreamingService(
                         timeout {
                             requestTimeoutMillis = 20_000_000
                             socketTimeoutMillis = dynamicSocketTimeout
-                            connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                            connectTimeoutMillis = redirectConnectTimeout
                         }
                     }
                     
@@ -897,6 +901,10 @@ class StreamingService(
                     val chunkSizeBytes = source.range.last - source.range.first + 1 // Both are inclusive
                     val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
                     
+                    // Use shorter connect timeout for redirects (2 seconds) since redirects are typically fast
+                    // This reduces latency when following redirect chains
+                    val redirectConnectTimeout = minOf(2000L, debridavConfigProperties.connectTimeoutMilliseconds)
+                    
                     val redirectStatement = httpClient.prepareGet(redirectUrl) {
                         headers {
                             // Apply Range headers to redirect URLs to preserve range requests (e.g., when skipping in video)
@@ -912,7 +920,7 @@ class StreamingService(
                         timeout {
                             requestTimeoutMillis = 20_000_000
                             socketTimeoutMillis = dynamicSocketTimeout
-                            connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                            connectTimeoutMillis = redirectConnectTimeout
                         }
                     }
                     
