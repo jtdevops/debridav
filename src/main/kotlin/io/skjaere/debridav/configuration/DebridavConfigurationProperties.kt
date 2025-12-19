@@ -75,7 +75,9 @@ data class DebridavConfigurationProperties(
     val strmUseExternalUrlForProviders: String? = null, // Comma-separated list of provider names for which to use external URLs. Supports ALL/* for all providers and ! prefix for negation.
     val strmProxyExternalUrlForProviders: String? = null, // Comma-separated list of provider names for which external URLs should use proxy URLs instead of direct URLs. Supports ALL/* for all providers and ! prefix for negation.
     val strmProxyBaseUrl: String? = null, // Base URL for STRM redirect proxy (e.g., http://debridav:8080). If not set, defaults to http://{detected-hostname}:8080
-    val strmProxyStreamMode: Boolean = false // If true, stream content directly through proxy instead of redirecting. Provides more control over content delivery.
+    val strmProxyStreamMode: Boolean = false, // If true, stream content directly through proxy instead of redirecting. Provides more control over content delivery.
+    val strmProviders: String? = "*", // Comma-separated list of provider names for which to create STRM files. Supports ALL/* for all providers and ! prefix for negation. Default: * (all providers)
+    val strmExcludeFilenameRegex: String? = null // Optional regex pattern to match filenames. Files matching this pattern will use original media files instead of STRM files.
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -394,15 +396,131 @@ data class DebridavConfigurationProperties(
     }
 
     /**
+     * Parses the comma-separated list of providers for which STRM files should be created.
+     * Supports:
+     * - `ALL` or `*` to represent all providers
+     * - Negation with `!` prefix (e.g., `*,!IPTV` means all providers except IPTV)
+     * @return Pair of (allowed providers set, denied providers set), or null if not configured
+     */
+    private fun parseStrmProviders(): Pair<Set<String>, Set<String>>? {
+        val providers = strmProviders?.trim()
+        if (providers.isNullOrBlank()) {
+            return null
+        }
+        
+        val allowedProviders = mutableSetOf<String>()
+        val deniedProviders = mutableSetOf<String>()
+        var allowAll = false
+        
+        providers.split(",")
+            .map { it.trim().uppercase() }
+            .filter { it.isNotEmpty() }
+            .forEach { provider ->
+                when {
+                    provider == "ALL" || provider == "*" -> {
+                        allowAll = true
+                    }
+                    provider.startsWith("!") -> {
+                        val deniedProvider = provider.removePrefix("!")
+                        if (deniedProvider.isNotEmpty()) {
+                            deniedProviders.add(deniedProvider)
+                        }
+                    }
+                    else -> {
+                        allowedProviders.add(provider)
+                    }
+                }
+            }
+        
+        return if (allowAll) {
+            // If ALL/* is specified, return special marker
+            Pair(setOf("*"), deniedProviders)
+        } else if (allowedProviders.isNotEmpty() || deniedProviders.isNotEmpty()) {
+            Pair(allowedProviders, deniedProviders)
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Checks if STRM files should be created for a given provider.
+     * @param provider Optional provider to check. If provided and strmProviders is set,
+     *                 checks if this specific provider is allowed.
+     * @return true if STRM files should be created for this provider, false otherwise
+     */
+    fun shouldUseStrmForProvider(provider: DebridProvider? = null): Boolean {
+        // Check provider-specific configuration
+        val providerConfig = parseStrmProviders()
+        if (providerConfig != null) {
+            val (allowedProviders, deniedProviders) = providerConfig
+            
+            return if (provider != null) {
+                val providerName = provider.name.uppercase()
+                
+                // First check if provider is explicitly denied
+                if (deniedProviders.contains(providerName)) {
+                    return false
+                }
+                
+                // Check if ALL/* is specified (all providers allowed)
+                if (allowedProviders.contains("*")) {
+                    return true
+                }
+                
+                // Check if this specific provider is in the allowed list
+                allowedProviders.contains(providerName)
+            } else {
+                // If no provider specified but provider-specific config exists, default to true if ALL/* is set
+                allowedProviders.contains("*")
+            }
+        }
+        
+        // If no configuration is set, default to true (backward compatible - all providers use STRM)
+        return true
+    }
+
+    /**
+     * Checks if a filename should be excluded from STRM file creation based on regex pattern.
+     * @param fileName The file name to check
+     * @return true if the filename matches the exclusion regex pattern, false otherwise
+     */
+    fun shouldExcludeFilenameFromStrm(fileName: String): Boolean {
+        if (strmExcludeFilenameRegex.isNullOrBlank()) {
+            return false // No regex configured, no exclusion
+        }
+        
+        return try {
+            fileName.matches(Regex(strmExcludeFilenameRegex))
+        } catch (e: Exception) {
+            // Invalid regex, log warning and don't exclude
+            val logger = org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
+            logger.warn("Invalid regex pattern in strmExcludeFilenameRegex: $strmExcludeFilenameRegex", e)
+            false
+        }
+    }
+
+    /**
      * Checks if a file should be converted to a STRM file based on filter mode and extensions.
      * @param fileName The file name to check
+     * @param provider Optional provider for the file. If provided, checks provider inclusion/exclusion.
      * @return true if the file should be converted to STRM, false otherwise
      */
-    fun shouldCreateStrmFile(fileName: String): Boolean {
+    fun shouldCreateStrmFile(fileName: String, provider: DebridProvider? = null): Boolean {
         if (!strmEnabled) {
             return false
         }
 
+        // Check provider inclusion/exclusion
+        if (!shouldUseStrmForProvider(provider)) {
+            return false
+        }
+
+        // Check filename regex exclusion
+        if (shouldExcludeFilenameFromStrm(fileName)) {
+            return false
+        }
+
+        // Check file extension filter mode
         when (strmFileFilterMode.uppercase()) {
             "ALL" -> return true
             "NON_STRM" -> return !fileName.lowercase().endsWith(".strm")

@@ -197,6 +197,15 @@ services:
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
       - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+      # Optional: Control which providers use STRM files (default: * = all providers)
+      # Examples:
+      # - DEBRIDAV_STRM_PROVIDERS=*  # All providers use STRM files (default)
+      # - DEBRIDAV_STRM_PROVIDERS=*,!IPTV  # All providers except IPTV use STRM files
+      # - DEBRIDAV_STRM_PROVIDERS=REAL_DEBRID,PREMIUMIZE  # Only these providers use STRM files
+      # Optional: Exclude files matching regex pattern from STRM file creation
+      # Examples:
+      # - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*sample.*  # Exclude files containing "sample"
+      # - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*\\.sample\\.mkv$  # Exclude files ending with ".sample.mkv"
       # Optional: Use external URLs only for specific providers (e.g., IPTV)
       # - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV
       # Optional: Use proxy URLs for external URLs (for providers with expiring URLs like PREMIUMIZE)
