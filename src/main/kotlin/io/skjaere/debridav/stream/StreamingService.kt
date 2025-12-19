@@ -27,6 +27,7 @@ import io.github.resilience4j.ratelimiter.RateLimiter
 import io.github.resilience4j.ratelimiter.RateLimiterConfig
 import io.ktor.client.HttpClient
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.util.VideoFileExtensions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -74,7 +75,8 @@ data class DownloadTrackingContext(
     var downloadEndTime: Instant? = null,
     var completionStatus: String = "in_progress",
     val httpHeaders: Map<String, String> = emptyMap(),
-    val sourceIpAddress: String? = null
+    val sourceIpAddress: String? = null,
+    val provider: DebridProvider? = null
 )
 
 data class HttpRequestInfo(
@@ -1327,13 +1329,21 @@ class StreamingService(
             "$it/$fileName" 
         } ?: fileName
 
+        // Determine provider - use DebridProvider.IPTV for IPTV content, otherwise use debrid provider
+        val provider = if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent || debridLink.provider == DebridProvider.IPTV) {
+            DebridProvider.IPTV
+        } else {
+            debridLink.provider
+        }
+
         val context = DownloadTrackingContext(
             filePath = actualFilePath,
             fileName = fileName,
             requestedRange = range,
             requestedSize = requestedSize,
             httpHeaders = httpRequestInfo.headers,
-            sourceIpAddress = httpRequestInfo.sourceIpAddress
+            sourceIpAddress = httpRequestInfo.sourceIpAddress,
+            provider = provider
         )
         
         activeDownloads[trackingId] = context
