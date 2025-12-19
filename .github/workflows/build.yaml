@@ -37,12 +37,18 @@ jobs:
       - name: Get latest version from tags
         id: get_latest_version
         run: |
-          LATEST_TAG=$(git tag --sort=-version:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 | sed 's/^v//')
-          if [ -z "$LATEST_TAG" ]; then
+          LATEST_TAG_FULL=$(git tag --sort=-version:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          if [ -z "$LATEST_TAG_FULL" ]; then
             LATEST_TAG="0.0.0"
+            LATEST_TAG_FULL=""
+            echo "hasPreviousTag=false" >> $GITHUB_OUTPUT
+          else
+            LATEST_TAG=$(echo "$LATEST_TAG_FULL" | sed 's/^v//')
+            echo "hasPreviousTag=true" >> $GITHUB_OUTPUT
           fi
           echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
-          echo "Latest version found: $LATEST_TAG"
+          echo "tag=$LATEST_TAG_FULL" >> $GITHUB_OUTPUT
+          echo "Latest version found: $LATEST_TAG (tag: $LATEST_TAG_FULL)"
 
       - name: Calculate next version
         id: calculate_version
@@ -114,6 +120,38 @@ jobs:
           echo "patch=$PATCH" >> $GITHUB_OUTPUT
           echo "Parsed version: major=$MAJOR, minor=$MINOR, patch=$PATCH"
 
+      - name: Generate comparison URLs
+        id: comparison_urls
+        run: |
+          PREVIOUS_TAG="${{ steps.get_latest_version.outputs.tag }}"
+          NEW_TAG="v${{ steps.version_to_use.outputs.version }}"
+          HAS_PREVIOUS_TAG="${{ steps.get_latest_version.outputs.hasPreviousTag }}"
+          REPO="${{ github.repository }}"
+          
+          if [ "$HAS_PREVIOUS_TAG" = "true" ] && [ -n "$PREVIOUS_TAG" ]; then
+            COMPARE_URL="https://github.com/${REPO}/compare/${PREVIOUS_TAG}...${NEW_TAG}"
+            DIFF_URL="https://github.com/${REPO}/compare/${PREVIOUS_TAG}...${NEW_TAG}.diff"
+            RELEASE_BODY="## Changes
+
+[View changes](${COMPARE_URL}) | [Download diff](${DIFF_URL})"
+            echo "compareUrl=$COMPARE_URL" >> $GITHUB_OUTPUT
+            echo "diffUrl=$DIFF_URL" >> $GITHUB_OUTPUT
+            echo "hasComparison=true" >> $GITHUB_OUTPUT
+            echo "releaseBody<<EOF" >> $GITHUB_OUTPUT
+            echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "Generated comparison URLs:"
+            echo "  Compare: $COMPARE_URL"
+            echo "  Diff: $DIFF_URL"
+          else
+            RELEASE_BODY="## Initial Release"
+            echo "hasComparison=false" >> $GITHUB_OUTPUT
+            echo "releaseBody<<EOF" >> $GITHUB_OUTPUT
+            echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "No previous tag found, skipping comparison URLs"
+          fi
+
       - name: Create release
         id: create-release
         uses: softprops/action-gh-release@v2
@@ -122,6 +160,7 @@ jobs:
         with:
           tag_name: v${{ steps.version_to_use.outputs.version }}
           name: v${{ steps.version_to_use.outputs.version }}
+          body: ${{ steps.comparison_urls.outputs.releaseBody }}
           draft: false
           prerelease: false
         if: ${{ steps.version_to_use.outputs.useNextVersion == 'true' }}
