@@ -20,7 +20,10 @@ FROM openjdk:26-ea-21-jdk-slim
 
 WORKDIR /app
 
-RUN apt update && apt install curl -y
+RUN apt update && apt install -y curl ffmpeg
+# Clean up after 'apt update'
+RUN apt-get clean \
+    && rm -Rf /var/lib/apt/lists/*
 
 RUN mkdir app
 # Copy the built JAR from the build stage

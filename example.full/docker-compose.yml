@@ -88,6 +88,8 @@ services:
 
       - IPTV_METADATA_OMDB_API_KEY=${IPTV_METADATA_OMDB_API_KEY}
       - IPTV_INCLUDE_PROVIDER_IN_MAGNET_TITLE=true
+      # IPTV Metadata Fetch Batch Size - Number of concurrent metadata fetch requests per batch (default: 5)
+      - IPTV_METADATA_FETCH_BATCH_SIZE=${IPTV_METADATA_FETCH_BATCH_SIZE:-5}
 
       # - IPTV_USE_LOCAL_RESPONSES=true
       - IPTV_RESPONSE_SAVE_FOLDER=/iptv_cache
