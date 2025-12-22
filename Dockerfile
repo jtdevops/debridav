@@ -12,8 +12,12 @@ COPY gradle.properties .
 # Copy the source code
 COPY src src
 
+#RUN ./gradlew bootJar
 # Build the application
-RUN ./gradlew bootJar
+# Use gradle command directly since base image already has Gradle 8.11 installed
+# This avoids wrapper download issues (503 errors from distribution servers)
+# The gradle:8.11-jdk21 image already has Gradle 8.11 pre-installed
+RUN gradle bootJar --no-daemon
 
 # Runtime stage
 FROM openjdk:26-ea-21-jdk-slim
