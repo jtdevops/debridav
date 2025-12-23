@@ -114,58 +114,83 @@ class VideoMetadataExtractor(
     }
     
     /**
-     * Resolves redirects for a URL by following Location headers.
-     * Returns the final URL after following redirects, or the original URL if no redirects.
+     * Resolves redirects for a URL by following the complete redirect chain.
+     * Uses GET with Range bytes=0-0 to check for redirects without downloading data.
+     * Returns the final URL after following all redirects, or the original URL if no redirects.
+     * 
+     * @param maxRedirects Maximum number of redirects to follow (default: 10) to prevent infinite loops
      */
-    private suspend fun resolveRedirectUrl(url: String): String? {
-        return try {
-            val response = httpClient.get(url) {
-                headers {
-                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
-                    append(HttpHeaders.Range, "bytes=0-0") // Minimal request to check for redirects
-                }
-                timeout {
-                    requestTimeoutMillis = 5000
-                    connectTimeoutMillis = 2000
-                }
-            }
-            
-            if (response.status.value in 300..399) {
-                val redirectLocation = response.headers["Location"]
-                if (redirectLocation != null) {
-                    // Consume response body to ensure proper cleanup
-                    try {
-                        response.body<ByteReadChannel>()
-                    } catch (e: Exception) {
-                        // Ignore errors when consuming redirect body
+    private suspend fun resolveRedirectUrl(url: String, maxRedirects: Int = 10): String? {
+        var currentUrl = url
+        var redirectCount = 0
+        
+        while (redirectCount < maxRedirects) {
+            try {
+                val response = httpClient.get(currentUrl) {
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                        append(HttpHeaders.Range, "bytes=0-0") // Minimal request to check for redirects
                     }
-                    
-                    // Resolve redirect URL (handle relative redirects)
-                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                        redirectLocation
+                    timeout {
+                        requestTimeoutMillis = 5000
+                        connectTimeoutMillis = 2000
+                    }
+                }
+                
+                // Consume response body to ensure proper cleanup
+                try {
+                    response.body<ByteReadChannel>()
+                } catch (e: Exception) {
+                    // Ignore errors when consuming response body
+                }
+                
+                if (response.status.value in 300..399) {
+                    val redirectLocation = response.headers["Location"]
+                    if (redirectLocation != null) {
+                        redirectCount++
+                        
+                        // Resolve redirect URL (handle relative redirects)
+                        val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                            redirectLocation
+                        } else {
+                            // Relative redirect - construct absolute URL
+                            val currentUri = URI(currentUrl)
+                            currentUri.resolve(redirectLocation).toString()
+                        }
+                        
+                        logger.debug("Following redirect $redirectCount: from={}, to={}", currentUrl.take(100), redirectUrl.take(100))
+                        currentUrl = redirectUrl
+                        continue // Follow the next redirect
                     } else {
-                        // Relative redirect - construct absolute URL
-                        val originalUri = URI(url)
-                        originalUri.resolve(redirectLocation).toString()
+                        logger.debug("Redirect response (status ${response.status.value}) but no Location header for URL: {}", currentUrl.take(100))
+                        return null
                     }
-                    
-                    logger.debug("Resolved redirect URL: originalUrl={}, redirectUrl={}", url.take(100), redirectUrl.take(100))
-                    redirectUrl
+                } else if (!response.status.isSuccess()) {
+                    // Non-success status (like 551) - if we've followed redirects, return the final URL anyway
+                    // so FFprobe can try it; otherwise return null to use original URL
+                    if (redirectCount > 0) {
+                        logger.debug("Final URL in redirect chain returned non-success status ${response.status.value}, but will use it for FFprobe: {}", currentUrl.take(100))
+                        return currentUrl
+                    } else {
+                        logger.debug("URL returned non-success status ${response.status.value}, will try original URL with FFprobe: {}", currentUrl.take(100))
+                        return null
+                    }
                 } else {
-                    logger.debug("Redirect response (status ${response.status.value}) but no Location header for URL: {}", url.take(100))
-                    null
+                    // Success status (200, 206, etc.) - this is the final URL
+                    if (redirectCount > 0) {
+                        logger.debug("Resolved redirect chain (${redirectCount} redirects): finalUrl={}", currentUrl.take(100))
+                    }
+                    return currentUrl
                 }
-            } else if (!response.status.isSuccess()) {
-                // Log non-success status codes (like 551) for debugging
-                logger.debug("URL returned non-success status ${response.status.value}, will try original URL with FFprobe: {}", url.take(100))
-                null
-            } else {
-                null // No redirect, URL is accessible
+            } catch (e: Exception) {
+                logger.debug("Failed to resolve redirect URL at step $redirectCount: ${e.message}")
+                return null
             }
-        } catch (e: Exception) {
-            logger.debug("Failed to resolve redirect URL: ${e.message}")
-            null
         }
+        
+        // Too many redirects
+        logger.warn("Maximum redirect limit ($maxRedirects) reached for URL: {}", url.take(100))
+        return null
     }
     
     /**
