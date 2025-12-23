@@ -332,7 +332,9 @@ class VideoMetadataExtractor(
                 
                 val exitCode = process.exitValue()
                 if (exitCode != 0) {
-                    logger.debug("FFprobe exited with code $exitCode")
+                    // Log error output if available (redirectErrorStream(true) sends stderr to stdout)
+                    val errorOutput = output.takeIf { it.isNotBlank() } ?: "no error output"
+                    logger.debug("FFprobe exited with code $exitCode. Error output: ${errorOutput.take(200)}")
                     return@withContext null
                 }
                 
