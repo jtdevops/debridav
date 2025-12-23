@@ -8,6 +8,7 @@ import io.ktor.client.request.head
 import io.ktor.client.request.headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.ByteReadChannel
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -121,6 +122,7 @@ class VideoMetadataExtractor(
             val response = httpClient.get(url) {
                 headers {
                     append(HttpHeaders.Range, "bytes=$start-${start + size - 1}")
+                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
                 }
                 timeout {
                     requestTimeoutMillis = 10000 // 10 second timeout
@@ -128,10 +130,12 @@ class VideoMetadataExtractor(
                 }
             }
             
-            if (response.status.isSuccess()) {
+            // Accept both 200 (OK) and 206 (Partial Content) as success
+            // Some servers return 200 even for Range requests
+            if (response.status.value == 200 || response.status.value == 206) {
                 response.body<ByteArray>()
             } else {
-                logger.debug("HTTP request failed with status ${response.status.value}")
+                logger.debug("HTTP request failed with status ${response.status.value} for range bytes=$start-${start + size - 1}")
                 null
             }
         } catch (e: Exception) {
@@ -142,18 +146,88 @@ class VideoMetadataExtractor(
     
     /**
      * Downloads the last chunk of the file (for MP4 with moov at end).
+     * Tries HEAD request first, falls back to GET with Range header if HEAD fails.
      */
     private suspend fun downloadLastChunk(url: String): ByteArray? {
         return try {
-            // First, get file size using HEAD request
-            val headResponse = httpClient.head(url) {
-                timeout {
-                    requestTimeoutMillis = 5000
-                    connectTimeoutMillis = 2000
+            // Try to get file size using HEAD request first (more efficient)
+            var contentLength: Long? = null
+            
+            try {
+                val headResponse = httpClient.head(url) {
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    }
+                    timeout {
+                        requestTimeoutMillis = 5000
+                        connectTimeoutMillis = 2000
+                    }
+                }
+                
+                if (headResponse.status.isSuccess()) {
+                    contentLength = headResponse.headers["Content-Length"]?.toLongOrNull()
+                } else {
+                    logger.debug("HEAD request failed with status ${headResponse.status.value}, falling back to GET")
+                }
+            } catch (e: Exception) {
+                logger.debug("HEAD request failed: ${e.message}, falling back to GET")
+            }
+            
+            // If HEAD failed or didn't provide Content-Length, try GET with Range header for first byte
+            // Uses same approach as IptvRequestService.fetchActualFileSize()
+            if (contentLength == null) {
+                try {
+                    val getResponse = httpClient.get(url) {
+                        headers {
+                            append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                            append(HttpHeaders.Range, "bytes=0-0")
+                        }
+                        timeout {
+                            requestTimeoutMillis = 5000
+                            connectTimeoutMillis = 2000
+                        }
+                    }
+                    
+                    if (getResponse.status.isSuccess()) {
+                        // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
+                        val contentRange = getResponse.headers["Content-Range"]
+                        if (contentRange != null) {
+                            // Parse Content-Range: bytes 0-0/1882075726
+                            val rangeRegex = Regex("bytes\\s+\\d+-\\d+/(\\d+)")
+                            val matchResult = rangeRegex.find(contentRange)
+                            val totalSize = matchResult?.groupValues?.get(1)?.toLongOrNull()
+                            if (totalSize != null && totalSize > 0) {
+                                contentLength = totalSize
+                            }
+                        }
+                        
+                        // Fallback to Content-Length header if Content-Range is not available
+                        if (contentLength == null) {
+                            contentLength = getResponse.headers["Content-Length"]?.toLongOrNull()
+                        }
+                        
+                        // Consume response body to ensure proper cleanup
+                        try {
+                            getResponse.body<ByteReadChannel>()
+                        } catch (e: Exception) {
+                            // Ignore errors when consuming response body
+                        }
+                    } else {
+                        logger.debug("GET request failed with status ${getResponse.status.value}, cannot determine file size")
+                        // Consume response body even on failure
+                        try {
+                            getResponse.body<ByteReadChannel>()
+                        } catch (e: Exception) {
+                            // Ignore errors when consuming response body
+                        }
+                        return null
+                    }
+                } catch (e: Exception) {
+                    logger.debug("GET request failed: ${e.message}, cannot determine file size")
+                    return null
                 }
             }
             
-            val contentLength = headResponse.headers["Content-Length"]?.toLongOrNull()
             if (contentLength == null || contentLength <= LAST_CHUNK_SIZE) {
                 // File is too small or size unknown, skip
                 return null
