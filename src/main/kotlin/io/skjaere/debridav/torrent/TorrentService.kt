@@ -354,6 +354,14 @@ class TorrentService(
     fun getTorrentByHash(hash: TorrentHash): Torrent? {
         return torrentRepository.getByHashIgnoreCase(hash.hash)
     }
+    
+    /**
+     * Gets a torrent by hash string directly (without TorrentHash wrapper).
+     * This is useful for hashes that may not be 40 characters (e.g., numeric hashes from hashCode().toString()).
+     */
+    fun getTorrentByHashString(hash: String): Torrent? {
+        return torrentRepository.getByHashIgnoreCase(hash)
+    }
 
     @Transactional
     fun deleteTorrentByHash(hash: String) {

@@ -299,7 +299,8 @@ class QBittorrentEmulationController(
         hashes.forEach { hash ->
             try {
                 // Get torrent details before deletion for enhanced logging
-                val torrent = torrentService.getTorrentByHash(TorrentHash(hash))
+                // Use getTorrentByHashString to avoid TorrentHash validation (supports any hash length)
+                val torrent = torrentService.getTorrentByHashString(hash)
                 if (torrent != null) {
                     val torrentName = torrent.name ?: "unknown"
                     val fileCount = torrent.files.size
