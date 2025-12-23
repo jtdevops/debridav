@@ -88,7 +88,15 @@ class VideoMetadataExtractor(
         
         return try {
             // Resolve redirects first (FFprobe may not handle redirects with custom headers properly)
-            val finalUrl = resolveRedirectUrl(url) ?: url
+            val redirectUrl = resolveRedirectUrl(url)
+            val finalUrl = redirectUrl ?: url
+            
+            if (redirectUrl != null) {
+                logger.debug("Using resolved redirect URL for FFprobe: originalUrl={}, redirectUrl={}", 
+                    url.take(100), redirectUrl.take(100))
+            } else {
+                logger.debug("No redirect found, using original URL for FFprobe: {}", url.take(100))
+            }
             
             // Pass URL directly to FFprobe - it will read metadata without downloading the entire file
             val metadata = probeUrlWithFfprobe(finalUrl)
@@ -144,10 +152,15 @@ class VideoMetadataExtractor(
                     logger.debug("Resolved redirect URL: originalUrl={}, redirectUrl={}", url.take(100), redirectUrl.take(100))
                     redirectUrl
                 } else {
+                    logger.debug("Redirect response (status ${response.status.value}) but no Location header for URL: {}", url.take(100))
                     null
                 }
+            } else if (!response.status.isSuccess()) {
+                // Log non-success status codes (like 551) for debugging
+                logger.debug("URL returned non-success status ${response.status.value}, will try original URL with FFprobe: {}", url.take(100))
+                null
             } else {
-                null // No redirect
+                null // No redirect, URL is accessible
             }
         } catch (e: Exception) {
             logger.debug("Failed to resolve redirect URL: ${e.message}")
@@ -343,13 +356,14 @@ class VideoMetadataExtractor(
             var process: Process? = null
             try {
                 // FFprobe can read directly from URLs with custom headers
-                // Use -read_intervals to limit data transfer (though FFprobe is smart about reading just headers)
+                // Using -v error to show errors while keeping output minimal
+                // FFprobe is smart about reading only necessary metadata without downloading the entire file
                 process = ProcessBuilder(
                     iptvConfigurationProperties.ffprobePath,
-                    "-v", "quiet",
-                    "-print_format", "json",
+                    "-v", "error",
                     "-show_format",
                     "-show_streams",
+                    "-print_format", "json",
                     "-headers", "User-Agent: ${iptvConfigurationProperties.userAgent}",
                     url
                 ).redirectErrorStream(true).start()
