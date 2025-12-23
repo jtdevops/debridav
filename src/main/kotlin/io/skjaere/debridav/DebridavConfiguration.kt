@@ -1,6 +1,7 @@
 package io.skjaere.debridav
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.ktor.client.HttpClient
@@ -80,6 +81,7 @@ class DebridavConfiguration {
     @Primary
     fun objectMapper(): ObjectMapper = jacksonObjectMapper().apply {
         registerModule(JavaTimeModule())
+        configure(SerializationFeature.INDENT_OUTPUT, true)
     }
 
     @Bean
