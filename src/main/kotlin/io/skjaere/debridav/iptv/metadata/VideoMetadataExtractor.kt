@@ -74,41 +74,146 @@ class VideoMetadataExtractor(
     /**
      * Extracts video metadata (resolution, codec, file size) from a media file URL.
      * Uses FFprobe to read directly from the URL instead of downloading chunks.
-     * Returns null if extraction fails or FFprobe is not available.
+     * Falls back to HTTP-based file size extraction if FFprobe fails.
+     * Always attempts to extract file size, even if other metadata extraction fails.
+     * Returns null only if both FFprobe and HTTP file size extraction fail.
      */
     suspend fun extractVideoMetadata(url: String): VideoMetadata? {
         if (!iptvConfigurationProperties.metadataEnhancementEnabled) {
             return null
         }
         
-        if (!ffprobeAvailable) {
-            logger.debug("Skipping video metadata extraction - FFprobe not available")
-            return null
+        // Resolve redirects first (needed for both FFprobe and HTTP file size extraction)
+        val redirectUrl = resolveRedirectUrl(url)
+        val finalUrl = redirectUrl ?: url
+        
+        if (redirectUrl != null) {
+            logger.debug("Using resolved redirect URL: originalUrl={}, redirectUrl={}", 
+                url.take(100), redirectUrl.take(100))
+        } else {
+            logger.debug("No redirect found, using original URL: {}", url.take(100))
         }
         
+        // Try FFprobe first if available
+        var metadata: VideoMetadata? = null
+        if (ffprobeAvailable) {
+            try {
+                metadata = probeUrlWithFfprobe(finalUrl)
+                if (metadata != null && metadata.hasVideoInfo()) {
+                    logger.debug("Successfully extracted video metadata from URL using FFprobe")
+                    // If FFprobe succeeded but didn't get file size, try HTTP fallback
+                    if (metadata.fileSize == null) {
+                        val fileSize = extractFileSizeViaHttp(finalUrl)
+                        if (fileSize != null) {
+                            logger.debug("Extracted file size via HTTP fallback: $fileSize bytes")
+                            metadata = metadata.copy(fileSize = fileSize)
+                        }
+                    }
+                    return metadata
+                }
+            } catch (e: Exception) {
+                logger.debug("FFprobe extraction failed: ${e.message}")
+            }
+        } else {
+            logger.debug("FFprobe not available, will try HTTP-based file size extraction")
+        }
+        
+        // FFprobe failed or not available - try to extract at least file size via HTTP
+        val fileSize = extractFileSizeViaHttp(finalUrl)
+        if (fileSize != null) {
+            logger.debug("Extracted file size via HTTP: $fileSize bytes (video metadata extraction failed)")
+            // Return metadata with only file size
+            return VideoMetadata(
+                width = null,
+                height = null,
+                codecName = null,
+                fileSize = fileSize
+            )
+        }
+        
+        logger.debug("Could not extract video metadata or file size from URL")
+        return null
+    }
+    
+    /**
+     * Extracts file size from a URL using HTTP HEAD or GET with Range header.
+     * Tries HEAD first, then falls back to GET with Range: bytes=0-0.
+     * Extracts file size from Content-Range or Content-Length headers.
+     * Returns null if file size cannot be determined.
+     */
+    private suspend fun extractFileSizeViaHttp(url: String): Long? {
         return try {
-            // Resolve redirects first (FFprobe may not handle redirects with custom headers properly)
-            val redirectUrl = resolveRedirectUrl(url)
-            val finalUrl = redirectUrl ?: url
-            
-            if (redirectUrl != null) {
-                logger.debug("Using resolved redirect URL for FFprobe: originalUrl={}, redirectUrl={}", 
-                    url.take(100), redirectUrl.take(100))
-            } else {
-                logger.debug("No redirect found, using original URL for FFprobe: {}", url.take(100))
+            // Try HEAD request first (more efficient)
+            try {
+                val headResponse = httpClient.head(url) {
+                    headers {
+                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    }
+                    timeout {
+                        requestTimeoutMillis = 5000
+                        connectTimeoutMillis = 2000
+                    }
+                }
+                
+                if (headResponse.status.isSuccess()) {
+                    val contentLength = headResponse.headers["Content-Length"]?.toLongOrNull()
+                    if (contentLength != null && contentLength > 0) {
+                        logger.debug("Extracted file size via HEAD request: $contentLength bytes")
+                        return contentLength
+                    }
+                }
+            } catch (e: Exception) {
+                logger.debug("HEAD request failed: ${e.message}, falling back to GET")
             }
             
-            // Pass URL directly to FFprobe - it will read metadata without downloading the entire file
-            val metadata = probeUrlWithFfprobe(finalUrl)
-            if (metadata != null && metadata.hasVideoInfo()) {
-                logger.debug("Successfully extracted video metadata from URL")
-                return metadata
+            // Fallback to GET with Range header
+            val getResponse = httpClient.get(url) {
+                headers {
+                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    append(HttpHeaders.Range, "bytes=0-0")
+                }
+                timeout {
+                    requestTimeoutMillis = 5000
+                    connectTimeoutMillis = 2000
+                }
             }
             
-            logger.debug("Could not extract video metadata from URL")
+            if (getResponse.status.isSuccess()) {
+                // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
+                val contentRange = getResponse.headers["Content-Range"]
+                if (contentRange != null) {
+                    val rangeRegex = Regex("bytes\\s+\\d+-\\d+/(\\d+)")
+                    val matchResult = rangeRegex.find(contentRange)
+                    val totalSize = matchResult?.groupValues?.get(1)?.toLongOrNull()
+                    if (totalSize != null && totalSize > 0) {
+                        logger.debug("Extracted file size via GET Content-Range: $totalSize bytes")
+                        // Consume response body
+                        try {
+                            getResponse.body<ByteReadChannel>()
+                        } catch (e: Exception) {
+                            // Ignore errors when consuming response body
+                        }
+                        return totalSize
+                    }
+                }
+                
+                // Fallback to Content-Length header
+                val contentLength = getResponse.headers["Content-Length"]?.toLongOrNull()
+                // Consume response body
+                try {
+                    getResponse.body<ByteReadChannel>()
+                } catch (e: Exception) {
+                    // Ignore errors when consuming response body
+                }
+                if (contentLength != null && contentLength > 0) {
+                    logger.debug("Extracted file size via GET Content-Length: $contentLength bytes")
+                    return contentLength
+                }
+            }
+            
             null
         } catch (e: Exception) {
-            logger.warn("Failed to extract video metadata from URL: ${e.message}", e)
+            logger.debug("Failed to extract file size via HTTP: ${e.message}")
             null
         }
     }
@@ -571,6 +676,10 @@ class VideoMetadataExtractor(
     ) {
         fun hasVideoInfo(): Boolean {
             return width != null && height != null
+        }
+        
+        fun hasFileSize(): Boolean {
+            return fileSize != null && fileSize > 0
         }
     }
     

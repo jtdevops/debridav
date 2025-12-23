@@ -53,19 +53,25 @@ class MetadataEnhancer(
         
         logger.debug("Extracting video metadata from movie URL: ${movieUrl.take(100)}")
         
-        // Extract video metadata
+        // Extract video metadata (always attempts to get file size, even if FFprobe fails)
         val videoMetadata = videoMetadataExtractor.extractVideoMetadata(movieUrl)
-        if (videoMetadata == null || !videoMetadata.hasVideoInfo()) {
-            logger.debug("Could not extract video metadata from movie file")
+        if (videoMetadata == null) {
+            logger.debug("Could not extract video metadata or file size from movie file")
             return false
         }
         
-        // Update response_json
-        val updatedJson = updateMovieResponseJson(metadata.responseJson, videoMetadata)
-        if (updatedJson != null) {
-            metadata.responseJson = updatedJson
-            logger.info("Enhanced movie metadata with video info: width=${videoMetadata.width}, height=${videoMetadata.height}, codec=${videoMetadata.codecName}, fileSize=${videoMetadata.fileSize}")
-            return true
+        // Update response_json if we have at least file size or video info
+        if (videoMetadata.hasFileSize() || videoMetadata.hasVideoInfo()) {
+            val updatedJson = updateMovieResponseJson(metadata.responseJson, videoMetadata)
+            if (updatedJson != null) {
+                metadata.responseJson = updatedJson
+                if (videoMetadata.hasVideoInfo()) {
+                    logger.info("Enhanced movie metadata with video info: width=${videoMetadata.width}, height=${videoMetadata.height}, codec=${videoMetadata.codecName}, fileSize=${videoMetadata.fileSize}")
+                } else if (videoMetadata.hasFileSize()) {
+                    logger.info("Enhanced movie metadata with file size: fileSize=${videoMetadata.fileSize} (video metadata extraction failed)")
+                }
+                return true
+            }
         }
         
         return false
@@ -107,19 +113,25 @@ class MetadataEnhancer(
         
         logger.debug("Extracting video metadata from reference episode URL: ${episodeUrl.take(100)}")
         
-        // Extract video metadata
+        // Extract video metadata (always attempts to get file size, even if FFprobe fails)
         val videoMetadata = videoMetadataExtractor.extractVideoMetadata(episodeUrl)
-        if (videoMetadata == null || !videoMetadata.hasVideoInfo()) {
-            logger.debug("Could not extract video metadata from episode file")
+        if (videoMetadata == null) {
+            logger.debug("Could not extract video metadata or file size from episode file")
             return false
         }
         
-        // Update response_json for the reference episode
-        val updatedJson = updateSeriesResponseJson(metadata.responseJson, referenceEpisode.id, videoMetadata)
-        if (updatedJson != null) {
-            metadata.responseJson = updatedJson
-            logger.info("Enhanced series metadata with video info from S01E01: width=${videoMetadata.width}, height=${videoMetadata.height}, codec=${videoMetadata.codecName}, fileSize=${videoMetadata.fileSize}")
-            return true
+        // Update response_json if we have at least file size or video info
+        if (videoMetadata.hasFileSize() || videoMetadata.hasVideoInfo()) {
+            val updatedJson = updateSeriesResponseJson(metadata.responseJson, referenceEpisode.id, videoMetadata)
+            if (updatedJson != null) {
+                metadata.responseJson = updatedJson
+                if (videoMetadata.hasVideoInfo()) {
+                    logger.info("Enhanced series metadata with video info from S01E01: width=${videoMetadata.width}, height=${videoMetadata.height}, codec=${videoMetadata.codecName}, fileSize=${videoMetadata.fileSize}")
+                } else if (videoMetadata.hasFileSize()) {
+                    logger.info("Enhanced series metadata with file size from S01E01: fileSize=${videoMetadata.fileSize} (video metadata extraction failed)")
+                }
+                return true
+            }
         }
         
         return false
