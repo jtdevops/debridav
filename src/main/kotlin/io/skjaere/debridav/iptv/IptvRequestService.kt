@@ -1769,7 +1769,25 @@ class IptvRequestService(
             val movieInfo = if (cachedMetadata != null) {
                 // Parse from cached JSON response
                 logger.debug("Parsing movie metadata from cached JSON response for movie ${entity.contentId}")
-                parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                var parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                
+                // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
+                if (iptvConfigurationProperties.metadataEnhancementEnabled && parsedMovieInfo != null) {
+                    try {
+                        val enhanced = metadataEnhancer.enhanceMovieMetadata(cachedMetadata, parsedMovieInfo, providerConfig)
+                        if (enhanced) {
+                            iptvMovieMetadataRepository.save(cachedMetadata)
+                            logger.debug("Enhanced cached movie metadata saved for movie ${entity.contentId}")
+                            // Re-parse the enhanced JSON to get updated movie info
+                            parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                        }
+                    } catch (e: Exception) {
+                        logger.warn("Failed to enhance cached movie metadata for movie ${entity.contentId}: ${e.message}", e)
+                        // Continue with original metadata - enhancement failure is non-blocking
+                    }
+                }
+                
+                parsedMovieInfo
             } else {
                 // No cache, fetch and store
                 logger.debug("No cache found for movie ${entity.contentId}, fetching from API")
@@ -1876,7 +1894,25 @@ class IptvRequestService(
             val (seriesInfo, episodes) = if (cachedMetadata != null) {
                 // Parse from cached JSON response
                 logger.debug("Parsing series metadata from cached JSON response for series ${entity.contentId}")
-                parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                var parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                
+                // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
+                if (iptvConfigurationProperties.metadataEnhancementEnabled && parsedResult.second.isNotEmpty()) {
+                    try {
+                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(cachedMetadata, parsedResult.second, providerConfig)
+                        if (enhanced) {
+                            iptvSeriesMetadataRepository.save(cachedMetadata)
+                            logger.debug("Enhanced cached series metadata saved for series ${entity.contentId}")
+                            // Re-parse the enhanced JSON to get updated series info and episodes
+                            parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                        }
+                    } catch (e: Exception) {
+                        logger.warn("Failed to enhance cached series metadata for series ${entity.contentId}: ${e.message}", e)
+                        // Continue with original metadata - enhancement failure is non-blocking
+                    }
+                }
+                
+                parsedResult
             } else {
                 // No cache, fetch and store
                 logger.debug("No cache found for series ${entity.contentId}, fetching from API")
