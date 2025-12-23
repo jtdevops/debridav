@@ -73,6 +73,7 @@ class VideoMetadataExtractor(
     
     /**
      * Extracts video metadata (resolution, codec, file size) from a media file URL.
+     * Uses FFprobe to read directly from the URL instead of downloading chunks.
      * Returns null if extraction fails or FFprobe is not available.
      */
     suspend fun extractVideoMetadata(url: String): VideoMetadata? {
@@ -86,31 +87,70 @@ class VideoMetadataExtractor(
         }
         
         return try {
-            // Try first 2MB
-            val firstChunk = downloadChunk(url, 0, FIRST_CHUNK_SIZE)
-            if (firstChunk != null) {
-                val metadata = probeWithFfprobe(firstChunk)
-                if (metadata != null && metadata.hasVideoInfo()) {
-                    logger.debug("Successfully extracted video metadata from first chunk")
-                    return metadata
-                }
+            // Resolve redirects first (FFprobe may not handle redirects with custom headers properly)
+            val finalUrl = resolveRedirectUrl(url) ?: url
+            
+            // Pass URL directly to FFprobe - it will read metadata without downloading the entire file
+            val metadata = probeUrlWithFfprobe(finalUrl)
+            if (metadata != null && metadata.hasVideoInfo()) {
+                logger.debug("Successfully extracted video metadata from URL")
+                return metadata
             }
             
-            // If first chunk didn't work, try last 2MB (for MP4 with moov at end)
-            logger.debug("First chunk did not contain video metadata, trying last chunk")
-            val lastChunk = downloadLastChunk(url)
-            if (lastChunk != null) {
-                val metadata = probeWithFfprobe(lastChunk)
-                if (metadata != null && metadata.hasVideoInfo()) {
-                    logger.debug("Successfully extracted video metadata from last chunk")
-                    return metadata
-                }
-            }
-            
-            logger.debug("Could not extract video metadata from either chunk")
+            logger.debug("Could not extract video metadata from URL")
             null
         } catch (e: Exception) {
             logger.warn("Failed to extract video metadata from URL: ${e.message}", e)
+            null
+        }
+    }
+    
+    /**
+     * Resolves redirects for a URL by following Location headers.
+     * Returns the final URL after following redirects, or the original URL if no redirects.
+     */
+    private suspend fun resolveRedirectUrl(url: String): String? {
+        return try {
+            val response = httpClient.get(url) {
+                headers {
+                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                    append(HttpHeaders.Range, "bytes=0-0") // Minimal request to check for redirects
+                }
+                timeout {
+                    requestTimeoutMillis = 5000
+                    connectTimeoutMillis = 2000
+                }
+            }
+            
+            if (response.status.value in 300..399) {
+                val redirectLocation = response.headers["Location"]
+                if (redirectLocation != null) {
+                    // Consume response body to ensure proper cleanup
+                    try {
+                        response.body<ByteReadChannel>()
+                    } catch (e: Exception) {
+                        // Ignore errors when consuming redirect body
+                    }
+                    
+                    // Resolve redirect URL (handle relative redirects)
+                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                        redirectLocation
+                    } else {
+                        // Relative redirect - construct absolute URL
+                        val originalUri = URI(url)
+                        originalUri.resolve(redirectLocation).toString()
+                    }
+                    
+                    logger.debug("Resolved redirect URL: originalUrl={}, redirectUrl={}", url.take(100), redirectUrl.take(100))
+                    redirectUrl
+                } else {
+                    null
+                }
+            } else {
+                null // No redirect
+            }
+        } catch (e: Exception) {
+            logger.debug("Failed to resolve redirect URL: ${e.message}")
             null
         }
     }
@@ -290,9 +330,80 @@ class VideoMetadataExtractor(
     }
     
     /**
-     * Probes video metadata using FFprobe with data from stdin.
+     * Probes video metadata using FFprobe by reading directly from a URL.
+     * FFprobe will read only the necessary metadata without downloading the entire file.
      * Thread-safe: Each call creates a new process.
      */
+    private suspend fun probeUrlWithFfprobe(url: String): VideoMetadata? {
+        if (!ffprobeAvailable) {
+            return null
+        }
+        
+        return withContext(Dispatchers.IO) {
+            var process: Process? = null
+            try {
+                // FFprobe can read directly from URLs with custom headers
+                // Use -read_intervals to limit data transfer (though FFprobe is smart about reading just headers)
+                process = ProcessBuilder(
+                    iptvConfigurationProperties.ffprobePath,
+                    "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_format",
+                    "-show_streams",
+                    "-headers", "User-Agent: ${iptvConfigurationProperties.userAgent}",
+                    url
+                ).redirectErrorStream(true).start()
+                
+                // Read output with timeout
+                val output = withTimeout(iptvConfigurationProperties.ffprobeTimeout.toMillis()) {
+                    process.inputStream.bufferedReader().readText()
+                }
+                
+                // Wait for process to complete (with timeout)
+                val completed = process.waitFor(iptvConfigurationProperties.ffprobeTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                
+                if (!completed) {
+                    logger.warn("FFprobe process timed out after ${iptvConfigurationProperties.ffprobeTimeout}")
+                    process.destroyForcibly()
+                    return@withContext null
+                }
+                
+                val exitCode = process.exitValue()
+                if (exitCode != 0) {
+                    // Log error output if available (redirectErrorStream(true) sends stderr to stdout)
+                    val errorOutput = output.takeIf { it.isNotBlank() } ?: "no error output"
+                    logger.debug("FFprobe exited with code $exitCode. Error output: ${errorOutput.take(200)}")
+                    return@withContext null
+                }
+                
+                // Parse JSON output
+                val ffprobeOutput = json.decodeFromString<FfprobeOutput>(output)
+                return@withContext extractVideoMetadata(ffprobeOutput)
+            } catch (e: Exception) {
+                logger.debug("FFprobe execution failed for URL: ${e.message}")
+                return@withContext null
+            } finally {
+                // Ensure process is cleaned up
+                process?.let {
+                    try {
+                        if (it.isAlive) {
+                            it.destroyForcibly()
+                            it.waitFor(1, TimeUnit.SECONDS)
+                        }
+                    } catch (e: Exception) {
+                        // Ignore cleanup errors
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Probes video metadata using FFprobe with data from stdin.
+     * Thread-safe: Each call creates a new process.
+     * @deprecated Use probeUrlWithFfprobe instead for better efficiency
+     */
+    @Deprecated("Use probeUrlWithFfprobe instead", ReplaceWith("probeUrlWithFfprobe(url)"))
     private suspend fun probeWithFfprobe(data: ByteArray): VideoMetadata? {
         if (!ffprobeAvailable) {
             return null
