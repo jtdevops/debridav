@@ -311,9 +311,20 @@ class VideoMetadataExtractor(
                 ).redirectErrorStream(true).start()
                 
                 // Write data to stdin
-                process.outputStream.use { outputStream ->
-                    outputStream.write(data)
-                    outputStream.flush()
+                // Note: FFprobe may close stdin early if it encounters an error, causing a broken pipe
+                // This is expected behavior and should be handled gracefully
+                try {
+                    process.outputStream.use { outputStream ->
+                        outputStream.write(data)
+                        outputStream.flush()
+                    }
+                } catch (e: java.io.IOException) {
+                    // Broken pipe is expected if FFprobe closes stdin early (e.g., invalid data)
+                    if (e.message?.contains("Broken pipe", ignoreCase = true) == true) {
+                        logger.debug("FFprobe closed stdin early (broken pipe), likely invalid or unparseable data")
+                    } else {
+                        throw e // Re-throw other IO exceptions
+                    }
                 }
                 
                 // Read output with timeout
@@ -341,6 +352,14 @@ class VideoMetadataExtractor(
                 // Parse JSON output
                 val ffprobeOutput = json.decodeFromString<FfprobeOutput>(output)
                 return@withContext extractVideoMetadata(ffprobeOutput)
+            } catch (e: java.io.IOException) {
+                // Handle broken pipe and other IO exceptions gracefully
+                if (e.message?.contains("Broken pipe", ignoreCase = true) == true) {
+                    logger.debug("FFprobe broken pipe - data may be invalid or unparseable")
+                } else {
+                    logger.debug("FFprobe IO error: ${e.message}")
+                }
+                return@withContext null
             } catch (e: Exception) {
                 logger.warn("FFprobe execution failed: ${e.message}", e)
                 return@withContext null
