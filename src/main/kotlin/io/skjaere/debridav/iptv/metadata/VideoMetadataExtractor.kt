@@ -18,6 +18,7 @@ import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.io.InputStream
+import java.net.URI
 import java.util.concurrent.TimeUnit
 import jakarta.annotation.PostConstruct
 
@@ -116,6 +117,7 @@ class VideoMetadataExtractor(
     
     /**
      * Downloads a chunk of the file using HTTP Range request.
+     * Handles redirects manually to preserve Range headers (HttpRedirect plugin may not preserve them).
      */
     private suspend fun downloadChunk(url: String, start: Long, size: Long): ByteArray? {
         return try {
@@ -130,9 +132,55 @@ class VideoMetadataExtractor(
                 }
             }
             
-            // Accept both 200 (OK) and 206 (Partial Content) as success
-            // Some servers return 200 even for Range requests
-            if (response.status.value == 200 || response.status.value == 206) {
+            // Handle redirects manually (HttpRedirect plugin may not preserve Range headers)
+            if (response.status.value in 300..399) {
+                val redirectLocation = response.headers["Location"]
+                if (redirectLocation != null) {
+                    // Consume redirect response body to ensure proper cleanup
+                    try {
+                        response.body<ByteReadChannel>()
+                    } catch (e: Exception) {
+                        // Ignore errors when consuming redirect body
+                    }
+                    
+                    // Resolve redirect URL (handle relative redirects)
+                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
+                        redirectLocation
+                    } else {
+                        // Relative redirect - construct absolute URL
+                        val originalUri = java.net.URI(url)
+                        originalUri.resolve(redirectLocation).toString()
+                    }
+                    
+                    logger.debug("Following redirect for range request: originalUrl={}, redirectUrl={}, range=bytes=$start-${start + size - 1}", 
+                        url.take(100), redirectUrl.take(100))
+                    
+                    // Make new request to redirect URL with Range header preserved
+                    val redirectResponse = httpClient.get(redirectUrl) {
+                        headers {
+                            append(HttpHeaders.Range, "bytes=$start-${start + size - 1}")
+                            append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
+                        }
+                        timeout {
+                            requestTimeoutMillis = 10000
+                            connectTimeoutMillis = 5000
+                        }
+                    }
+                    
+                    // Accept both 200 (OK) and 206 (Partial Content) as success
+                    if (redirectResponse.status.value == 200 || redirectResponse.status.value == 206) {
+                        redirectResponse.body<ByteArray>()
+                    } else {
+                        logger.debug("HTTP redirect request failed with status ${redirectResponse.status.value} for range bytes=$start-${start + size - 1}")
+                        null
+                    }
+                } else {
+                    logger.debug("HTTP redirect response missing Location header, status ${response.status.value}")
+                    null
+                }
+            } else if (response.status.value == 200 || response.status.value == 206) {
+                // Accept both 200 (OK) and 206 (Partial Content) as success
+                // Some servers return 200 even for Range requests
                 response.body<ByteArray>()
             } else {
                 logger.debug("HTTP request failed with status ${response.status.value} for range bytes=$start-${start + size - 1}")
