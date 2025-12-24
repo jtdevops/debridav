@@ -90,20 +90,23 @@ class VideoMetadataExtractor(
         }
         
         // Resolve redirects first (needed for both FFprobe and HTTP file size extraction)
+        // FFprobe cannot follow redirects automatically, so we must manually resolve them
         val redirectUrl = resolveRedirectUrl(url)
         val finalUrl = redirectUrl ?: url
         
         if (redirectUrl != null) {
-            logger.debug("Using resolved redirect URL: originalUrl={}, redirectUrl={}", 
+            logger.debug("Resolved redirect chain for metadata extraction: originalUrl={}, finalUrl={}", 
                 url.take(100), redirectUrl.take(100))
         } else {
-            logger.debug("No redirect found, using original URL: {}", url.take(100))
+            logger.debug("No redirect found, using original URL for metadata extraction: {}", url.take(100))
         }
         
         // Try FFprobe first if enabled and available (for resolution/codec)
+        // IMPORTANT: FFprobe cannot follow redirects, so we must pass the final resolved URL
         var metadata: VideoMetadata? = null
         if (iptvConfigurationProperties.ffprobeEnabled && ffprobeAvailable) {
             try {
+                logger.debug("Attempting FFprobe extraction on final URL: {}", finalUrl.take(100))
                 metadata = probeUrlWithFfprobe(finalUrl)
                 if (metadata != null && metadata.hasVideoInfo()) {
                     logger.debug("Successfully extracted video metadata from URL using FFprobe")
@@ -295,13 +298,19 @@ class VideoMetadataExtractor(
                 }
             } catch (e: Exception) {
                 logger.debug("Failed to resolve redirect URL at step $redirectCount: ${e.message}")
+                // If we've already followed some redirects, return the current URL so FFprobe can try it
+                if (redirectCount > 0) {
+                    logger.debug("Returning partially resolved URL after error: {}", currentUrl.take(100))
+                    return currentUrl
+                }
                 return null
             }
         }
         
-        // Too many redirects
-        logger.warn("Maximum redirect limit ($maxRedirects) reached for URL: {}", url.take(100))
-        return null
+        // Max redirects reached - return the last URL we reached so FFprobe can try it
+        logger.warn("Maximum redirect limit ($maxRedirects) reached for URL: {}, returning last URL: {}", 
+            url.take(100), currentUrl.take(100))
+        return currentUrl
     }
     
     /**
@@ -492,8 +501,10 @@ class VideoMetadataExtractor(
             var process: Process? = null
             try {
                 // FFprobe can read directly from URLs with custom headers
+                // IMPORTANT: FFprobe does NOT follow HTTP redirects automatically, so we must pass the final resolved URL
                 // Using -v error to show errors while keeping output minimal
                 // FFprobe is smart about reading only necessary metadata without downloading the entire file
+                logger.debug("Executing FFprobe on URL (redirects should already be resolved): {}", url.take(100))
                 process = ProcessBuilder(
                     iptvConfigurationProperties.ffprobePath,
                     "-v", "error",

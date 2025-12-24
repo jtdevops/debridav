@@ -759,6 +759,7 @@ class IptvRequestService(
             logger.debug("Cached raw JSON response for movie $vodId")
             
             // Enhance metadata if video info is missing
+            var finalMovieInfo = movieInfo
             if (iptvConfigurationProperties.metadataEnhancementEnabled) {
                 try {
                     runBlocking {
@@ -766,6 +767,11 @@ class IptvRequestService(
                         if (enhanced) {
                             iptvMovieMetadataRepository.save(metadata)
                             logger.debug("Enhanced movie metadata saved for movie $vodId")
+                            // Re-parse the enhanced JSON to get updated movie info with file size
+                            val enhancedMovieInfo = parseMovieInfoFromJson(providerConfig, vodId, metadata.responseJson)
+                            if (enhancedMovieInfo != null) {
+                                finalMovieInfo = enhancedMovieInfo
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -773,6 +779,8 @@ class IptvRequestService(
                     // Continue with original metadata - enhancement failure is non-blocking
                 }
             }
+            
+            return finalMovieInfo
         }
         
         return movieInfo
@@ -1780,6 +1788,13 @@ class IptvRequestService(
                             logger.debug("Enhanced cached movie metadata saved for movie ${entity.contentId}")
                             // Re-parse the enhanced JSON to get updated movie info
                             parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                            // Debug: verify file size is in the re-parsed data
+                            parsedMovieInfo?.info?.video?.tags?.let { tags ->
+                                logger.debug("After enhancement re-parse, video tags for movie ${entity.contentId}: ${tags.keys.joinToString(", ")}")
+                                tags["NUMBER_OF_BYTES"]?.let { fileSizeStr ->
+                                    logger.debug("Found NUMBER_OF_BYTES in tags after re-parse for movie ${entity.contentId}: $fileSizeStr")
+                                } ?: logger.debug("NUMBER_OF_BYTES not found in tags after re-parse for movie ${entity.contentId}")
+                            } ?: logger.debug("No video tags found after re-parse for movie ${entity.contentId}")
                         }
                     } catch (e: Exception) {
                         logger.warn("Failed to enhance cached movie metadata for movie ${entity.contentId}: ${e.message}", e)
@@ -1835,6 +1850,12 @@ class IptvRequestService(
                     }
                     
                     // Extract file size from video tags (NUMBER_OF_BYTES) - most accurate
+                    // Debug: log tags to see what's available
+                    if (videoInfo.tags != null) {
+                        logger.debug("Video tags available for movie ${entity.contentId}: ${videoInfo.tags.keys.joinToString(", ")}")
+                    } else {
+                        logger.debug("No video tags found for movie ${entity.contentId}")
+                    }
                     val fileSize = extractFileSizeFromVideoTags(videoInfo.tags)
                     if (fileSize != null) {
                         entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = fileSize
@@ -2478,11 +2499,14 @@ class IptvRequestService(
             } else {
                 // For movies, try to use file size from metadata if available
                 if (entity.contentType == ContentType.MOVIE) {
-                    val movieFileSize = entityMovieFileSizes["${entity.providerName}_${entity.contentId}"]
+                    val mapKey = "${entity.providerName}_${entity.contentId}"
+                    val movieFileSize = entityMovieFileSizes[mapKey]
                     if (movieFileSize != null && movieFileSize > 0) {
                         logger.debug("Using file size from movie metadata for movie ${entity.contentId}: ${movieFileSize / 1_000_000}MB")
                         movieFileSize
                     } else {
+                        // Debug: log what's in the map
+                        logger.debug("File size not found in entityMovieFileSizes for movie ${entity.contentId} (key: $mapKey). Map contains ${entityMovieFileSizes.size} entries. Available keys: ${entityMovieFileSizes.keys.take(5).joinToString(", ")}")
                         // Fallback to default estimate
                         estimateIptvSize(entity.contentType)
                     }
