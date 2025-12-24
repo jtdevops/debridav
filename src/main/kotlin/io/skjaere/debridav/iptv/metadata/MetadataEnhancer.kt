@@ -16,6 +16,8 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.time.Duration
+import java.time.Instant
 
 @Service
 class MetadataEnhancer(
@@ -23,6 +25,44 @@ class MetadataEnhancer(
 ) {
     private val logger = LoggerFactory.getLogger(MetadataEnhancer::class.java)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    
+    /**
+     * Reads ffprobe_last_processed timestamp from JSON response root level.
+     * Returns null if not found or invalid.
+     */
+    private fun getFfprobeLastProcessedFromJson(responseJson: String): Instant? {
+        return try {
+            val jsonObject = json.parseToJsonElement(responseJson).jsonObject
+            val lastProcessedStr = jsonObject["ffprobe_last_processed"]?.jsonPrimitive?.content
+            lastProcessedStr?.let { Instant.parse(it) }
+        } catch (e: Exception) {
+            null
+        }
+    }
+    
+    /**
+     * Updates ffprobe_last_processed timestamp in JSON response root level.
+     * Preserves all existing fields and adds/updates ffprobe_last_processed.
+     */
+    private fun updateFfprobeLastProcessedInJson(responseJson: String, timestamp: Instant): String {
+        return try {
+            val jsonObject = json.parseToJsonElement(responseJson).jsonObject
+            val updatedJson = buildJsonObject {
+                // Copy all existing fields
+                jsonObject.forEach { (key, value) ->
+                    if (key != "ffprobe_last_processed") {
+                        put(key, value)
+                    }
+                }
+                // Add or update ffprobe_last_processed
+                put("ffprobe_last_processed", timestamp.toString())
+            }
+            json.encodeToString(JsonObject.serializer(), updatedJson)
+        } catch (e: Exception) {
+            logger.warn("Failed to update ffprobe_last_processed in JSON: ${e.message}", e)
+            responseJson // Return original if update fails
+        }
+    }
     
     /**
      * Enhances movie metadata by extracting video information from the media file.
@@ -44,10 +84,23 @@ class MetadataEnhancer(
             return false
         }
         
+        // Check if we've processed this recently (within 1 hour) - read from JSON
+        val now = Instant.now()
+        val lastProcessed = getFfprobeLastProcessedFromJson(metadata.responseJson)
+        if (lastProcessed != null) {
+            val timeSinceLastProcess = Duration.between(lastProcessed, now)
+            if (timeSinceLastProcess.toHours() < 1) {
+                logger.debug("Movie metadata for ${metadata.movieId} was processed ${timeSinceLastProcess.toMinutes()} minutes ago, skipping FFprobe processing (will retry after 1 hour)")
+                return false
+            }
+        }
+        
         // Build movie URL
         val movieUrl = buildMovieUrl(providerConfig, metadata.movieId, movieInfo)
         if (movieUrl == null) {
             logger.debug("Could not build movie URL for enhancement")
+            // Mark as processed even if URL build fails to prevent repeated attempts
+            metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
             return false
         }
         
@@ -55,6 +108,10 @@ class MetadataEnhancer(
         
         // Extract video metadata (always attempts to get file size, even if FFprobe fails)
         val videoMetadata = videoMetadataExtractor.extractVideoMetadata(movieUrl)
+        
+        // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
+        metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
+        
         if (videoMetadata == null) {
             logger.debug("Could not extract video metadata or file size from movie file")
             return false
@@ -62,9 +119,26 @@ class MetadataEnhancer(
         
         // Update response_json if we have at least file size or video info
         if (videoMetadata.hasFileSize() || videoMetadata.hasVideoInfo()) {
-            val updatedJson = updateMovieResponseJson(metadata.responseJson, videoMetadata)
+            var updatedJson = updateMovieResponseJson(metadata.responseJson, videoMetadata)
             if (updatedJson != null) {
+                // Ensure ffprobe_last_processed is preserved in the updated JSON
+                updatedJson = updateFfprobeLastProcessedInJson(updatedJson, now)
                 metadata.responseJson = updatedJson
+                
+                // Calculate resolution for logging
+                val resolution = videoMetadata.width?.let { width ->
+                    videoMetadata.height?.let { height ->
+                        when {
+                            width >= 1920 || height >= 1080 -> "1080p"
+                            width >= 1280 || height >= 720 -> "720p"
+                            else -> "480p"
+                        }
+                    }
+                } ?: "unknown"
+                
+                // Log final values used for magnet title generation
+                logger.debug("FFprobe processing complete for movie ${metadata.movieId} - Final values for magnet title: fileSize=${videoMetadata.fileSize?.let { "${it / 1_000_000}MB" } ?: "not available"}, resolution=$resolution, codec=${videoMetadata.codecName ?: "not available"}")
+                
                 if (videoMetadata.hasVideoInfo()) {
                     logger.info("Enhanced movie metadata with video info: width=${videoMetadata.width}, height=${videoMetadata.height}, codec=${videoMetadata.codecName}, fileSize=${videoMetadata.fileSize}")
                 } else if (videoMetadata.hasFileSize()) {
@@ -104,10 +178,23 @@ class MetadataEnhancer(
             return false
         }
         
+        // Check if we've processed this recently (within 1 hour) - read from JSON
+        val now = Instant.now()
+        val lastProcessed = getFfprobeLastProcessedFromJson(metadata.responseJson)
+        if (lastProcessed != null) {
+            val timeSinceLastProcess = Duration.between(lastProcessed, now)
+            if (timeSinceLastProcess.toHours() < 1) {
+                logger.debug("Series metadata for ${metadata.seriesId} was processed ${timeSinceLastProcess.toMinutes()} minutes ago, skipping FFprobe processing (will retry after 1 hour)")
+                return false
+            }
+        }
+        
         // Build episode URL
         val episodeUrl = buildEpisodeUrl(providerConfig, referenceEpisode)
         if (episodeUrl == null) {
             logger.debug("Could not build episode URL for enhancement")
+            // Mark as processed even if URL build fails to prevent repeated attempts
+            metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
             return false
         }
         
@@ -115,6 +202,10 @@ class MetadataEnhancer(
         
         // Extract video metadata (always attempts to get file size, even if FFprobe fails)
         val videoMetadata = videoMetadataExtractor.extractVideoMetadata(episodeUrl)
+        
+        // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
+        metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
+        
         if (videoMetadata == null) {
             logger.debug("Could not extract video metadata or file size from episode file")
             return false
@@ -122,9 +213,26 @@ class MetadataEnhancer(
         
         // Update response_json if we have at least file size or video info
         if (videoMetadata.hasFileSize() || videoMetadata.hasVideoInfo()) {
-            val updatedJson = updateSeriesResponseJson(metadata.responseJson, referenceEpisode.id, videoMetadata)
+            var updatedJson = updateSeriesResponseJson(metadata.responseJson, referenceEpisode.id, videoMetadata)
             if (updatedJson != null) {
+                // Ensure ffprobe_last_processed is preserved in the updated JSON
+                updatedJson = updateFfprobeLastProcessedInJson(updatedJson, now)
                 metadata.responseJson = updatedJson
+                
+                // Calculate resolution for logging
+                val resolution = videoMetadata.width?.let { width ->
+                    videoMetadata.height?.let { height ->
+                        when {
+                            width >= 1920 || height >= 1080 -> "1080p"
+                            width >= 1280 || height >= 720 -> "720p"
+                            else -> "480p"
+                        }
+                    }
+                } ?: "unknown"
+                
+                // Log final values used for magnet title generation
+                logger.debug("FFprobe processing complete for series ${metadata.seriesId} (S01E01) - Final values for magnet title: fileSize=${videoMetadata.fileSize?.let { "${it / 1_000_000}MB" } ?: "not available"}, resolution=$resolution, codec=${videoMetadata.codecName ?: "not available"}")
+                
                 if (videoMetadata.hasVideoInfo()) {
                     logger.info("Enhanced series metadata with video info from S01E01: width=${videoMetadata.width}, height=${videoMetadata.height}, codec=${videoMetadata.codecName}, fileSize=${videoMetadata.fileSize}")
                 } else if (videoMetadata.hasFileSize()) {

@@ -90,6 +90,30 @@ services:
       - IPTV_INCLUDE_PROVIDER_IN_MAGNET_TITLE=true
       # IPTV Metadata Fetch Batch Size - Number of concurrent metadata fetch requests per batch (default: 5)
       - IPTV_METADATA_FETCH_BATCH_SIZE=${IPTV_METADATA_FETCH_BATCH_SIZE:-5}
+      
+      # IPTV Metadata Enhancement Configuration
+      # Enable metadata enhancement (file size extraction from media files)
+      # File size extraction will always be attempted when enabled, using HTTP methods
+      # Default: true
+      - IPTV_METADATA_ENHANCEMENT_ENABLED=${IPTV_METADATA_ENHANCEMENT_ENABLED:-true}
+      
+      # IPTV FFprobe Configuration
+      # Enable FFprobe for resolution and codec extraction from media files
+      # Requires metadata-enhancement-enabled=true
+      # When disabled, only file size will be extracted via HTTP (resolution/codec will be skipped)
+      # Default: true
+      - IPTV_FFPROBE_ENABLED=${IPTV_FFPROBE_ENABLED:-true}
+      
+      # Path to FFprobe executable
+      # Default: "ffprobe" (assumes ffprobe is in system PATH)
+      # Example: IPTV_FFPROBE_PATH=ffprobe
+      # Example: IPTV_FFPROBE_PATH=/usr/bin/ffprobe
+      - IPTV_FFPROBE_PATH=${IPTV_FFPROBE_PATH:-ffprobe}
+      
+      # FFprobe execution timeout
+      # Format: Duration (e.g., PT30S for 30 seconds, PT60S for 60 seconds)
+      # Default: PT30S (30 seconds)
+      - IPTV_FFPROBE_TIMEOUT=${IPTV_FFPROBE_TIMEOUT:-PT30S}
 
       # - IPTV_USE_LOCAL_RESPONSES=true
       - IPTV_RESPONSE_SAVE_FOLDER=/iptv_cache

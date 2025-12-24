@@ -2476,8 +2476,20 @@ class IptvRequestService(
                     estimateIptvSize(entity.contentType)
                 }
             } else {
-                // For movies or series without episode parameter, use default estimate
-                estimateIptvSize(entity.contentType)
+                // For movies, try to use file size from metadata if available
+                if (entity.contentType == ContentType.MOVIE) {
+                    val movieFileSize = entityMovieFileSizes["${entity.providerName}_${entity.contentId}"]
+                    if (movieFileSize != null && movieFileSize > 0) {
+                        logger.debug("Using file size from movie metadata for movie ${entity.contentId}: ${movieFileSize / 1_000_000}MB")
+                        movieFileSize
+                    } else {
+                        // Fallback to default estimate
+                        estimateIptvSize(entity.contentType)
+                    }
+                } else {
+                    // For series without episode parameter, use default estimate
+                    estimateIptvSize(entity.contentType)
+                }
             }
             
             IptvSearchResult(

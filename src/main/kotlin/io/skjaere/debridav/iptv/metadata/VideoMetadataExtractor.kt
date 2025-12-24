@@ -45,6 +45,12 @@ class VideoMetadataExtractor(
             return
         }
         
+        if (!iptvConfigurationProperties.ffprobeEnabled) {
+            logger.info("FFprobe is disabled in configuration. File size extraction will still work via HTTP.")
+            ffprobeAvailable = false
+            return
+        }
+        
         try {
             val process = ProcessBuilder(
                 iptvConfigurationProperties.ffprobePath,
@@ -63,20 +69,20 @@ class VideoMetadataExtractor(
             } else {
                 ffprobeAvailable = false
                 val exitCode = if (completed) process.exitValue() else -1
-                logger.warn("FFprobe check failed with exit code $exitCode. Metadata enhancement (resolution/codec extraction) will be skipped. File size extraction will still work.")
+                logger.warn("FFprobe check failed with exit code $exitCode. Resolution/codec extraction will be skipped. File size extraction will still work via HTTP.")
             }
         } catch (e: Exception) {
             ffprobeAvailable = false
-            logger.warn("FFprobe is not available on this system (path: '${iptvConfigurationProperties.ffprobePath}'). Metadata enhancement (resolution/codec extraction) will be skipped. File size extraction will still work. Error: ${e.message}")
+            logger.warn("FFprobe is not available on this system (path: '${iptvConfigurationProperties.ffprobePath}'). Resolution/codec extraction will be skipped. File size extraction will still work via HTTP. Error: ${e.message}")
         }
     }
     
     /**
      * Extracts video metadata (resolution, codec, file size) from a media file URL.
-     * Uses FFprobe to read directly from the URL instead of downloading chunks.
-     * Falls back to HTTP-based file size extraction if FFprobe fails.
-     * Always attempts to extract file size, even if other metadata extraction fails.
-     * Returns null only if both FFprobe and HTTP file size extraction fail.
+     * Uses FFprobe for resolution/codec if enabled, always attempts file size extraction via HTTP.
+     * Falls back to HTTP-based file size extraction if FFprobe fails or is disabled.
+     * Always attempts to extract file size if metadataEnhancementEnabled is true.
+     * Returns null only if file size extraction fails.
      */
     suspend fun extractVideoMetadata(url: String): VideoMetadata? {
         if (!iptvConfigurationProperties.metadataEnhancementEnabled) {
@@ -94,9 +100,9 @@ class VideoMetadataExtractor(
             logger.debug("No redirect found, using original URL: {}", url.take(100))
         }
         
-        // Try FFprobe first if available
+        // Try FFprobe first if enabled and available (for resolution/codec)
         var metadata: VideoMetadata? = null
-        if (ffprobeAvailable) {
+        if (iptvConfigurationProperties.ffprobeEnabled && ffprobeAvailable) {
             try {
                 metadata = probeUrlWithFfprobe(finalUrl)
                 if (metadata != null && metadata.hasVideoInfo()) {
@@ -115,13 +121,13 @@ class VideoMetadataExtractor(
                 logger.debug("FFprobe extraction failed: ${e.message}")
             }
         } else {
-            logger.debug("FFprobe not available, will try HTTP-based file size extraction")
+            logger.debug("FFprobe disabled or not available, will try HTTP-based file size extraction")
         }
         
-        // FFprobe failed or not available - try to extract at least file size via HTTP
+        // FFprobe disabled, failed, or not available - try to extract at least file size via HTTP
         val fileSize = extractFileSizeViaHttp(finalUrl)
         if (fileSize != null) {
-            logger.debug("Extracted file size via HTTP: $fileSize bytes (video metadata extraction failed)")
+            logger.debug("Extracted file size via HTTP: $fileSize bytes (FFprobe disabled or video metadata extraction failed)")
             // Return metadata with only file size
             return VideoMetadata(
                 width = null,
@@ -131,7 +137,7 @@ class VideoMetadataExtractor(
             )
         }
         
-        logger.debug("Could not extract video metadata or file size from URL")
+        logger.debug("Could not extract file size from URL")
         return null
     }
     
