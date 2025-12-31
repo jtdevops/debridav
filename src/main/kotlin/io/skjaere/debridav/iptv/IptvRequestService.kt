@@ -1979,7 +1979,14 @@ class IptvRequestService(
     }
     
     fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false): List<IptvSearchResult> {
-        val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
+        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}", title, contentType, isTestRequest)
+        var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
+        
+        // For test requests (connectivity tests), limit to first result early to avoid unnecessary processing
+        if (isTestRequest && results.isNotEmpty()) {
+            results = listOf(results.first())
+            logger.debug("Test request: limiting to first result only (${results.size} result)")
+        }
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
         val requestedSeason = episode?.let { parseSeasonFromEpisode(it) }
@@ -2010,7 +2017,10 @@ class IptvRequestService(
         val entityMovieFileSizes = ConcurrentHashMap<String, Long>() // Key: "${providerName}_${contentId}", Value: file size in bytes
         
         // For movies, fetch metadata to get year, resolution, codec, and file size
-        if (contentType == ContentType.MOVIE) {
+        // IMPORTANT: Skip metadata fetching for test requests (connectivity tests) - we only need to verify IPTV content can be queried.
+        // Note: We may have resolved an IMDb ID to a title in the controller, but we skip fetching other metadata here.
+        logger.debug("Checking movie metadata fetch: contentType={}, isTestRequest={}, shouldSkip={}", contentType, isTestRequest, contentType == ContentType.MOVIE && isTestRequest)
+        if (contentType == ContentType.MOVIE && !isTestRequest) {
             runBlocking {
                 processInBatches(
                     items = results,
@@ -2025,11 +2035,15 @@ class IptvRequestService(
                     )
                 }
             }
+        } else if (contentType == ContentType.MOVIE && isTestRequest) {
+            logger.debug("Skipping movie metadata fetch for test request (qTest parameter only)")
         }
         
         // For series, fetch metadata to get year, resolution, and codec (even when no episode parameter)
         // This ensures we always extract codec and resolution from the API, not just when episode parameter is provided
-        if (contentType == ContentType.SERIES) {
+        // IMPORTANT: Skip metadata fetching for test requests (connectivity tests) - we only need to verify IPTV content can be queried.
+        // Note: We may have resolved an IMDb ID to a title in the controller, but we skip fetching other metadata here.
+        if (contentType == ContentType.SERIES && !isTestRequest) {
             runBlocking {
                 processInBatches(
                     items = results,
@@ -2043,6 +2057,8 @@ class IptvRequestService(
                     )
                 }
             }
+        } else if (contentType == ContentType.SERIES && isTestRequest) {
+            logger.debug("Skipping series metadata fetch for test request (qTest parameter only)")
         }
         
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
