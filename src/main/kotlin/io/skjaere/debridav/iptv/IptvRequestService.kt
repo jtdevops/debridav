@@ -2517,14 +2517,59 @@ class IptvRequestService(
                 if (entity.contentType == ContentType.MOVIE) {
                     val mapKey = "${entity.providerName}_${entity.contentId}"
                     val movieFileSize = entityMovieFileSizes[mapKey]
-                    if (movieFileSize != null && movieFileSize > 0) {
-                        logger.debug("Using file size from movie metadata for movie ${entity.contentId}: ${movieFileSize / 1_000_000}MB")
-                        movieFileSize
+                    
+                    // Check if metadata file size exists and is not the default estimated size
+                    val shouldFetchFromUrl = if (movieFileSize != null && movieFileSize > 0) {
+                        // If metadata has a file size, check if it's the default size
+                        if (isDefaultFileSize(movieFileSize, entity.contentType)) {
+                            logger.debug("File size from movie metadata for movie ${entity.contentId} is default estimate (${movieFileSize / 1_000_000}MB), will fetch actual size from URL")
+                            true // Need to fetch from URL
+                        } else {
+                            logger.debug("Using file size from movie metadata for movie ${entity.contentId}: ${movieFileSize / 1_000_000}MB")
+                            false // Use metadata size, don't fetch
+                        }
                     } else {
                         // Debug: log what's in the map
                         logger.debug("File size not found in entityMovieFileSizes for movie ${entity.contentId} (key: $mapKey). Map contains ${entityMovieFileSizes.size} entries. Available keys: ${entityMovieFileSizes.keys.take(5).joinToString(", ")}")
-                        // Fallback to default estimate
-                        estimateIptvSize(entity.contentType)
+                        true // Need to fetch from URL
+                    }
+                    
+                    if (shouldFetchFromUrl) {
+                        // Try to fetch actual file size from URL (same method used in /api/v2/torrent/add)
+                        // Skip for test requests to keep them fast
+                        // Only fetch if metadata enhancement is enabled (file size extraction via HTTP)
+                        if (!isTestRequest && iptvConfigurationProperties.metadataEnhancementEnabled) {
+                            try {
+                                val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
+                                logger.debug("Fetching file size from URL for movie ${entity.contentId}: ${resolvedUrl.take(100)}")
+                                val (fetchedSize, _) = runBlocking {
+                                    fetchActualFileSize(resolvedUrl, entity.contentType, entity.providerName)
+                                }
+                                // Only use if it's not the default estimated size
+                                if (!isDefaultFileSize(fetchedSize, entity.contentType)) {
+                                    logger.debug("Fetched file size from URL for movie ${entity.contentId}: ${fetchedSize / 1_000_000}MB")
+                                    fetchedSize
+                                } else {
+                                    logger.debug("Fetched file size from URL for movie ${entity.contentId} returned default estimate, using fallback")
+                                    estimateIptvSize(entity.contentType)
+                                }
+                            } catch (e: Exception) {
+                                logger.debug("Failed to fetch file size from URL for movie ${entity.contentId}: ${e.message}, using fallback estimate")
+                                estimateIptvSize(entity.contentType)
+                            }
+                        } else {
+                            if (isTestRequest) {
+                                logger.debug("Skipping file size fetch from URL for test request (qTest parameter only)")
+                            } else {
+                                logger.debug("Skipping file size fetch from URL - metadata enhancement is disabled")
+                            }
+                            // Fallback to default estimate (or use metadata size if it exists, even if default)
+                            movieFileSize ?: estimateIptvSize(entity.contentType)
+                        }
+                    } else {
+                        // Use the metadata file size (already verified it's not default)
+                        // movieFileSize is guaranteed to be non-null here because shouldFetchFromUrl is false
+                        movieFileSize ?: estimateIptvSize(entity.contentType)
                     }
                 } else {
                     // For series without episode parameter, use default estimate
