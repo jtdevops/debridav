@@ -1978,8 +1978,8 @@ class IptvRequestService(
         }
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false): List<IptvSearchResult> {
-        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}", title, contentType, isTestRequest)
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true): List<IptvSearchResult> {
+        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}", title, contentType, isTestRequest, fetchFileSize)
         var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
         // For test requests (connectivity tests), limit to first result early to avoid unnecessary processing
@@ -2537,8 +2537,9 @@ class IptvRequestService(
                     if (shouldFetchFromUrl) {
                         // Try to fetch actual file size from URL (same method used in /api/v2/torrent/add)
                         // Skip for test requests to keep them fast
-                        // Only fetch if metadata enhancement is enabled (file size extraction via HTTP)
-                        if (!isTestRequest && iptvConfigurationProperties.metadataEnhancementEnabled) {
+                        // File size fetching is controlled by Prowlarr config (fetchFileSize parameter)
+                        // This is separate from metadataEnhancementEnabled which controls FFprobe-based enhancement
+                        if (!isTestRequest && fetchFileSize) {
                             try {
                                 val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
                                 logger.debug("Fetching file size from URL for movie ${entity.contentId}: ${resolvedUrl.take(100)}")
@@ -2561,7 +2562,7 @@ class IptvRequestService(
                             if (isTestRequest) {
                                 logger.debug("Skipping file size fetch from URL for test request (qTest parameter only)")
                             } else {
-                                logger.debug("Skipping file size fetch from URL - metadata enhancement is disabled")
+                                logger.debug("Skipping file size fetch from URL - fetchFileSize parameter is false (controlled by Prowlarr indexer setting)")
                             }
                             // Fallback to default estimate (or use metadata size if it exists, even if default)
                             movieFileSize ?: estimateIptvSize(entity.contentType)

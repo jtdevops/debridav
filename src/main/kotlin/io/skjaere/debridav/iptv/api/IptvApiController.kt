@@ -53,10 +53,17 @@ class IptvApiController(
         @RequestParam(required = false) episode: String?,
         @RequestParam(required = false) tvdbid: String?,
         @RequestParam(required = false) rid: String?,
+        // File size retrieval toggle (from Prowlarr config)
+        // Accept as String to handle Prowlarr's format (e.g., ".True", ".False")
+        @RequestParam(required = false, defaultValue = "true") fetchFileSize: String,
         request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
         logger.debug("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
             query, type, category, request.queryString)
+        
+        // Parse fetchFileSize string to boolean, handling Prowlarr's format (e.g., ".True", ".False")
+        val fetchFileSizeBool = parseBooleanParameter(fetchFileSize, defaultValue = true)
+        logger.debug("Parsed fetchFileSize parameter: '{}' -> {}", fetchFileSize, fetchFileSizeBool)
         
         // Resolve hostname from IP address
         val remoteAddr = request.remoteAddr
@@ -135,7 +142,7 @@ class IptvApiController(
         }
         
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool)
         
         // For test requests (connectivity tests), only return the first valid result and skip detailed logging
         // This is a connectivity test - we just need to verify IPTV content can be queried.
@@ -507,5 +514,35 @@ class IptvApiController(
         val season: Int? = null, // Season number for series (e.g., 8)
         val episode: Int? = null // Episode number within season (optional)
     )
+    
+    /**
+     * Parses a boolean parameter from a string value.
+     * Handles various formats that Prowlarr might send:
+     * - ".True", ".False" (with dot prefix)
+     * - "true", "false" (standard boolean strings)
+     * - "1", "0" (numeric)
+     * - Empty or null (returns default)
+     * 
+     * @param value The string value to parse
+     * @param defaultValue The default value to return if parsing fails or value is empty/null
+     * @return The parsed boolean value
+     */
+    private fun parseBooleanParameter(value: String?, defaultValue: Boolean): Boolean {
+        if (value == null || value.isBlank()) {
+            return defaultValue
+        }
+        
+        // Remove any leading/trailing dots or whitespace
+        val cleaned = value.trim().removePrefix(".").removeSuffix(".").lowercase()
+        
+        return when (cleaned) {
+            "true", "1", "yes", "on" -> true
+            "false", "0", "no", "off" -> false
+            else -> {
+                logger.warn("Unable to parse boolean parameter value '{}', using default: {}", value, defaultValue)
+                defaultValue
+            }
+        }
+    }
 }
 

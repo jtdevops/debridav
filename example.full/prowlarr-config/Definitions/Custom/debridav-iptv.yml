@@ -21,6 +21,14 @@ caps:
   allowrawsearch: false
 
 settings:
+  - name: file_size_label
+    type: info
+    label: File Size Retrieval Settings
+  - name: fetch_file_size
+    type: checkbox
+    label: Fetch actual file size from URL
+    default: true
+    help: "When enabled, fetches actual file size from IPTV URL using HTTP Range requests. This provides more accurate file sizes for Radarr/Sonarr. This setting controls file size retrieval for search results independently of server-side metadata enhancement settings."
   - name: validation_label
     type: info
     label: Validation settings (optional)
@@ -42,7 +50,7 @@ search:
     User-Agent: ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0"]
     Accept: ["application/json"]
   paths:
-    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_movie_title }}&imdbid={{ .Query.IMDBID }}&tmdbid={{ .Query.TMDBID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=MOVIE"
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_movie_title }}&imdbid={{ .Query.IMDBID }}&tmdbid={{ .Query.TMDBID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=MOVIE&fetchFileSize={{ .Config.fetch_file_size }}"
     # - path: "/api/iptv/search"
       method: get
       # inputs:
@@ -61,7 +69,7 @@ search:
         type: json
         noResultsMessage: "[]"
       categories: [Movies]
-    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_tv_title }}&season={{ .Query.Season }}&ep={{ .Query.Ep }}&episode={{ .Query.Episode }}&imdbid={{ .Query.IMDBID }}&tvdbid={{ .Query.TVDBID }}&rid={{ .Query.TVRageID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=SERIES"
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_tv_title }}&season={{ .Query.Season }}&ep={{ .Query.Ep }}&episode={{ .Query.Episode }}&imdbid={{ .Query.IMDBID }}&tvdbid={{ .Query.TVDBID }}&rid={{ .Query.TVRageID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=SERIES&fetchFileSize={{ .Config.fetch_file_size }}"
     # - path: "/api/iptv/search"
       method: get
       # inputs:
