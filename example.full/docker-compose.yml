@@ -170,18 +170,29 @@ services:
       # Disable the legacy import of .debridav files fom the /debridav container folder
       - DEBRIDAV_ENABLE_FILE_IMPORT_ON_STARTUP=false
 
-      ### Buffer configuration options
-      # For Default Behavior (5MB database caching)
+      ### Streaming and Caching Configuration Options
+      #
+      # Option 1: Default Behavior - Database Caching Enabled (Recommended for metadata extraction)
+      # Uses channel-based streaming with database caching for requests under the threshold.
+      # Benefits: Faster repeated requests, better metadata extraction performance, can serve from cached chunks.
+      # Trade-offs: Higher server resource usage, database storage required.
       #- DEBRIDAV_ENABLE_CHUNK_CACHING=true
       #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
       ##- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD defaults to 5120000 (5MB)
-
-      # 256KB In-Memory Buffer Only
+      #
+      # Option 2: In-Memory Buffering Only (No Database Caching)
+      # Uses channel-based streaming with in-memory buffering (~128MB channel capacity) but no database persistence.
+      # The CHUNK_CACHING_SIZE_THRESHOLD is ignored when chunk caching is disabled.
+      # Benefits: More control over streaming than direct mode, no database storage overhead.
+      # Trade-offs: No caching benefits, higher memory usage than direct streaming.
       #- DEBRIDAV_ENABLE_CHUNK_CACHING=false
       #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
-      #- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD=262144 # 256KB buffer
-
-      # Complete Direct Streaming (No buffering)
+      #- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD=262144 # Ignored when chunk caching is disabled
+      #
+      # Option 3: Complete Direct Streaming (No Buffering)
+      # Streams directly from external provider to client with minimal 64KB (configurable) buffer size.
+      # Benefits: Minimal latency, lowest server resource usage, direct data flow.
+      # Trade-offs: No caching benefits, no ability to serve from cached chunks, less control over streaming.
       - DEBRIDAV_ENABLE_CHUNK_CACHING=false
       - DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=false
       ###
@@ -190,7 +201,11 @@ services:
       - DEBRIDAV_STREAMING_DELAY_BETWEEN_RETRIES=50ms
       - DEBRIDAV_STREAMING_RETRIES_ON_PROVIDER_ERROR=2
       - DEBRIDAV_STREAMING_WAIT_AFTER_NETWORK_ERROR=100ms
-      
+      # Customize buffer size (e.g., 64KB)
+      # - DEBRIDAV_STREAMING_BUFFER_SIZE=65536
+      # Customize flush multiplier (e.g., 4 = flush every 256KB with 64KB buffer)
+      # - DEBRIDAV_STREAMING_FLUSH_MULTIPLIER=4
+
       # Cache durations
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
       - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
