@@ -31,7 +31,7 @@ settings:
     help: "When enabled, fetches actual file size from IPTV URL using HTTP Range requests. This provides more accurate file sizes for Radarr/Sonarr. This setting controls file size retrieval for search results independently of server-side metadata enhancement settings."
   - name: result_limit_label
     type: info
-    label: Result Processing Limit
+    label: Result Processing Limit - Maximum number of search results to process for metadata enhancements (file size, resolution, codec, etc.). Results are sorted by relevance score before limiting. Leave empty or set to 0 to process all results (default). This can improve performance when many results are returned.
   - name: result_limit
     type: text
     label: Maximum results to process
@@ -58,7 +58,7 @@ search:
     User-Agent: ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0"]
     Accept: ["application/json"]
   paths:
-    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_movie_title }}&imdbid={{ .Query.IMDBID }}&tmdbid={{ .Query.TMDBID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=MOVIE&fetchFileSize={{ .Config.fetch_file_size }}{{ if and (ne .Config.result_limit "") (ne .Config.result_limit "0") }}&limit={{ .Config.result_limit }}{{ end }}"
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_movie_title }}&imdbid={{ .Query.IMDBID }}&tmdbid={{ .Query.TMDBID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=MOVIE&fetchFileSize={{ .Config.fetch_file_size }}&limit={{ .Config.result_limit }}"
     # - path: "/api/iptv/search"
       method: get
       # inputs:
@@ -77,7 +77,7 @@ search:
         type: json
         noResultsMessage: "[]"
       categories: [Movies]
-    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_tv_title }}&season={{ .Query.Season }}&ep={{ .Query.Ep }}&episode={{ .Query.Episode }}&imdbid={{ .Query.IMDBID }}&tvdbid={{ .Query.TVDBID }}&rid={{ .Query.TVRageID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=SERIES&fetchFileSize={{ .Config.fetch_file_size }}{{ if and (ne .Config.result_limit "") (ne .Config.result_limit "0") }}&limit={{ .Config.result_limit }}{{ end }}"
+    - path: "/api/iptv/search?q={{ .Query.Q }}&qTest={{ .Config.validate_tv_title }}&season={{ .Query.Season }}&ep={{ .Query.Ep }}&episode={{ .Query.Episode }}&imdbid={{ .Query.IMDBID }}&tvdbid={{ .Query.TVDBID }}&rid={{ .Query.TVRageID }}&traktid={{ .Query.TraktID }}&doubanid={{ .Query.DoubanID }}&year={{ .Query.Year }}&genre={{ .Query.Genre }}&type=SERIES&fetchFileSize={{ .Config.fetch_file_size }}&limit={{ .Config.result_limit }}"
     # - path: "/api/iptv/search"
       method: get
       # inputs:
