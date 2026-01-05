@@ -1176,7 +1176,9 @@ class IptvRequestService(
                             } catch (e: Exception) {
                                 // Ignore errors when consuming response body
                             }
-                            return Pair(estimateIptvSize(contentType), redirectUrl)
+                            val estimatedSize = estimateIptvSize(contentType)
+                            logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", redirectUrl, estimatedSize, estimatedSize / 1_000_000)
+                            return Pair(estimatedSize, redirectUrl)
                         }
                         
                         // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
@@ -1193,6 +1195,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
+                                logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", redirectUrl, totalSize, totalSize / 1_000_000)
                                 return Pair(totalSize, redirectUrl)
                             }
                         }
@@ -1206,10 +1209,13 @@ class IptvRequestService(
                         }
                         if (contentLength != null && contentLength > 0) {
                             logger.debug("Retrieved actual file size from IPTV redirect URL Content-Length header: $contentLength bytes (redirectUrl: $redirectUrl)")
+                            logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", redirectUrl, contentLength, contentLength / 1_000_000)
                             return Pair(contentLength, redirectUrl)
                         } else {
                             logger.debug("Content-Range and Content-Length headers not available for IPTV redirect URL, using estimated size (redirectUrl: $redirectUrl)")
-                            return Pair(estimateIptvSize(contentType), redirectUrl)
+                            val estimatedSize = estimateIptvSize(contentType)
+                            logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", redirectUrl, estimatedSize, estimatedSize / 1_000_000)
+                            return Pair(estimatedSize, redirectUrl)
                         }
                     } else {
                         // No redirect location - fallback to estimated size
@@ -1219,7 +1225,9 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                        return Pair(estimateIptvSize(contentType), url)
+                        val estimatedSize = estimateIptvSize(contentType)
+                        logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+                        return Pair(estimatedSize, url)
                     }
                 }
                 
@@ -1231,7 +1239,9 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                    return Pair(estimateIptvSize(contentType), url)
+                    val estimatedSize = estimateIptvSize(contentType)
+                    logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+                    return Pair(estimatedSize, url)
                 }
                 
                 // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
@@ -1248,6 +1258,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
+                        logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", url, totalSize, totalSize / 1_000_000)
                         return Pair(totalSize, url)
                     }
                 }
@@ -1261,10 +1272,13 @@ class IptvRequestService(
                                 }
                 if (contentLength != null && contentLength > 0) {
                     logger.debug("Retrieved actual file size from IPTV URL Content-Length header: $contentLength bytes ($url)")
+                    logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", url, contentLength, contentLength / 1_000_000)
                     return Pair(contentLength, url)
                 } else {
                     logger.debug("Content-Range and Content-Length headers not available for IPTV URL, using estimated size ($url)")
-                    return Pair(estimateIptvSize(contentType), url)
+                    val estimatedSize = estimateIptvSize(contentType)
+                    logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+                    return Pair(estimatedSize, url)
                 }
             } catch (e: Exception) {
                 val isNetworkError = e.message?.contains("timeout", ignoreCase = true) == true ||
@@ -1282,7 +1296,9 @@ class IptvRequestService(
         }
         
         // Fallback to estimated size if all retries failed
-        return Pair(estimateIptvSize(contentType), url)
+        val estimatedSize = estimateIptvSize(contentType)
+        logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+        return Pair(estimatedSize, url)
     }
     
     /**
