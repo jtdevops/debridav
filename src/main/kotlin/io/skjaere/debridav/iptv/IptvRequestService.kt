@@ -2631,9 +2631,11 @@ class IptvRequestService(
                                     logger.debug("Fetched file size from URL for movie ${entity.contentId}: ${fetchedSize / 1_000_000}MB")
                                     // Store the fetched file size in the metadata cache for future use
                                     storeFileSizeInMetadataCache(entity.providerName, entity.contentId, fetchedSize)
+                                    // Also add to entityMovieFileSizes for consistency within this search request
+                                    entityMovieFileSizes[mapKey] = fetchedSize
                                     fetchedSize
                                 } else {
-                                    logger.debug("Fetched file size from URL for movie ${entity.contentId} returned default estimate, using fallback")
+                                    logger.debug("Fetched file size from URL for movie ${entity.contentId} returned default estimate (${fetchedSize / 1_000_000}MB), using fallback")
                                     estimateIptvSize(entity.contentType)
                                 }
                             } catch (e: Exception) {
@@ -2658,6 +2660,11 @@ class IptvRequestService(
                     // For series without episode parameter, use default estimate
                     estimateIptvSize(entity.contentType)
                 }
+            }
+            
+            // Log the final size being used for debugging
+            if (entity.contentType == ContentType.MOVIE) {
+                logger.debug("Final file size for movie ${entity.contentId}: ${estimatedSize / 1_000_000}MB (isDefault: ${isDefaultFileSize(estimatedSize, entity.contentType)})")
             }
             
             IptvSearchResult(
