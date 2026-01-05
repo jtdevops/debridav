@@ -57,6 +57,10 @@ class IptvApiController(
         // Accept as String to handle Prowlarr's format (e.g., ".True", ".False")
         // Note: When Prowlarr disables this option, it sends an empty string, which should be treated as false
         @RequestParam(required = false) fetchFileSize: String?,
+        // Maximum number of results to process (from Prowlarr custom field)
+        // Accept as String to handle Prowlarr's format
+        // If not specified, empty string, or "0", process all results (default behavior)
+        @RequestParam(required = false) limit: String?,
         request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
         logger.debug("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
@@ -144,7 +148,9 @@ class IptvApiController(
         }
         
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool)
+        // Parse limit parameter: if not specified, empty string, or "0", process all results (default behavior)
+        val resultLimit = parseLimitParameter(limit)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool, resultLimit)
         
         // For test requests (connectivity tests), only return the first valid result and skip detailed logging
         // This is a connectivity test - we just need to verify IPTV content can be queried.
@@ -553,6 +559,45 @@ class IptvApiController(
                 defaultValue
             }
         }
+    }
+    
+    /**
+     * Parses a limit parameter from a string value.
+     * Handles various formats that Prowlarr might send:
+     * - null (parameter missing) -> returns null (process all)
+     * - Empty string -> returns null (process all)
+     * - "0" -> returns null (process all)
+     * - Positive integer string -> returns the integer value
+     * 
+     * @param value The string value to parse
+     * @return The parsed integer limit, or null if all results should be processed
+     */
+    private fun parseLimitParameter(value: String?): Int? {
+        // If parameter is completely missing (null), process all
+        if (value == null) {
+            return null
+        }
+        
+        // If parameter is present but empty/blank, process all
+        if (value.isBlank()) {
+            return null
+        }
+        
+        // Try to parse as integer
+        val parsed = value.trim().toIntOrNull()
+        
+        // If parsing failed or value is 0, process all
+        if (parsed == null || parsed == 0) {
+            return null
+        }
+        
+        // If negative, treat as "process all" (invalid limit)
+        if (parsed < 0) {
+            logger.warn("Invalid limit parameter value '{}' (negative), processing all results", value)
+            return null
+        }
+        
+        return parsed
     }
 }
 

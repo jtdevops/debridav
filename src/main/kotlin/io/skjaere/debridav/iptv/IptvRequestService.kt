@@ -2007,14 +2007,20 @@ class IptvRequestService(
         }
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true): List<IptvSearchResult> {
-        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}", title, contentType, isTestRequest, fetchFileSize)
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null): List<IptvSearchResult> {
+        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}, limit={}", title, contentType, isTestRequest, fetchFileSize, limit)
         var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
         // For test requests (connectivity tests), limit to first result early to avoid unnecessary processing
         if (isTestRequest && results.isNotEmpty()) {
             results = listOf(results.first())
             logger.debug("Test request: limiting to first result only (${results.size} result)")
+        } else if (limit != null && limit > 0 && results.size > limit) {
+            // Apply limit after sorting (results are already sorted by relevance score from searchContent)
+            // This limits the number of results that will be processed for metadata enhancements
+            val originalSize = results.size
+            results = results.take(limit)
+            logger.debug("Limiting results to {} (from {} total) before metadata processing", limit, originalSize)
         }
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
