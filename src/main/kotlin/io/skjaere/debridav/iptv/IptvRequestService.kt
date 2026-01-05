@@ -1081,6 +1081,7 @@ class IptvRequestService(
     }
     
     suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
+        logger.debug("fetchActualFileSize called: url={}, contentType={}, providerName={}", url.take(100), contentType, providerName)
         // Make an initial login/test call to the provider before fetching file size
         // Rate limiting: shared across all services per provider
         // Use atomic check-and-record to prevent race conditions in parallel processing

@@ -723,7 +723,7 @@ class StreamingService(
         filePath: String
     ) = withContext(Dispatchers.IO) {
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE.toInt())
-        val flushInterval = DEFAULT_BUFFER_SIZE * 10L // Flush every 640KB
+        val flushInterval = DEFAULT_BUFFER_SIZE * 4L // Flush every 256KB
         var totalBytesRead = 0L
         var bytesRead: Int
         var bytesSinceLastFlush = 0L
