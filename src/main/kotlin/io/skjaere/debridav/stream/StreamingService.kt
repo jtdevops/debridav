@@ -198,10 +198,9 @@ class StreamingService(
             } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null && iptvLoginRateLimitService != null) {
                 try {
                     // Rate limiting: shared across all services per provider
-                    if (iptvLoginRateLimitService.shouldRateLimit(providerName)) {
-                        val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
-                        logger.debug("Skipping IPTV provider login call for $providerName (rate limited, last call was ${timeSinceLastCall}ms ago)")
-                    } else {
+                    // Use atomic check-and-record to prevent race conditions in parallel processing
+                    if (iptvLoginRateLimitService.shouldProceedWithLoginCall(providerName)) {
+                        // This thread won the race - proceed with verification call
                         val providerConfigs = iptvConfigurationService.getProviderConfigurations()
                         val providerConfig = providerConfigs.find { it.name == providerName }
                         if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
@@ -209,12 +208,14 @@ class StreamingService(
                             val userAgent = iptvConfigurationProperties?.userAgent
                             val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService, userAgent)
                             val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
-                            // Update timestamp after successful call
-                            iptvLoginRateLimitService.recordLoginCall(providerName)
                             if (!loginSuccess) {
                                 logger.warn("IPTV provider login verification failed for $providerName, but continuing with stream attempt")
                             }
                         }
+                    } else {
+                        // Rate limited - another thread already made the call or it was made recently
+                        val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
+                        logger.debug("Skipping IPTV provider login call for $providerName (rate limited, last call was ${timeSinceLastCall}ms ago)")
                     }
                 } catch (e: Exception) {
                     logger.warn("Failed to make initial login call to IPTV provider $providerName: ${e.message}, continuing with stream attempt", e)

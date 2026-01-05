@@ -1083,23 +1083,24 @@ class IptvRequestService(
     suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
         // Make an initial login/test call to the provider before fetching file size
         // Rate limiting: shared across all services per provider
+        // Use atomic check-and-record to prevent race conditions in parallel processing
         if (providerName != null) {
             try {
-                if (iptvLoginRateLimitService.shouldRateLimit(providerName)) {
-                    val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
-                    logger.debug("Skipping IPTV provider login call for $providerName before fetching file size (rate limited, last call was ${timeSinceLastCall}ms ago)")
-                } else {
+                if (iptvLoginRateLimitService.shouldProceedWithLoginCall(providerName)) {
+                    // This thread won the race - proceed with verification call
                     val providerConfigs = iptvConfigurationService.getProviderConfigurations()
                     val providerConfig = providerConfigs.find { it.name == providerName }
                     if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
                         logger.debug("Making initial login call to IPTV provider $providerName before fetching file size")
                         val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
-                        // Update timestamp after successful call
-                        iptvLoginRateLimitService.recordLoginCall(providerName)
                         if (!loginSuccess) {
                             logger.warn("IPTV provider login verification failed for $providerName, but continuing with file size fetch")
                         }
                     }
+                } else {
+                    // Rate limited - another thread already made the call or it was made recently
+                    val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
+                    logger.debug("Skipping IPTV provider login call for $providerName before fetching file size (rate limited, last call was ${timeSinceLastCall}ms ago)")
                 }
             } catch (e: Exception) {
                 logger.warn("Failed to make initial login call to IPTV provider $providerName before fetching file size: ${e.message}, continuing with fetch attempt", e)
