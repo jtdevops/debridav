@@ -57,7 +57,6 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 
 
-private const val DEFAULT_BUFFER_SIZE = 65536L //64kb
 private const val STREAMING_METRICS_POLLING_RATE_S = 5L //5 seconds
 private const val BYTE_CHANNEL_CAPACITY = 2000
 private const val MAX_COMPLETED_DOWNLOADS_HISTORY = 1000
@@ -713,7 +712,7 @@ class StreamingService(
     
     /**
      * Streams data directly from input stream to output stream with minimal buffering.
-     * Uses a 64KB buffer for efficient streaming without excessive memory usage.
+     * Uses a configurable buffer size for efficient streaming without excessive memory usage.
      */
     private suspend fun streamDirectlyToOutput(
         inputStream: java.io.InputStream,
@@ -722,8 +721,9 @@ class StreamingService(
         trackingId: String?,
         filePath: String
     ) = withContext(Dispatchers.IO) {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE.toInt())
-        val flushInterval = DEFAULT_BUFFER_SIZE * 4L // Flush every 256KB
+        val bufferSize = debridavConfigProperties.streamingBufferSize.toInt()
+        val buffer = ByteArray(bufferSize)
+        val flushInterval = debridavConfigProperties.streamingBufferSize * debridavConfigProperties.streamingFlushMultiplier
         var totalBytesRead = 0L
         var bytesRead: Int
         var bytesSinceLastFlush = 0L
@@ -1124,7 +1124,8 @@ class StreamingService(
         
         while (remaining > 0) {
             readIterations++
-            val size = listOf(remaining, DEFAULT_BUFFER_SIZE).min()
+            val bufferSize = debridavConfigProperties.streamingBufferSize
+            val size = listOf(remaining, bufferSize).min()
 
             val bytes = try {
                 streamingContext.inputStream.readNBytes(size.toInt())
