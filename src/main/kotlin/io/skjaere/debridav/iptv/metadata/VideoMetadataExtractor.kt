@@ -89,8 +89,14 @@ class VideoMetadataExtractor(
      * @param url The media file URL
      * @param contentType Optional content type (MOVIE or SERIES) - helps with provider login calls
      * @param providerName Optional provider name - helps with provider login calls
+     * @param existingFileSize Optional existing file size from cached metadata - if provided, skips external fetch for file size
      */
-    suspend fun extractVideoMetadata(url: String, contentType: ContentType? = null, providerName: String? = null): VideoMetadata? {
+    suspend fun extractVideoMetadata(
+        url: String, 
+        contentType: ContentType? = null, 
+        providerName: String? = null,
+        existingFileSize: Long? = null
+    ): VideoMetadata? {
         // If FFprobe metadata enhancement is disabled, don't extract anything
         // File size extraction for search results is controlled by Prowlarr's fetchFileSize setting
         // This prevents the enhancement process from extracting file size when FFprobe is disabled
@@ -99,14 +105,28 @@ class VideoMetadataExtractor(
             return null
         }
         
-        // Resolve redirects using the same method as fetchActualFileSize to ensure consistency
-        // This ensures ffprobe gets the same final URL that fetchActualFileSize uses
-        // Also get the file size from the redirect resolution to avoid duplicate HTTP requests
-        val (finalUrl, fileSizeFromRedirect) = try {
-            iptvRequestService.resolveRedirectUrlForMetadata(url, contentType, providerName)
-        } catch (e: Exception) {
-            logger.debug("Failed to resolve redirect URL using fetchActualFileSize logic: ${e.message}, using original URL")
-            Pair(url, null)
+        // If existing file size is provided, use it and skip external fetch
+        // Still need to resolve redirects for FFprobe to work correctly
+        val (finalUrl, fileSizeFromRedirect) = if (existingFileSize != null) {
+            logger.debug("Using existing file size from cached metadata: ${existingFileSize / 1_000_000}MB, skipping external fetch")
+            // Still resolve redirects for FFprobe, but we'll use existingFileSize instead of fileSizeFromRedirect
+            try {
+                val (resolvedUrl, _) = iptvRequestService.resolveRedirectUrlForMetadata(url, contentType, providerName)
+                Pair(resolvedUrl, existingFileSize) // Use existing file size instead of fetched one
+            } catch (e: Exception) {
+                logger.debug("Failed to resolve redirect URL using fetchActualFileSize logic: ${e.message}, using original URL")
+                Pair(url, existingFileSize)
+            }
+        } else {
+            // Resolve redirects using the same method as fetchActualFileSize to ensure consistency
+            // This ensures ffprobe gets the same final URL that fetchActualFileSize uses
+            // Also get the file size from the redirect resolution to avoid duplicate HTTP requests
+            try {
+                iptvRequestService.resolveRedirectUrlForMetadata(url, contentType, providerName)
+            } catch (e: Exception) {
+                logger.debug("Failed to resolve redirect URL using fetchActualFileSize logic: ${e.message}, using original URL")
+                Pair(url, null)
+            }
         }
         
         if (finalUrl != url) {
@@ -119,9 +139,13 @@ class VideoMetadataExtractor(
         // Log the final URL that will be passed to ffprobe
         logger.debug("Final URL to be passed to FFprobe: {}", finalUrl)
         
-        // Log if we got file size from redirect resolution
+        // Log if we got file size from redirect resolution or existing cache
         if (fileSizeFromRedirect != null) {
-            logger.debug("File size already retrieved during redirect resolution: ${fileSizeFromRedirect / 1_000_000}MB (will reuse if FFprobe fails)")
+            if (existingFileSize != null) {
+                logger.debug("Using file size from cached metadata: ${fileSizeFromRedirect / 1_000_000}MB (skipped external fetch)")
+            } else {
+                logger.debug("File size already retrieved during redirect resolution: ${fileSizeFromRedirect / 1_000_000}MB (will reuse if FFprobe fails)")
+            }
         }
         
         // Try FFprobe first if enabled and available (for resolution/codec)

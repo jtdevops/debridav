@@ -95,6 +95,24 @@ class MetadataEnhancer(
             }
         }
         
+        // Check if file size already exists in cached metadata to avoid unnecessary external fetch
+        val existingFileSize = videoInfo?.tags?.let { tags ->
+            val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
+            sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
+                tags[key]?.toLongOrNull()
+            }
+        }
+        
+        if (existingFileSize != null && existingFileSize > 0) {
+            // Check if it's not the default estimated size (2GB for movies)
+            val isDefaultSize = existingFileSize == 2_000_000_000L
+            if (!isDefaultSize) {
+                logger.debug("File size already exists in cached metadata for movie ${metadata.movieId}: ${existingFileSize / 1_000_000}MB, will reuse and skip external fetch")
+            } else {
+                logger.debug("File size in cached metadata for movie ${metadata.movieId} is default estimate (${existingFileSize / 1_000_000}MB), will fetch actual size externally")
+            }
+        }
+        
         // Build movie URL
         val movieUrl = buildMovieUrl(providerConfig, metadata.movieId, movieInfo)
         if (movieUrl == null) {
@@ -108,7 +126,13 @@ class MetadataEnhancer(
         
         // Extract video metadata (always attempts to get file size, even if FFprobe fails)
         // Pass contentType and providerName so redirect resolution uses the same logic as fetchActualFileSize
-        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(movieUrl, ContentType.MOVIE, providerConfig.name)
+        // Pass existing file size if available to avoid unnecessary external fetch
+        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(
+            movieUrl, 
+            ContentType.MOVIE, 
+            providerConfig.name,
+            existingFileSize = if (existingFileSize != null && existingFileSize > 0 && existingFileSize != 2_000_000_000L) existingFileSize else null
+        )
         
         // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
         metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
@@ -190,6 +214,24 @@ class MetadataEnhancer(
             }
         }
         
+        // Check if file size already exists in cached metadata to avoid unnecessary external fetch
+        val existingFileSize = videoInfo?.tags?.let { tags ->
+            val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
+            sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
+                tags[key]?.toLongOrNull()
+            }
+        }
+        
+        if (existingFileSize != null && existingFileSize > 0) {
+            // Check if it's not the default estimated size (1GB for episodes)
+            val isDefaultSize = existingFileSize == 1_000_000_000L
+            if (!isDefaultSize) {
+                logger.debug("File size already exists in cached metadata for series ${metadata.seriesId} reference episode: ${existingFileSize / 1_000_000}MB, will reuse and skip external fetch")
+            } else {
+                logger.debug("File size in cached metadata for series ${metadata.seriesId} reference episode is default estimate (${existingFileSize / 1_000_000}MB), will fetch actual size externally")
+            }
+        }
+        
         // Build episode URL
         val episodeUrl = buildEpisodeUrl(providerConfig, referenceEpisode)
         if (episodeUrl == null) {
@@ -203,7 +245,13 @@ class MetadataEnhancer(
         
         // Extract video metadata (always attempts to get file size, even if FFprobe fails)
         // Pass contentType and providerName so redirect resolution uses the same logic as fetchActualFileSize
-        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(episodeUrl, ContentType.SERIES, providerConfig.name)
+        // Pass existing file size if available to avoid unnecessary external fetch
+        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(
+            episodeUrl, 
+            ContentType.SERIES, 
+            providerConfig.name,
+            existingFileSize = if (existingFileSize != null && existingFileSize > 0 && existingFileSize != 1_000_000_000L) existingFileSize else null
+        )
         
         // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
         metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
