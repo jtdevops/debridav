@@ -55,13 +55,15 @@ class IptvApiController(
         @RequestParam(required = false) rid: String?,
         // File size retrieval toggle (from Prowlarr config)
         // Accept as String to handle Prowlarr's format (e.g., ".True", ".False")
-        @RequestParam(required = false, defaultValue = "true") fetchFileSize: String,
+        // Note: When Prowlarr disables this option, it sends an empty string, which should be treated as false
+        @RequestParam(required = false) fetchFileSize: String?,
         request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
         logger.debug("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
             query, type, category, request.queryString)
         
         // Parse fetchFileSize string to boolean, handling Prowlarr's format (e.g., ".True", ".False")
+        // When parameter is missing (null), default to true. When empty string, treat as false (disabled).
         val fetchFileSizeBool = parseBooleanParameter(fetchFileSize, defaultValue = true)
         logger.debug("Parsed fetchFileSize parameter: '{}' -> {}", fetchFileSize, fetchFileSizeBool)
         
@@ -521,15 +523,23 @@ class IptvApiController(
      * - ".True", ".False" (with dot prefix)
      * - "true", "false" (standard boolean strings)
      * - "1", "0" (numeric)
-     * - Empty or null (returns default)
+     * - null (parameter missing) -> returns default
+     * - Empty string (parameter present but empty, e.g., when disabled in Prowlarr) -> returns false
      * 
      * @param value The string value to parse
-     * @param defaultValue The default value to return if parsing fails or value is empty/null
+     * @param defaultValue The default value to return if parameter is missing (null) or parsing fails
      * @return The parsed boolean value
      */
     private fun parseBooleanParameter(value: String?, defaultValue: Boolean): Boolean {
-        if (value == null || value.isBlank()) {
+        // If parameter is completely missing (null), use default
+        if (value == null) {
             return defaultValue
+        }
+        
+        // If parameter is present but empty/blank, treat as false (disabled)
+        // This handles the case when Prowlarr sends fetchFileSize= (empty) when the option is disabled
+        if (value.isBlank()) {
+            return false
         }
         
         // Remove any leading/trailing dots or whitespace

@@ -91,18 +91,12 @@ services:
       # IPTV Metadata Fetch Batch Size - Number of concurrent metadata fetch requests per batch (default: 5)
       - IPTV_METADATA_FETCH_BATCH_SIZE=${IPTV_METADATA_FETCH_BATCH_SIZE:-5}
       
-      # IPTV Metadata Enhancement Configuration
-      # Enable metadata enhancement (file size extraction from media files)
-      # File size extraction will always be attempted when enabled, using HTTP methods
+      # IPTV FFprobe Metadata Enhancement Configuration
+      # Enable FFprobe-based metadata enhancement (extracts resolution, codec, and file size from media files using FFprobe)
+      # When disabled, FFprobe will not be used for metadata extraction
+      # Note: File size fetching in search results is controlled by Prowlarr indexer setting (fetchFileSize)
       # Default: true
-      - IPTV_METADATA_ENHANCEMENT_ENABLED=${IPTV_METADATA_ENHANCEMENT_ENABLED:-true}
-      
-      # IPTV FFprobe Configuration
-      # Enable FFprobe for resolution and codec extraction from media files
-      # Requires metadata-enhancement-enabled=true
-      # When disabled, only file size will be extracted via HTTP (resolution/codec will be skipped)
-      # Default: true
-      - IPTV_FFPROBE_ENABLED=${IPTV_FFPROBE_ENABLED:-true}
+      - IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=${IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED:-true}
       
       # Path to FFprobe executable
       # Default: "ffprobe" (assumes ffprobe is in system PATH)

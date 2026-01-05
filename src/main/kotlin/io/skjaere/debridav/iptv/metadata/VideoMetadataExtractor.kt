@@ -40,13 +40,8 @@ class VideoMetadataExtractor(
     
     @PostConstruct
     fun checkFfprobeAvailability() {
-        if (!iptvConfigurationProperties.metadataEnhancementEnabled) {
-            logger.info("Metadata enhancement is disabled in configuration")
-            return
-        }
-        
-        if (!iptvConfigurationProperties.ffprobeEnabled) {
-            logger.info("FFprobe is disabled in configuration. File size extraction will still work via HTTP.")
+        if (!iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
+            logger.info("FFprobe metadata enhancement is disabled in configuration")
             ffprobeAvailable = false
             return
         }
@@ -79,13 +74,21 @@ class VideoMetadataExtractor(
     
     /**
      * Extracts video metadata (resolution, codec, file size) from a media file URL.
-     * Uses FFprobe for resolution/codec if enabled, always attempts file size extraction via HTTP.
-     * Falls back to HTTP-based file size extraction if FFprobe fails or is disabled.
-     * Always attempts to extract file size if metadataEnhancementEnabled is true.
-     * Returns null only if file size extraction fails.
+     * Uses FFprobe for resolution/codec if enabled, falls back to HTTP-based file size extraction if FFprobe fails.
+     * 
+     * Note: This method is used by the metadata enhancement process during search operations.
+     * File size extraction for search results is controlled by Prowlarr's fetchFileSize setting, not this method.
+     * When FFprobe metadata enhancement is disabled, this method returns null to avoid extracting file size
+     * (which would bypass Prowlarr's control).
+     * 
+     * For adding torrents via /api/v2/torrent/add, file size is fetched directly using fetchActualFileSize().
      */
     suspend fun extractVideoMetadata(url: String): VideoMetadata? {
-        if (!iptvConfigurationProperties.metadataEnhancementEnabled) {
+        // If FFprobe metadata enhancement is disabled, don't extract anything
+        // File size extraction for search results is controlled by Prowlarr's fetchFileSize setting
+        // This prevents the enhancement process from extracting file size when FFprobe is disabled
+        if (!iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
+            logger.debug("FFprobe metadata enhancement is disabled, skipping metadata extraction (file size for search is controlled by Prowlarr)")
             return null
         }
         
@@ -104,7 +107,7 @@ class VideoMetadataExtractor(
         // Try FFprobe first if enabled and available (for resolution/codec)
         // IMPORTANT: FFprobe cannot follow redirects, so we must pass the final resolved URL
         var metadata: VideoMetadata? = null
-        if (iptvConfigurationProperties.ffprobeEnabled && ffprobeAvailable) {
+        if (ffprobeAvailable) {
             try {
                 logger.debug("Attempting FFprobe extraction on final URL: {}", finalUrl.take(100))
                 metadata = probeUrlWithFfprobe(finalUrl)

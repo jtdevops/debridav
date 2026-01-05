@@ -28,6 +28,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -54,6 +60,7 @@ class IptvRequestService(
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     
     
     // Cache for redirect URLs: original URL -> redirect URL
@@ -114,6 +121,7 @@ class IptvRequestService(
         }
         
         // For Xtream Codes movies, fetch metadata using get_vod_info API
+        var movieInfo: io.skjaere.debridav.iptv.client.XtreamCodesClient.MovieInfo? = null
         if (iptvContent.contentType == ContentType.MOVIE) {
             // Check if provider is Xtream Codes
             val providerConfig = iptvConfigurationService.getProviderConfigurations()
@@ -123,7 +131,7 @@ class IptvRequestService(
                 // For Xtream Codes movies, contentId is the vod_id (stored in database)
                 val vodId = contentId
                 logger.info("Detected Xtream Codes movie, fetching metadata via get_vod_info API: vodId=$vodId, contentId=$contentId, title=${iptvContent.title}")
-                fetchAndCacheMovieMetadata(providerConfig, providerName, vodId)
+                movieInfo = fetchAndCacheMovieMetadata(providerConfig, providerName, vodId)
             }
         }
         
@@ -222,10 +230,31 @@ class IptvRequestService(
             }
         }
         
-        // Try to fetch actual file size from IPTV URL, fallback to estimated size
-        logger.debug("Fetching file size for IPTV content - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
-        val (fileSize, _) = runBlocking {
-            fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
+        // Try to get file size from metadata first, then fetch externally if not present
+        val fileSize = if (iptvContent.contentType == ContentType.MOVIE && movieInfo != null) {
+            // Check if metadata has file size in video tags
+            val metadataFileSize = movieInfo.info?.video?.tags?.let { tags ->
+                extractFileSizeFromVideoTags(tags)
+            }
+            
+            if (metadataFileSize != null && metadataFileSize > 0 && !isDefaultFileSize(metadataFileSize, iptvContent.contentType)) {
+                logger.debug("Using file size from movie metadata: ${metadataFileSize / 1_000_000}MB")
+                metadataFileSize
+            } else {
+                // Metadata doesn't have valid file size, fetch from URL
+                logger.debug("File size not found in metadata or is default, fetching from URL - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
+                val (fetchedSize, _) = runBlocking {
+                    fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
+                }
+                fetchedSize
+            }
+        } else {
+            // For series or movies without metadata, fetch from URL
+            logger.debug("Fetching file size from URL - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
+            val (fetchedSize, _) = runBlocking {
+                fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
+            }
+            fetchedSize
         }
         
         // Extract base URL and suffix from resolved URL
@@ -677,7 +706,7 @@ class IptvRequestService(
             logger.debug("Cached raw JSON response for series $seriesId (${episodes.size} episodes)")
             
             // Enhance metadata if video info is missing from reference episode
-            if (iptvConfigurationProperties.metadataEnhancementEnabled) {
+            if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
                 try {
                     runBlocking {
                         val enhanced = metadataEnhancer.enhanceSeriesMetadata(metadata, episodes, providerConfig)
@@ -760,7 +789,7 @@ class IptvRequestService(
             
             // Enhance metadata if video info is missing
             var finalMovieInfo = movieInfo
-            if (iptvConfigurationProperties.metadataEnhancementEnabled) {
+            if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
                 try {
                     runBlocking {
                         val enhanced = metadataEnhancer.enhanceMovieMetadata(metadata, movieInfo, providerConfig)
@@ -1780,7 +1809,7 @@ class IptvRequestService(
                 var parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
                 
                 // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
-                if (iptvConfigurationProperties.metadataEnhancementEnabled && parsedMovieInfo != null) {
+                if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled && parsedMovieInfo != null) {
                     try {
                         val enhanced = metadataEnhancer.enhanceMovieMetadata(cachedMetadata, parsedMovieInfo, providerConfig)
                         if (enhanced) {
@@ -1918,7 +1947,7 @@ class IptvRequestService(
                 var parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
                 
                 // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
-                if (iptvConfigurationProperties.metadataEnhancementEnabled && parsedResult.second.isNotEmpty()) {
+                if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled && parsedResult.second.isNotEmpty()) {
                     try {
                         val enhanced = metadataEnhancer.enhanceSeriesMetadata(cachedMetadata, parsedResult.second, providerConfig)
                         if (enhanced) {
@@ -2538,7 +2567,7 @@ class IptvRequestService(
                         // Try to fetch actual file size from URL (same method used in /api/v2/torrent/add)
                         // Skip for test requests to keep them fast
                         // File size fetching is controlled by Prowlarr config (fetchFileSize parameter)
-                        // This is separate from metadataEnhancementEnabled which controls FFprobe-based enhancement
+                        // This is separate from ffprobeMetadataEnhancementEnabled which controls FFprobe-based enhancement
                         if (!isTestRequest && fetchFileSize) {
                             try {
                                 val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
@@ -2549,6 +2578,8 @@ class IptvRequestService(
                                 // Only use if it's not the default estimated size
                                 if (!isDefaultFileSize(fetchedSize, entity.contentType)) {
                                     logger.debug("Fetched file size from URL for movie ${entity.contentId}: ${fetchedSize / 1_000_000}MB")
+                                    // Store the fetched file size in the metadata cache for future use
+                                    storeFileSizeInMetadataCache(entity.providerName, entity.contentId, fetchedSize)
                                     fetchedSize
                                 } else {
                                     logger.debug("Fetched file size from URL for movie ${entity.contentId} returned default estimate, using fallback")
@@ -2882,6 +2913,178 @@ class IptvRequestService(
         
         // Fallback for legacy records that might have full URL stored
         return tokenizedUrl
+    }
+    
+    /**
+     * Stores an externally fetched file size in the metadata cache JSON.
+     * This allows the file size to be reused when fetchFileSize=false.
+     * 
+     * @param providerName The IPTV provider name
+     * @param contentId The content ID (movie ID)
+     * @param fileSize The file size in bytes to store
+     */
+    private fun storeFileSizeInMetadataCache(providerName: String, contentId: String, fileSize: Long) {
+        try {
+            val cachedMetadata = iptvMovieMetadataRepository.findByProviderNameAndMovieId(providerName, contentId)
+            if (cachedMetadata != null) {
+                val updatedJson = updateMovieMetadataJsonWithFileSize(cachedMetadata.responseJson, fileSize)
+                if (updatedJson != null) {
+                    cachedMetadata.responseJson = updatedJson
+                    iptvMovieMetadataRepository.save(cachedMetadata)
+                    logger.debug("Stored externally fetched file size ${fileSize / 1_000_000}MB in metadata cache for movie $contentId")
+                }
+            } else {
+                logger.debug("No metadata cache found for movie $contentId, cannot store file size")
+            }
+        } catch (e: Exception) {
+            logger.warn("Failed to store file size in metadata cache for movie $contentId: ${e.message}", e)
+            // Non-blocking: continue even if cache update fails
+        }
+    }
+    
+    /**
+     * Updates movie metadata JSON with a file size by adding/updating NUMBER_OF_BYTES in video.tags.
+     * Handles different JSON formats (movie_data wrapper, direct info, etc.)
+     * 
+     * @param responseJson The current metadata JSON string
+     * @param fileSize The file size in bytes to store
+     * @return Updated JSON string, or null if update failed
+     */
+    private fun updateMovieMetadataJsonWithFileSize(responseJson: String, fileSize: Long): String? {
+        return try {
+            val jsonObject = json.parseToJsonElement(responseJson).jsonObject
+            
+            // Handle different JSON formats:
+            // Format 1: { "movie_data": { "info": { "video": {...} } } }
+            // Format 2: { "info": { "video": {...} } }
+            val updatedJson = when {
+                jsonObject.containsKey("movie_data") -> {
+                    // Format 1: wrapped in movie_data
+                    val movieData = jsonObject["movie_data"]?.jsonObject
+                    if (movieData != null) {
+                        val updatedMovieData = updateVideoTagsWithFileSize(movieData, fileSize)
+                        buildJsonObject {
+                            putJsonObject("movie_data") {
+                                updatedMovieData.forEach { (key, value) ->
+                                    put(key, value)
+                                }
+                            }
+                            // Copy other top-level fields
+                            jsonObject.forEach { (key, value) ->
+                                if (key != "movie_data") {
+                                    put(key, value)
+                                }
+                            }
+                        }
+                    } else {
+                        jsonObject
+                    }
+                }
+                jsonObject.containsKey("info") -> {
+                    // Format 2: info at top level
+                    updateVideoTagsWithFileSize(jsonObject, fileSize)
+                }
+                else -> {
+                    // Try to find info nested somewhere
+                    updateVideoTagsWithFileSize(jsonObject, fileSize)
+                }
+            }
+            
+            json.encodeToString(JsonObject.serializer(), updatedJson)
+        } catch (e: Exception) {
+            logger.warn("Failed to update movie metadata JSON with file size: ${e.message}", e)
+            null
+        }
+    }
+    
+    /**
+     * Updates video tags in a JSON object with a file size.
+     * Adds or updates NUMBER_OF_BYTES in info.video.tags.
+     * 
+     * @param jsonObject The JSON object to update
+     * @param fileSize The file size in bytes
+     * @return Updated JSON object
+     */
+    private fun updateVideoTagsWithFileSize(jsonObject: JsonObject, fileSize: Long): JsonObject {
+        val infoObj = jsonObject["info"]?.jsonObject
+        if (infoObj == null) {
+            // No info object, create one with video tags
+            return buildJsonObject {
+                jsonObject.forEach { (key, value) ->
+                    put(key, value)
+                }
+                putJsonObject("info") {
+                    putJsonObject("video") {
+                        putJsonObject("tags") {
+                            put("NUMBER_OF_BYTES", fileSize.toString())
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Update existing info object
+        val videoObj = infoObj["video"]?.jsonObject
+        val updatedVideoObj = if (videoObj == null) {
+            // Create new video object with tags
+            buildJsonObject {
+                putJsonObject("tags") {
+                    put("NUMBER_OF_BYTES", fileSize.toString())
+                }
+            }
+        } else {
+            // Update existing video object
+            val existingTags = videoObj["tags"]?.jsonObject
+            val updatedTags = buildJsonObject {
+                existingTags?.forEach { (key, value) ->
+                    put(key, value)
+                }
+                put("NUMBER_OF_BYTES", fileSize.toString())
+            }
+            buildJsonObject {
+                // Preserve existing video fields
+                videoObj.forEach { (key, value) ->
+                    if (key != "tags") {
+                        put(key, value)
+                    }
+                }
+                putJsonObject("tags") {
+                    updatedTags.forEach { (key, value) ->
+                        put(key, value)
+                    }
+                }
+            }
+        }
+        
+        // Rebuild info object
+        val updatedInfoObj = buildJsonObject {
+            infoObj.forEach { (key, value) ->
+                if (key == "video") {
+                    putJsonObject("video") {
+                        updatedVideoObj.forEach { (k, v) ->
+                            put(k, v)
+                        }
+                    }
+                } else {
+                    put(key, value)
+                }
+            }
+        }
+        
+        // Rebuild root object
+        return buildJsonObject {
+            jsonObject.forEach { (key, value) ->
+                if (key == "info") {
+                    putJsonObject("info") {
+                        updatedInfoObj.forEach { (k, v) ->
+                            put(k, v)
+                        }
+                    }
+                } else {
+                    put(key, value)
+                }
+            }
+        }
     }
 }
 
