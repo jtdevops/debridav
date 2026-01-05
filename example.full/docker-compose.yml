@@ -210,6 +210,16 @@ services:
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
       - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
 
+      # Downloads cleanup configuration
+      # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)
+      # When true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes
+      # When false (default), cleanup is immediate (no age check) - all orphaned content is removed immediately
+      - DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED=${DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED:-false}
+      # Time threshold in minutes for time-based cleanup (default: 10 minutes)
+      # Only used if enable-downloads-cleanup-time-based is true
+      # Files/torrents older than this threshold will be cleaned up
+      - DEBRIDAV_DOWNLOADS_CLEANUP_TIME_BASED_THRESHOLD_MINUTES=${DEBRIDAV_DOWNLOADS_CLEANUP_TIME_BASED_THRESHOLD_MINUTES:-10}
+
       # Byte range chunking control - set to true to prevent aggressive chunking and caching
       - DEBRIDAV_DISABLE_BYTE_RANGE_REQUEST_CHUNKING=true
 
