@@ -107,7 +107,8 @@ class MetadataEnhancer(
         logger.debug("Extracting video metadata from movie URL: ${movieUrl.take(100)}")
         
         // Extract video metadata (always attempts to get file size, even if FFprobe fails)
-        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(movieUrl)
+        // Pass contentType and providerName so redirect resolution uses the same logic as fetchActualFileSize
+        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(movieUrl, ContentType.MOVIE, providerConfig.name)
         
         // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
         metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)
@@ -201,7 +202,8 @@ class MetadataEnhancer(
         logger.debug("Extracting video metadata from reference episode URL: ${episodeUrl.take(100)}")
         
         // Extract video metadata (always attempts to get file size, even if FFprobe fails)
-        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(episodeUrl)
+        // Pass contentType and providerName so redirect resolution uses the same logic as fetchActualFileSize
+        val videoMetadata = videoMetadataExtractor.extractVideoMetadata(episodeUrl, ContentType.SERIES, providerConfig.name)
         
         // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
         metadata.responseJson = updateFfprobeLastProcessedInJson(metadata.responseJson, now)

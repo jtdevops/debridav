@@ -16,16 +16,19 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
+import org.springframework.context.annotation.Lazy
 import org.springframework.stereotype.Service
 import java.io.InputStream
 import java.net.URI
 import java.util.concurrent.TimeUnit
 import jakarta.annotation.PostConstruct
+import io.skjaere.debridav.iptv.model.ContentType
 
 @Service
 class VideoMetadataExtractor(
     private val httpClient: HttpClient,
-    private val iptvConfigurationProperties: IptvConfigurationProperties
+    private val iptvConfigurationProperties: IptvConfigurationProperties,
+    @Lazy private val iptvRequestService: io.skjaere.debridav.iptv.IptvRequestService
 ) {
     private val logger = LoggerFactory.getLogger(VideoMetadataExtractor::class.java)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -82,8 +85,12 @@ class VideoMetadataExtractor(
      * (which would bypass Prowlarr's control).
      * 
      * For adding torrents via /api/v2/torrent/add, file size is fetched directly using fetchActualFileSize().
+     * 
+     * @param url The media file URL
+     * @param contentType Optional content type (MOVIE or SERIES) - helps with provider login calls
+     * @param providerName Optional provider name - helps with provider login calls
      */
-    suspend fun extractVideoMetadata(url: String): VideoMetadata? {
+    suspend fun extractVideoMetadata(url: String, contentType: ContentType? = null, providerName: String? = null): VideoMetadata? {
         // If FFprobe metadata enhancement is disabled, don't extract anything
         // File size extraction for search results is controlled by Prowlarr's fetchFileSize setting
         // This prevents the enhancement process from extracting file size when FFprobe is disabled
@@ -92,21 +99,30 @@ class VideoMetadataExtractor(
             return null
         }
         
-        // Resolve redirects first (needed for both FFprobe and HTTP file size extraction)
-        // FFprobe cannot follow redirects automatically, so we must manually resolve them
-        // Use the same redirect-following logic as fetchActualFileSize to ensure consistency
-        val redirectUrl = resolveRedirectUrl(url)
-        val finalUrl = redirectUrl ?: url
+        // Resolve redirects using the same method as fetchActualFileSize to ensure consistency
+        // This ensures ffprobe gets the same final URL that fetchActualFileSize uses
+        // Also get the file size from the redirect resolution to avoid duplicate HTTP requests
+        val (finalUrl, fileSizeFromRedirect) = try {
+            iptvRequestService.resolveRedirectUrlForMetadata(url, contentType, providerName)
+        } catch (e: Exception) {
+            logger.debug("Failed to resolve redirect URL using fetchActualFileSize logic: ${e.message}, using original URL")
+            Pair(url, null)
+        }
         
-        if (redirectUrl != null) {
+        if (finalUrl != url) {
             logger.debug("Resolved redirect chain for metadata extraction: originalUrl={}, finalUrl={}", 
-                url.take(100), redirectUrl.take(100))
+                url.take(100), finalUrl.take(100))
         } else {
             logger.debug("No redirect found, using original URL for metadata extraction: {}", url.take(100))
         }
         
         // Log the final URL that will be passed to ffprobe
         logger.debug("Final URL to be passed to FFprobe: {}", finalUrl)
+        
+        // Log if we got file size from redirect resolution
+        if (fileSizeFromRedirect != null) {
+            logger.debug("File size already retrieved during redirect resolution: ${fileSizeFromRedirect / 1_000_000}MB (will reuse if FFprobe fails)")
+        }
         
         // Try FFprobe first if enabled and available (for resolution/codec)
         // IMPORTANT: FFprobe cannot follow redirects, so we must pass the final resolved URL
@@ -117,12 +133,18 @@ class VideoMetadataExtractor(
                 metadata = probeUrlWithFfprobe(finalUrl)
                 if (metadata != null && metadata.hasVideoInfo()) {
                     logger.debug("Successfully extracted video metadata from URL using FFprobe")
-                    // If FFprobe succeeded but didn't get file size, try HTTP fallback
+                    // If FFprobe succeeded but didn't get file size, use the one from redirect resolution
                     if (metadata.fileSize == null) {
-                        val fileSize = extractFileSizeViaHttp(finalUrl)
-                        if (fileSize != null) {
-                            logger.debug("Extracted file size via HTTP fallback: $fileSize bytes")
-                            metadata = metadata.copy(fileSize = fileSize)
+                        if (fileSizeFromRedirect != null) {
+                            logger.debug("FFprobe didn't get file size, using file size from redirect resolution: ${fileSizeFromRedirect / 1_000_000}MB")
+                            metadata = metadata.copy(fileSize = fileSizeFromRedirect)
+                        } else {
+                            // Fallback to HTTP extraction only if redirect resolution didn't provide file size
+                            val fileSize = extractFileSizeViaHttp(finalUrl)
+                            if (fileSize != null) {
+                                logger.debug("Extracted file size via HTTP fallback: $fileSize bytes")
+                                metadata = metadata.copy(fileSize = fileSize)
+                            }
                         }
                     }
                     return metadata
@@ -131,13 +153,25 @@ class VideoMetadataExtractor(
                 logger.debug("FFprobe extraction failed: ${e.message}")
             }
         } else {
-            logger.debug("FFprobe disabled or not available, will try HTTP-based file size extraction")
+            logger.debug("FFprobe disabled or not available, will use file size from redirect resolution if available")
         }
         
-        // FFprobe disabled, failed, or not available - try to extract at least file size via HTTP
+        // FFprobe disabled, failed, or not available - use file size from redirect resolution if available
+        if (fileSizeFromRedirect != null) {
+            logger.debug("Using file size from redirect resolution: ${fileSizeFromRedirect / 1_000_000}MB (FFprobe disabled or video metadata extraction failed)")
+            // Return metadata with only file size
+            return VideoMetadata(
+                width = null,
+                height = null,
+                codecName = null,
+                fileSize = fileSizeFromRedirect
+            )
+        }
+        
+        // Last resort: try HTTP extraction if redirect resolution didn't provide file size
         val fileSize = extractFileSizeViaHttp(finalUrl)
         if (fileSize != null) {
-            logger.debug("Extracted file size via HTTP: $fileSize bytes (FFprobe disabled or video metadata extraction failed)")
+            logger.debug("Extracted file size via HTTP: $fileSize bytes (FFprobe disabled or video metadata extraction failed, redirect resolution didn't provide file size)")
             // Return metadata with only file size
             return VideoMetadata(
                 width = null,
@@ -232,167 +266,6 @@ class VideoMetadataExtractor(
             logger.debug("Failed to extract file size via HTTP: ${e.message}")
             null
         }
-    }
-    
-    /**
-     * Resolves redirects for a URL by following the complete redirect chain.
-     * Uses the same logic as fetchActualFileSize to ensure consistency.
-     * First tries with Range header (bytes=0-0), then falls back to HEAD request if that fails.
-     * Some servers may only redirect when Range header is not present.
-     * Returns the final URL after following all redirects, or null if no redirects were found.
-     * 
-     * @param maxRedirects Maximum number of redirects to follow (default: 10) to prevent infinite loops
-     */
-    private suspend fun resolveRedirectUrl(url: String, maxRedirects: Int = 10): String? {
-        var currentUrl = url
-        var redirectCount = 0
-        
-        while (redirectCount < maxRedirects) {
-            try {
-                // First try with Range header (same as fetchActualFileSize)
-                val response = httpClient.get(currentUrl) {
-                    headers {
-                        append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
-                        append(HttpHeaders.Range, "bytes=0-0") // Minimal request to check for redirects
-                    }
-                    timeout {
-                        requestTimeoutMillis = 5000 // Same timeout as fetchActualFileSize
-                        connectTimeoutMillis = 2000
-                    }
-                }
-                
-                // Consume response body to ensure proper cleanup
-                try {
-                    response.body<ByteReadChannel>()
-                } catch (e: Exception) {
-                    // Ignore errors when consuming response body
-                }
-                
-                // Check if this is a redirect response (same logic as fetchActualFileSize)
-                // HttpRedirect plugin may not follow redirects for range requests, so we need to handle it manually
-                if (response.status.value in 300..399) {
-                    val redirectLocation = response.headers["Location"]
-                    if (redirectLocation != null) {
-                        redirectCount++
-                        
-                        logger.debug("IPTV metadata request received redirect response (status ${response.status.value}), following redirect manually: originalUrl={}, redirectLocation={}", 
-                            currentUrl.take(100), redirectLocation.take(100))
-                        
-                        // Resolve redirect URL (handle relative redirects)
-                        val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                            redirectLocation
-                        } else {
-                            // Relative redirect - construct absolute URL using URI
-                            val currentUri = URI(currentUrl)
-                            currentUri.resolve(redirectLocation).toString()
-                        }
-                        
-                        // Make new request to redirect location with Range header preserved (same as fetchActualFileSize)
-                        val redirectResponse = httpClient.get(redirectUrl) {
-                            headers {
-                                append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
-                                append(HttpHeaders.Range, "bytes=0-0")
-                            }
-                            timeout {
-                                requestTimeoutMillis = 3000 // Same timeout as fetchActualFileSize for redirects
-                                connectTimeoutMillis = 2000
-                            }
-                        }
-                        
-                        // Consume redirect response body
-                        try {
-                            redirectResponse.body<ByteReadChannel>()
-                        } catch (e: Exception) {
-                            // Ignore errors when consuming response body
-                        }
-                        
-                        // Check if redirect response was successful
-                        if (redirectResponse.status.isSuccess()) {
-                            // Success - this is the final URL
-                            logger.debug("Successfully resolved redirect chain (${redirectCount} redirects): finalUrl={}", redirectUrl.take(100))
-                            return redirectUrl
-                        } else {
-                            // Redirect URL returned non-success, but use it anyway (same as fetchActualFileSize)
-                            logger.debug("Redirect URL returned non-success status ${redirectResponse.status.value}, but will use it for FFprobe: {}", redirectUrl.take(100))
-                            return redirectUrl
-                        }
-                    } else {
-                        // Redirect status but no Location header
-                        logger.debug("Redirect response (status ${response.status.value}) but no Location header for URL: {}", currentUrl.take(100))
-                        return null
-                    }
-                } else if (!response.status.isSuccess()) {
-                    // Non-success status (like 551) with Range header - try HEAD request without Range header
-                    // Some servers may only redirect when Range header is not present
-                    if (redirectCount == 0) {
-                        logger.debug("URL returned non-success status ${response.status.value} with Range header, trying HEAD request without Range header: {}", currentUrl.take(100))
-                        try {
-                            val headResponse = httpClient.head(currentUrl) {
-                                headers {
-                                    append(HttpHeaders.UserAgent, iptvConfigurationProperties.userAgent)
-                                }
-                                timeout {
-                                    requestTimeoutMillis = 5000
-                                    connectTimeoutMillis = 2000
-                                }
-                            }
-                            
-                            // Check if HEAD request got a redirect
-                            if (headResponse.status.value in 300..399) {
-                                val redirectLocation = headResponse.headers["Location"]
-                                if (redirectLocation != null) {
-                                    redirectCount++
-                                    
-                                    logger.debug("HEAD request received redirect response (status ${headResponse.status.value}), following redirect: originalUrl={}, redirectLocation={}", 
-                                        currentUrl.take(100), redirectLocation.take(100))
-                                    
-                                    // Resolve redirect URL (handle relative redirects)
-                                    val redirectUrl = if (redirectLocation.startsWith("http://") || redirectLocation.startsWith("https://")) {
-                                        redirectLocation
-                                    } else {
-                                        val currentUri = URI(currentUrl)
-                                        currentUri.resolve(redirectLocation).toString()
-                                    }
-                                    
-                                    // Update currentUrl and continue loop to follow redirect
-                                    currentUrl = redirectUrl
-                                    continue
-                                }
-                            } else if (headResponse.status.isSuccess()) {
-                                // HEAD request succeeded - this is the final URL
-                                logger.debug("HEAD request succeeded, using URL as final: {}", currentUrl.take(100))
-                                return currentUrl
-                            }
-                        } catch (e: Exception) {
-                            logger.debug("HEAD request failed: ${e.message}")
-                        }
-                    }
-                    
-                    // No redirect found even with HEAD request
-                    logger.debug("URL returned non-success status ${response.status.value}, no redirect found: {}", currentUrl.take(100))
-                    return null
-                } else {
-                    // Success status (200, 206, etc.) - this is the final URL
-                    if (redirectCount > 0) {
-                        logger.debug("Resolved redirect chain (${redirectCount} redirects): finalUrl={}", currentUrl.take(100))
-                    }
-                    return currentUrl
-                }
-            } catch (e: Exception) {
-                logger.debug("Failed to resolve redirect URL at step $redirectCount: ${e.message}")
-                // If we've already followed some redirects, return the current URL so FFprobe can try it
-                if (redirectCount > 0) {
-                    logger.debug("Returning partially resolved URL after error: {}", currentUrl.take(100))
-                    return currentUrl
-                }
-                return null
-            }
-        }
-        
-        // Max redirects reached - return the last URL we reached so FFprobe can try it
-        logger.warn("Maximum redirect limit ($maxRedirects) reached for URL: {}, returning last URL: {}", 
-            url.take(100), currentUrl.take(100))
-        return currentUrl
     }
     
     /**

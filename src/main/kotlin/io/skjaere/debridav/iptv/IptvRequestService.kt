@@ -1053,7 +1053,34 @@ class IptvRequestService(
      * @param providerName The IPTV provider name (for login call before fetching)
      * @return Pair of (file size, final URL after redirects). Returns estimated size and original URL if request fails.
      */
-    private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
+    /**
+     * Public method to resolve redirects and get final URL, along with file size if available.
+     * Uses the same logic as fetchActualFileSize and returns both the final URL and file size.
+     * This is used by VideoMetadataExtractor to get the final redirected URL for ffprobe
+     * and reuse the file size to avoid duplicate HTTP requests.
+     * 
+     * @param url The IPTV URL to resolve
+     * @param contentType The content type (for login calls if providerName is provided)
+     * @param providerName The IPTV provider name (optional, for login calls)
+     * @return Pair of (final URL after redirects, file size if available, or null if not available or is default estimate)
+     */
+    suspend fun resolveRedirectUrlForMetadata(url: String, contentType: ContentType? = null, providerName: String? = null): Pair<String, Long?> {
+        // If contentType is not provided, use MOVIE as default (most common case)
+        val contentTypeToUse = contentType ?: ContentType.MOVIE
+        val (fileSize, finalUrl) = fetchActualFileSize(url, contentTypeToUse, providerName)
+        
+        // Return file size only if it's not the default estimated size
+        // This allows the caller to know if we got a real file size or just an estimate
+        val actualFileSize = if (!isDefaultFileSize(fileSize, contentTypeToUse)) {
+            fileSize
+        } else {
+            null
+        }
+        
+        return Pair(finalUrl, actualFileSize)
+    }
+    
+    suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
         // Make an initial login/test call to the provider before fetching file size
         // Rate limiting: shared across all services per provider
         if (providerName != null) {
