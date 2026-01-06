@@ -55,10 +55,14 @@ class StrmFileResource(
         val fileName = originalFile.name ?: "unknown"
         val filePath = originalFilePath
         
+        // Determine the provider if this is a RemotelyCachedEntity
+        val provider = if (originalFile is RemotelyCachedEntity) {
+            determineProvider(originalFile)
+        } else {
+            null
+        }
+        
         if (originalFile is RemotelyCachedEntity) {
-            // Determine the provider for provider-specific configuration checks
-            val provider = determineProvider(originalFile)
-            
             // Check if proxy URLs are enabled (takes priority - proxy URLs implicitly enable external URLs)
             val shouldUseProxy = provider != null && 
                 provider != DebridProvider.IPTV &&
@@ -85,7 +89,7 @@ class StrmFileResource(
         }
         // Fall back to VFS path
         val vfsPath = debridavConfigurationProperties.getStrmContentPath(originalFilePath)
-        StrmFileAccessLogger.logContentComputed(filePath, null, "VFS", vfsPath)
+        StrmFileAccessLogger.logContentComputed(filePath, provider?.toString(), "VFS", vfsPath)
         return vfsPath
     }
 
