@@ -148,7 +148,7 @@ data class DebridavConfigurationProperties(
             } else {
                 // Log when hostname pattern doesn't match for debugging
                 val logger = org.slf4j.LoggerFactory.getLogger(DebridavConfigurationProperties::class.java)
-                logger.debug("ARR_LOCAL_VIDEO: sourceInfo={}, hostnamePattern={}, does not match", 
+                logger.trace("ARR_LOCAL_VIDEO: sourceInfo={}, hostnamePattern={}, does not match", 
                     sourceInfo, rcloneArrsHostnamePattern)
             }
         } else if (rcloneArrsHostnamePattern != null) {

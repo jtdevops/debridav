@@ -338,7 +338,7 @@ class DebridFileResource(
         } else {
             workingDebridFile?.provider?.toString() ?: "null"
         }
-        logger.debug("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
+        logger.trace("EXTERNAL_FILE_CONTENT_LENGTH: file={}, size={} bytes, provider={}", 
             file.name ?: "unknown", externalFileSize, providerLabel)
         return externalFileSize
     }
