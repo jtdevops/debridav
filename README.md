@@ -37,6 +37,7 @@ protocol so that they can be mounted.
 
 - Stream content from Real Debrid, Premiumize and Easynews with Plex/Jellyfin.
 - **IPTV Movies/TV Shows**: Index and stream VOD content from IPTV providers (Xtream Codes API and M3U playlists) alongside debrid content.
+- **STRM File Support**: Generate STRM files for media servers (Plex, Jellyfin) that can use direct external URLs or proxy URLs with automatic link refresh for expiring URLs.
 - Sort your content as you would regular files. You can create directories, rename files, and move them around any way
   you like. No need to write regular expressions.
 - Seamless integration into the arr-ecosystem, providing a near identical experience to downloading torrents. DebriDav
@@ -65,6 +66,12 @@ This fork adds several significant improvements and new features while maintaini
 - **Local Video File Serving**: Serve small, locally-hosted video files to ARR projects instead of actual media files, dramatically reducing bandwidth usage during library scans
 - **Automatic Link Refresh**: Automatic retry with fresh links when streaming errors occur
 - **Configurable Streaming Retries**: Fine-tune retry behavior with customizable delays and retry counts for different error types
+
+### 📁 STRM File Support
+- **Automatic STRM Generation**: Generate STRM files for media servers (Plex, Jellyfin) with configurable URL types
+- **Provider-Specific URL Configuration**: Use VFS paths, direct external URLs, or proxy URLs with automatic link refresh per provider
+- **Flexible Filtering**: Control which files and providers use STRM files with regex patterns and provider lists
+- **Proxy URL Support**: Automatic link refresh for expiring URLs when using proxy URLs in STRM files
 
 ### 📺 IPTV Integration
 - **IPTV Movies/TV Shows Support**: Index and stream VOD content from IPTV providers alongside debrid content
@@ -331,6 +338,8 @@ The following values can be defined as environment variables. These environment 
 | DEBRIDAV_STREAMING_WAIT_AFTER_NETWORK_ERROR     | Wait time after a network error before retrying. Format: duration string (e.g., 100ms, 1s).                                                                                                                          | 100ms            |
 | DEBRIDAV_STREAMING_WAIT_AFTER_PROVIDER_ERROR    | Wait time after a provider error before retrying. Format: duration string (e.g., 1m, 5m).                                                                                                                          | 1m               |
 | DEBRIDAV_STREAMING_WAIT_AFTER_CLIENT_ERROR      | Wait time after a client error before retrying. Format: duration string (e.g., 100ms, 1s).                                                                                                                           | 100ms            |
+| DEBRIDAV_STREAMING_BUFFER_SIZE                  | Buffer size in bytes for direct streaming. Controls the size of the buffer used when streaming content directly from external providers without caching. Larger buffers may improve throughput but use more memory. | 65536 (64KB)     |
+| DEBRIDAV_STREAMING_FLUSH_MULTIPLIER             | Flush multiplier for streaming. Flush interval = buffer-size × flush-multiplier. Example: With default 64KB buffer and multiplier of 4, flushes occur every 256KB. Higher values reduce flush frequency but may increase latency. | 4                |
 
 ### Download Tracking & Monitoring
 
@@ -389,6 +398,10 @@ The IPTV integration allows DebriDav to index and serve VOD (Video on Demand) co
 | IPTV_PROVIDER_{PROVIDER_NAME}_M3U_FILE_PATH    | Local file path to M3U playlist file. Alternative to `M3U_URL` when playlist is stored locally. Required when `TYPE=m3u` and `M3U_URL` is not specified. Example: `/path/to/playlist.m3u`.                            |                  |
 | IPTV_PROVIDER_{PROVIDER_NAME}_PRIORITY         | Priority for provider fallback. Lower numbers have higher priority. When searching, providers are queried in priority order. Example: `1` (highest priority), `2` (lower priority).                                 |                  |
 | IPTV_PROVIDER_{PROVIDER_NAME}_SYNC_ENABLED     | Enable or disable syncing for a specific provider. When disabled, the provider's content will not be synced. Useful for temporarily disabling problematic providers.                                              | true             |
+| IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED      | Enable FFprobe-based metadata enhancement (extracts resolution, codec, and file size from media files using FFprobe). When disabled, FFprobe will not be used for metadata extraction. Note: File size fetching in search results is controlled by Prowlarr indexer setting (fetchFileSize). | false            |
+| IPTV_FFPROBE_PATH                              | Path to FFprobe executable. Default: "ffprobe" (assumes ffprobe is in system PATH). Example: `/usr/bin/ffprobe`.                                                                                                    | ffprobe          |
+| IPTV_FFPROBE_TIMEOUT                           | FFprobe execution timeout. Format: ISO8601 duration string (e.g., PT30S for 30 seconds, PT60S for 60 seconds).                                                                                                    | PT30S            |
+| IPTV_METADATA_FETCH_BATCH_SIZE                 | Number of concurrent metadata fetch requests per batch during IPTV search operations. When multiple movies or series are identified during search, metadata fetching is processed in parallel batches.            | 5                |
 | DEBRIDAV_RCLONE_ARRS_LOCAL_VIDEO_FILE_IPTV_BYPASS_PROVIDERS | Comma-separated list of IPTV provider names that should bypass local video file serving for ARR requests. Use `*` to bypass for all IPTV providers. When bypassed, IPTV content is served directly from the provider instead of local video files. |                  |
 
 **Example Configuration:**
@@ -416,6 +429,14 @@ IPTV_PROVIDER_PROVIDER2_PRIORITY=2
 # Optional metadata enhancement
 IPTV_METADATA_OMDB_API_KEY=your_omdb_api_key
 
+# Optional: FFprobe metadata enhancement (extracts resolution, codec, and file size from media files)
+IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=false
+IPTV_FFPROBE_PATH=ffprobe
+IPTV_FFPROBE_TIMEOUT=PT30S
+
+# Optional: Metadata fetch batch size (number of concurrent metadata fetch requests per batch)
+IPTV_METADATA_FETCH_BATCH_SIZE=5
+
 # Optional: Language prefixes for content matching
 # Can be used to identify specific language or source prefixes to IPTV content.
 # For example 'EN' for English, or 'UNV' for Universal Studios.
@@ -438,8 +459,11 @@ A custom indexer definition file (`debridav-iptv.yml`) is included in the `examp
 1. Copy the file to your Prowlarr configuration directory: `prowlarr-config/Definitions/Custom/debridav-iptv.yml`
 2. Restart Prowlarr to load the custom indexer
 3. Add "DebriDav IPTV" as an indexer in Prowlarr settings
-4. Configure validation titles (optional) for testing the indexer connection
-5. Sync the indexer with Sonarr/Radarr
+4. Configure the following indexer settings (optional):
+   - **Fetch actual file size from URL**: When enabled (default: true), fetches actual file size from IPTV URL using HTTP Range requests. This provides more accurate file sizes for Radarr/Sonarr. This setting controls file size retrieval for search results independently of server-side metadata enhancement settings.
+   - **Maximum results to process**: Maximum number of search results to process for metadata enhancements (file size, resolution, codec, etc.). Results are sorted by relevance score before limiting. Leave empty or set to 0 to process all results (default). This can improve performance when many results are returned.
+5. Configure validation titles (optional) for testing the indexer connection
+6. Sync the indexer with Sonarr/Radarr
 
 The indexer supports searching by title, IMDb ID, TMDB ID, TVDB ID, and other metadata fields.
 
@@ -457,6 +481,83 @@ The indexer supports searching by title, IMDb ID, TMDB ID, TVDB ID, and other me
 - **Virtual Filesystem**: IPTV content appears in the same virtual filesystem as debrid content, making it transparent to Sonarr/Radarr.
 
 For detailed IPTV configuration and troubleshooting, see [IPTV_CONFIGURATION_GUIDE.md](IPTV_CONFIGURATION_GUIDE.md).
+
+### STRM File Support
+
+STRM files are text files that contain URLs pointing to media content. Media servers like Jellyfin and Emby can read STRM files and stream content directly from the URLs they contain. **Note: Plex does not support STRM files** - use VFS paths for Plex. DebriDav can automatically generate STRM files for your content, providing an alternative to the Virtual File System (VFS) approach.
+
+**Why Use STRM Files?**
+
+STRM files help reduce the amount of data that media servers download when analyzing media files (movies/TV shows). This is particularly important for providers that track download usage and may cap or limit downloads, such as Premiumize (see their [Fair Use policy](https://www.premiumize.me/fairuse)). By using STRM files, media servers can access metadata and stream content more efficiently without downloading entire files during library scans.
+
+**Key Features:**
+- **Automatic STRM Generation**: Creates STRM files mirroring your content structure in separate folders
+- **Multiple URL Types**: Supports VFS paths, direct external URLs, or proxy URLs with automatic link refresh
+- **Provider-Specific Configuration**: Configure different URL types per provider (e.g., use proxy URLs for Premiumize, direct URLs for IPTV)
+- **Automatic Link Refresh**: Proxy URLs automatically check and refresh expired links when accessed
+- **Flexible Filtering**: Control which files and providers use STRM files
+
+**How It Works:**
+
+1. **VFS Paths (Default)**: STRM files contain paths to DebriDav's VFS endpoints. Media servers access content through DebriDav's streaming service.
+2. **Direct External URLs**: STRM files contain direct URLs from debrid providers. Media servers stream directly from providers, bypassing DebriDav for the actual streaming. Useful for providers with stable, non-expiring URLs (e.g., IPTV).
+3. **Proxy URLs**: STRM files contain proxy URLs pointing to DebriDav. When accessed, DebriDav verifies/refreshes the external URL and either redirects to it or streams through the proxy. Essential for providers with expiring URLs (e.g., Premiumize).
+
+**Configuration:**
+
+| NAME                                           | Explanation                                                                                                                                                                                                          | Default          |
+|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------|
+| DEBRIDAV_STRM_ENABLED                          | Enable/disable STRM file generation. When enabled, STRM folders will appear mirroring your content structure.                                                                                                      | false            |
+| DEBRIDAV_STRM_FOLDER_MAPPINGS                  | Maps root folders to STRM folders (comma-separated key=value pairs). Example: `tv=tv_strm,movies=movies_strm` creates `/tv_strm` mirroring `/tv` and `/movies_strm` mirroring `/movies`.                              |                  |
+| DEBRIDAV_STRM_ROOT_PATH_PREFIX                 | Optional prefix for paths written in STRM files. If set to `/data`, a file at `/tv/show/episode.mkv` will have STRM content `/data/tv/show/episode.mkv`. This should match your Docker volume mapping (typically `/data`).                                                           |                  |
+| DEBRIDAV_STRM_FILE_EXTENSION_MODE              | How to handle file extensions: `REPLACE` (episode.mkv → episode.strm) or `APPEND` (episode.mkv → episode.mkv.strm).                                                                                                | REPLACE          |
+| DEBRIDAV_STRM_FILE_FILTER_MODE                 | Which files to convert: `ALL` (all files), `MEDIA_ONLY` (only media extensions), `NON_STRM` (all except .strm).                                                                                                     | MEDIA_ONLY       |
+| DEBRIDAV_STRM_MEDIA_EXTENSIONS                 | Comma-separated list of media file extensions when filter mode is `MEDIA_ONLY`. Default: `mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts`.                                                                       | mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts |
+| DEBRIDAV_STRM_PROVIDERS                        | Comma-separated list of provider names for which to create STRM files. Supports `ALL`/`*` for all providers and `!` prefix for negation. Example: `*`, `*,!IPTV`, or `REAL_DEBRID,PREMIUMIZE`. **Note**: This setting takes precedence over `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS`. If a provider is excluded here, no STRM files are created for it, regardless of the external URL setting.                        | * (all providers) |
+| DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX           | Optional regex pattern to match filenames that should be excluded from STRM file creation. Example: `.*sample.*` or `.*\\.sample\\.mkv$`.                                                                          |                  |
+| DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS  | Comma-separated list of provider names for which to use external URLs in STRM files. When enabled for a provider, STRM files are still created but contain direct external URLs instead of VFS paths. **Note**: This only applies if STRM files are created for the provider (see `DEBRIDAV_STRM_PROVIDERS`). If a provider is excluded from STRM creation, this setting has no effect. Supports `ALL`/`*` for all providers and `!` prefix for negation. Example: `IPTV`, `ALL`, `*,!REAL_DEBRID`.                  |                  |
+| DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS | Comma-separated list of provider names for which external URLs should use proxy URLs instead of direct URLs. When enabled, STRM files contain proxy URLs that check and refresh expired URLs. Supports `ALL`/`*` for all providers and `!` prefix for negation. Example: `PREMIUMIZE`, `ALL`, `*,!IPTV`. |                  |
+| DEBRIDAV_STRM_PROXY_BASE_URL                    | Base URL for STRM redirect proxy. Defaults to `http://{detected-hostname}:8080` if not set (hostname detected via network at startup). Example: `http://debridav:8080`.                                             |                  |
+| DEBRIDAV_STRM_PROXY_STREAM_MODE                 | Enable streaming mode for STRM proxy. If `true`, content is streamed directly through the proxy instead of redirecting to external URLs. Provides more control over content delivery. If `false` (default), the proxy redirects to the external URL after verifying/refreshing it. | false            |
+
+**Example Configuration:**
+
+```yaml
+# Enable STRM feature
+DEBRIDAV_STRM_ENABLED=true
+DEBRIDAV_STRM_FOLDER_MAPPINGS=tv=tv_strm,movies=movies_strm
+DEBRIDAV_STRM_ROOT_PATH_PREFIX=/data
+
+# Use direct external URLs for IPTV (stable URLs)
+DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV
+
+# Use proxy URLs for Premiumize (expiring URLs)
+DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE
+DEBRIDAV_STRM_PROXY_BASE_URL=http://debridav:8080
+
+# File extension mode
+DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
+DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
+```
+
+**Use Cases:**
+
+- **Media Server Integration**: Some media servers work better with STRM files than VFS mounts
+- **Expiring URLs**: Use proxy URLs for providers with expiring URLs (e.g., Premiumize) to automatically refresh links
+- **Direct Streaming**: Use direct external URLs for providers with stable URLs (e.g., IPTV) to reduce server load
+- **Selective Provider Control**: Configure different URL types per provider based on their URL stability
+
+**Important Notes:**
+
+- **Media Server Compatibility**: **Plex does not support STRM files** - use VFS paths for Plex. Jellyfin and Emby fully support STRM files.
+- **STRM File Creation**: STRM files are created when STRM is enabled and other conditions are met (provider inclusion, filename exclusion, file filter mode). The `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS` setting only changes what URL is written inside the STRM file (external URL vs VFS path), not whether the STRM file is created.
+- **Configuration Precedence**: `DEBRIDAV_STRM_PROVIDERS` takes precedence over `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS`. If a provider is excluded in `DEBRIDAV_STRM_PROVIDERS` (e.g., `*,!IPTV`), no STRM files are created for that provider, and `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS` has no effect for that provider. For example, with `DEBRIDAV_STRM_PROVIDERS=*,!IPTV` and `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV`, no STRM files are created for IPTV, so the external URL setting is irrelevant.
+- **Proxy URLs**: When using proxy URLs, DebriDav checks if URLs are expired when accessed and refreshes them before redirecting or streaming. This ensures URLs are always valid when playback starts.
+- **Streaming Mode**: When `DEBRIDAV_STRM_PROXY_STREAM_MODE=true`, content is streamed through DebriDav instead of redirecting. This provides more control but uses more server resources.
+- **VFS vs STRM**: VFS paths work through DebriDav's streaming service, while STRM files with external URLs allow media servers to stream directly from providers. Choose based on your needs.
+- **Download Usage Reduction**: STRM files help reduce data downloaded during media analysis, which is important for providers like Premiumize that track download usage and may cap/limit downloads per their Fair Use policy.
+
+For detailed STRM configuration and examples, see [STRM_DOCKER_COMPOSE_ENV_VARS.md](STRM_DOCKER_COMPOSE_ENV_VARS.md). For information about different streaming flows, see [MEDIA_STREAMING_FLOWS.md](MEDIA_STREAMING_FLOWS.md).
 
 ## Developing
 

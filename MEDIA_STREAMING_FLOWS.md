@@ -50,7 +50,13 @@ debridav.strm.enabled=false
 ## 2. Direct External URL Flow (STRM)
 
 ### Description
-STRM files contain direct external URLs from debrid providers. Media servers (Plex, Jellyfin) read the STRM file and directly access the external URL, bypassing DebriDav for the actual streaming.
+STRM files contain direct external URLs from debrid providers. Media servers (Jellyfin, Emby) read the STRM file and directly access the external URL, bypassing DebriDav for the actual streaming.
+
+> [!IMPORTANT]
+> **Note**: Plex does not support STRM files. Use VFS paths (Flow 1) for Plex.
+
+> [!TIP]
+> **Why Use STRM Files?** STRM files help reduce the amount of data that media servers download when analyzing media files, which is important for providers like Premiumize that track download usage and may cap/limit downloads per their Fair Use policy.
 
 ### Flow Diagram
 ```
@@ -94,7 +100,7 @@ debridav.strm.use-external-url-for-providers=
 # STRM folder mappings
 debridav.strm.folder-mappings=tv=tv_strm,movies=movies_strm
 
-# Optional path prefix for STRM content
+# Optional path prefix for STRM content (should match Docker volume mapping, typically /data)
 debridav.strm.root-path-prefix=/data
 
 # File extension mode (REPLACE or APPEND)
@@ -116,6 +122,9 @@ DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=REAL_DEBRID,PREMIUMIZE
 
 ### Description
 STRM files contain proxy URLs that point to DebriDav. When accessed, DebriDav verifies/refreshes the external URL and redirects (307) the media server to the external provider URL. This is useful for providers with expiring URLs (e.g., Premiumize).
+
+> [!IMPORTANT]
+> **Note**: Plex does not support STRM files. Use VFS paths (Flow 1) for Plex.
 
 ### Flow Diagram
 ```
@@ -173,6 +182,9 @@ DEBRIDAV_STRM_PROXY_STREAM_MODE=false
 
 ### Description
 Similar to flow 3, but instead of redirecting, DebriDav streams the content directly through the proxy. This provides more control over content delivery, better monitoring, and allows for caching.
+
+> [!IMPORTANT]
+> **Note**: Plex does not support STRM files. Use VFS paths (Flow 1) for Plex.
 
 ### Flow Diagram
 ```
