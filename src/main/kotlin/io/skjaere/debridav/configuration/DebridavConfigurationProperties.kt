@@ -57,6 +57,8 @@ data class DebridavConfigurationProperties(
     val streamingMaxChunkSizeWarningMb: Long = DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB, // Warn when chunk size exceeds this threshold (in MB)
     val streamingBufferSize: Long = DEFAULT_STREAMING_BUFFER_SIZE, // Buffer size in bytes for direct streaming (default: 64KB)
     val streamingFlushMultiplier: Long = DEFAULT_STREAMING_FLUSH_MULTIPLIER, // Flush multiplier - flush interval = bufferSize * multiplier (default: 4, so 64KB * 4 = 256KB flush interval)
+    val enableVfsOptimizationHeaders: Boolean = false, // Enable optimization headers for VFS path (Milton) streaming (default: false for backwards compatibility)
+    val logVfsHeaders: Boolean = false, // Log existing Milton headers before modification (default: false, independent of enableVfsOptimizationHeaders)
     // Local video file approach for ARR projects
     val enableRcloneArrsLocalVideo: Boolean = false, // Enable serving local video files for ARR requests
     val rcloneArrsLocalVideoFilePaths: String? = null, // Video file mapping as comma-separated key=value pairs

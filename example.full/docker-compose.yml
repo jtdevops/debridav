@@ -205,6 +205,18 @@ services:
       # - DEBRIDAV_STREAMING_BUFFER_SIZE=65536
       # Customize flush multiplier (e.g., 4 = flush every 256KB with 64KB buffer)
       # - DEBRIDAV_STREAMING_FLUSH_MULTIPLIER=4
+      
+      # Enable optimization headers for VFS path (Milton) streaming
+      # When false (default), the MediaStreamingOptimizationFilter is completely disabled and will not run
+      # When true, the filter is enabled and optimization headers are added/overridden (Cache-Control: no-store, Content-Encoding: identity, X-Accel-Buffering: no, Accept-Ranges: bytes)
+      # This is an opt-in feature - the filter only runs when this is explicitly set to true
+      - DEBRIDAV_ENABLE_VFS_OPTIMIZATION_HEADERS=${DEBRIDAV_ENABLE_VFS_OPTIMIZATION_HEADERS:-false}
+      
+      # Log existing Milton headers before modification (for debugging/verification)
+      # When false (default), no header logging occurs
+      # When true, logs all response headers that Milton sets at DEBUG level
+      # Independent of enable-vfs-optimization-headers - can log headers even when not applying optimizations
+      - DEBRIDAV_LOG_VFS_HEADERS=${DEBRIDAV_LOG_VFS_HEADERS:-false}
 
       # Cache durations
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m

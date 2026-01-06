@@ -727,6 +727,7 @@ class StreamingService(
         var totalBytesRead = 0L
         var bytesRead: Int
         var bytesSinceLastFlush = 0L
+        var isFirstWrite = true
         
         try {
             while (totalBytesRead < expectedBytes) {
@@ -749,10 +750,17 @@ class StreamingService(
                     activeDownloads[id]?.bytesDownloaded?.addAndGet(bytesRead.toLong())
                 }
                 
-                // Flush periodically to ensure data flows to client
-                if (bytesSinceLastFlush >= flushInterval) {
+                // Immediate flush after first buffer write to get first bytes to client faster
+                if (isFirstWrite) {
                     outputStream.flush()
+                    isFirstWrite = false
                     bytesSinceLastFlush = 0L
+                } else {
+                    // Flush periodically to ensure data flows to client
+                    if (bytesSinceLastFlush >= flushInterval) {
+                        outputStream.flush()
+                        bytesSinceLastFlush = 0L
+                    }
                 }
             }
             
