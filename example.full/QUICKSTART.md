@@ -67,6 +67,20 @@ To customize local video file serving:
 
 If you want to disable this feature, set `DEBRIDAV_ENABLE_RCLONE_ARRS_LOCAL_VIDEO=false` in the docker-compose.yml.
 
+### IPTV Configuration (Optional)
+
+If you want to use IPTV integration, you can configure IPTV providers in the docker-compose.yml file. See the [README](../README.md#iptv-moviestv-shows-integration) for detailed IPTV configuration options.
+
+**FFprobe Metadata Enhancement:**
+
+For enhanced metadata extraction (resolution, codec, and file size) from IPTV media files, you can enable FFprobe metadata enhancement:
+
+- Set `IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=true` to enable FFprobe-based metadata enhancement
+- Set `IPTV_FFPROBE_PATH` to the path of your FFprobe executable (default: "ffprobe" if in system PATH)
+- Set `IPTV_FFPROBE_TIMEOUT` to configure the FFprobe execution timeout (default: PT30S for 30 seconds)
+
+Note: File size fetching in search results is controlled independently by the Prowlarr indexer setting (see [IPTV Indexer Configuration](#iptv-indexer-configuration-optional) above).
+
 ### Additional configuration options
 
 In addition to the configuration options described in [README](../README.md#configuration), the following configuration
@@ -107,6 +121,21 @@ Navigate to http://localhost:9696. You should be greeted with a welcome screen a
 
 Once authentication is configured, navigate to the Indexers section, and use the form to add an indexer.
 Hint: The more popular well-known indexers will have better cache hit rates.
+
+#### IPTV Indexer Configuration (Optional)
+
+If you have IPTV enabled and want to use the DebriDav IPTV indexer:
+
+1. Copy the custom indexer definition file from `prowlarr-config/Definitions/Custom/debridav-iptv.yml` to your Prowlarr configuration directory (if not already there)
+2. Restart Prowlarr to load the custom indexer
+3. Add "DebriDav IPTV" as an indexer in Prowlarr settings
+4. Configure the following indexer settings:
+   - **Fetch actual file size from URL**: When enabled (default: true), fetches actual file size from IPTV URL using HTTP Range requests. This provides more accurate file sizes for Radarr/Sonarr. This setting controls file size retrieval for search results independently of server-side metadata enhancement settings.
+   - **Maximum results to process**: Maximum number of search results to process for metadata enhancements (file size, resolution, codec, etc.). Results are sorted by relevance score before limiting. Leave empty or set to 0 to process all results (default). This can improve performance when many results are returned.
+5. Configure validation titles (optional) for testing the indexer connection:
+   - **Title of Movie or IMDb ID**: For Radarr validation (e.g., "The Matrix" or "tt0133093")
+   - **Title of TV show or IMDb ID**: For Sonarr validation (e.g., "Breaking Bad" or "tt0903747")
+6. Test the configuration and save
 
 ### Add the download client
 

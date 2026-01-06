@@ -21,14 +21,25 @@ import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.IptvFile
 import io.skjaere.debridav.iptv.client.XtreamCodesClient
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
+import io.skjaere.debridav.iptv.metadata.MetadataEnhancer
 import io.skjaere.debridav.iptv.model.ContentType
 import io.skjaere.debridav.iptv.util.IptvResponseFileService
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class IptvRequestService(
@@ -44,10 +55,12 @@ class IptvRequestService(
     private val httpClient: HttpClient,
     private val responseFileService: IptvResponseFileService,
     private val iptvLoginRateLimitService: IptvLoginRateLimitService,
-    private val iptvUrlTemplateRepository: IptvUrlTemplateRepository
+    private val iptvUrlTemplateRepository: IptvUrlTemplateRepository,
+    private val metadataEnhancer: MetadataEnhancer
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     
     
     // Cache for redirect URLs: original URL -> redirect URL
@@ -108,6 +121,7 @@ class IptvRequestService(
         }
         
         // For Xtream Codes movies, fetch metadata using get_vod_info API
+        var movieInfo: io.skjaere.debridav.iptv.client.XtreamCodesClient.MovieInfo? = null
         if (iptvContent.contentType == ContentType.MOVIE) {
             // Check if provider is Xtream Codes
             val providerConfig = iptvConfigurationService.getProviderConfigurations()
@@ -117,7 +131,7 @@ class IptvRequestService(
                 // For Xtream Codes movies, contentId is the vod_id (stored in database)
                 val vodId = contentId
                 logger.info("Detected Xtream Codes movie, fetching metadata via get_vod_info API: vodId=$vodId, contentId=$contentId, title=${iptvContent.title}")
-                fetchAndCacheMovieMetadata(providerConfig, providerName, vodId)
+                movieInfo = fetchAndCacheMovieMetadata(providerConfig, providerName, vodId)
             }
         }
         
@@ -216,10 +230,31 @@ class IptvRequestService(
             }
         }
         
-        // Try to fetch actual file size from IPTV URL, fallback to estimated size
-        logger.debug("Fetching file size for IPTV content - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
-        val (fileSize, _) = runBlocking {
-            fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
+        // Try to get file size from metadata first, then fetch externally if not present
+        val fileSize = if (iptvContent.contentType == ContentType.MOVIE && movieInfo != null) {
+            // Check if metadata has file size in video tags
+            val metadataFileSize = movieInfo.info?.video?.tags?.let { tags ->
+                extractFileSizeFromVideoTags(tags)
+            }
+            
+            if (metadataFileSize != null && metadataFileSize > 0 && !isDefaultFileSize(metadataFileSize, iptvContent.contentType)) {
+                logger.debug("Using file size from movie metadata: ${metadataFileSize / 1_000_000}MB")
+                metadataFileSize
+            } else {
+                // Metadata doesn't have valid file size, fetch from URL
+                logger.debug("File size not found in metadata or is default, fetching from URL - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
+                val (fetchedSize, _) = runBlocking {
+                    fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
+                }
+                fetchedSize
+            }
+        } else {
+            // For series or movies without metadata, fetch from URL
+            logger.debug("Fetching file size from URL - original URL: {}, resolved URL: {}", iptvContent.url, resolvedUrl)
+            val (fetchedSize, _) = runBlocking {
+                fetchActualFileSize(resolvedUrl, iptvContent.contentType, providerName)
+            }
+            fetchedSize
         }
         
         // Extract base URL and suffix from resolved URL
@@ -669,6 +704,22 @@ class IptvRequestService(
             metadata.lastFetch = now
             iptvSeriesMetadataRepository.save(metadata)
             logger.debug("Cached raw JSON response for series $seriesId (${episodes.size} episodes)")
+            
+            // Enhance metadata if video info is missing from reference episode
+            if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
+                try {
+                    runBlocking {
+                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(metadata, episodes, providerConfig)
+                        if (enhanced) {
+                            iptvSeriesMetadataRepository.save(metadata)
+                            logger.debug("Enhanced series metadata saved for series $seriesId")
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to enhance series metadata for series $seriesId: ${e.message}", e)
+                    // Continue with original metadata - enhancement failure is non-blocking
+                }
+            }
         }
         
         return Pair(seriesInfo, episodes)
@@ -735,6 +786,30 @@ class IptvRequestService(
             metadata.lastFetch = now
             iptvMovieMetadataRepository.save(metadata)
             logger.debug("Cached raw JSON response for movie $vodId")
+            
+            // Enhance metadata if video info is missing
+            var finalMovieInfo = movieInfo
+            if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
+                try {
+                    runBlocking {
+                        val enhanced = metadataEnhancer.enhanceMovieMetadata(metadata, movieInfo, providerConfig)
+                        if (enhanced) {
+                            iptvMovieMetadataRepository.save(metadata)
+                            logger.debug("Enhanced movie metadata saved for movie $vodId")
+                            // Re-parse the enhanced JSON to get updated movie info with file size
+                            val enhancedMovieInfo = parseMovieInfoFromJson(providerConfig, vodId, metadata.responseJson)
+                            if (enhancedMovieInfo != null) {
+                                finalMovieInfo = enhancedMovieInfo
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to enhance movie metadata for movie $vodId: ${e.message}", e)
+                    // Continue with original metadata - enhancement failure is non-blocking
+                }
+            }
+            
+            return finalMovieInfo
         }
         
         return movieInfo
@@ -978,26 +1053,55 @@ class IptvRequestService(
      * @param providerName The IPTV provider name (for login call before fetching)
      * @return Pair of (file size, final URL after redirects). Returns estimated size and original URL if request fails.
      */
-    private suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
+    /**
+     * Public method to resolve redirects and get final URL, along with file size if available.
+     * Uses the same logic as fetchActualFileSize and returns both the final URL and file size.
+     * This is used by VideoMetadataExtractor to get the final redirected URL for ffprobe
+     * and reuse the file size to avoid duplicate HTTP requests.
+     * 
+     * @param url The IPTV URL to resolve
+     * @param contentType The content type (for login calls if providerName is provided)
+     * @param providerName The IPTV provider name (optional, for login calls)
+     * @return Pair of (final URL after redirects, file size if available, or null if not available or is default estimate)
+     */
+    suspend fun resolveRedirectUrlForMetadata(url: String, contentType: ContentType? = null, providerName: String? = null): Pair<String, Long?> {
+        // If contentType is not provided, use MOVIE as default (most common case)
+        val contentTypeToUse = contentType ?: ContentType.MOVIE
+        val (fileSize, finalUrl) = fetchActualFileSize(url, contentTypeToUse, providerName)
+        
+        // Return file size only if it's not the default estimated size
+        // This allows the caller to know if we got a real file size or just an estimate
+        val actualFileSize = if (!isDefaultFileSize(fileSize, contentTypeToUse)) {
+            fileSize
+        } else {
+            null
+        }
+        
+        return Pair(finalUrl, actualFileSize)
+    }
+    
+    suspend fun fetchActualFileSize(url: String, contentType: ContentType, providerName: String?): Pair<Long, String> {
+        logger.debug("fetchActualFileSize called: url={}, contentType={}, providerName={}", url.take(100), contentType, providerName)
         // Make an initial login/test call to the provider before fetching file size
         // Rate limiting: shared across all services per provider
+        // Use atomic check-and-record to prevent race conditions in parallel processing
         if (providerName != null) {
             try {
-                if (iptvLoginRateLimitService.shouldRateLimit(providerName)) {
-                    val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
-                    logger.debug("Skipping IPTV provider login call for $providerName before fetching file size (rate limited, last call was ${timeSinceLastCall}ms ago)")
-                } else {
+                if (iptvLoginRateLimitService.shouldProceedWithLoginCall(providerName)) {
+                    // This thread won the race - proceed with verification call
                     val providerConfigs = iptvConfigurationService.getProviderConfigurations()
                     val providerConfig = providerConfigs.find { it.name == providerName }
                     if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
                         logger.debug("Making initial login call to IPTV provider $providerName before fetching file size")
                         val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
-                        // Update timestamp after successful call
-                        iptvLoginRateLimitService.recordLoginCall(providerName)
                         if (!loginSuccess) {
                             logger.warn("IPTV provider login verification failed for $providerName, but continuing with file size fetch")
                         }
                     }
+                } else {
+                    // Rate limited - another thread already made the call or it was made recently
+                    val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
+                    logger.debug("Skipping IPTV provider login call for $providerName before fetching file size (rate limited, last call was ${timeSinceLastCall}ms ago)")
                 }
             } catch (e: Exception) {
                 logger.warn("Failed to make initial login call to IPTV provider $providerName before fetching file size: ${e.message}, continuing with fetch attempt", e)
@@ -1073,7 +1177,9 @@ class IptvRequestService(
                             } catch (e: Exception) {
                                 // Ignore errors when consuming response body
                             }
-                            return Pair(estimateIptvSize(contentType), redirectUrl)
+                            val estimatedSize = estimateIptvSize(contentType)
+                            logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", redirectUrl, estimatedSize, estimatedSize / 1_000_000)
+                            return Pair(estimatedSize, redirectUrl)
                         }
                         
                         // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
@@ -1090,6 +1196,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
+                                logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", redirectUrl, totalSize, totalSize / 1_000_000)
                                 return Pair(totalSize, redirectUrl)
                             }
                         }
@@ -1103,10 +1210,13 @@ class IptvRequestService(
                         }
                         if (contentLength != null && contentLength > 0) {
                             logger.debug("Retrieved actual file size from IPTV redirect URL Content-Length header: $contentLength bytes (redirectUrl: $redirectUrl)")
+                            logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", redirectUrl, contentLength, contentLength / 1_000_000)
                             return Pair(contentLength, redirectUrl)
                         } else {
                             logger.debug("Content-Range and Content-Length headers not available for IPTV redirect URL, using estimated size (redirectUrl: $redirectUrl)")
-                            return Pair(estimateIptvSize(contentType), redirectUrl)
+                            val estimatedSize = estimateIptvSize(contentType)
+                            logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", redirectUrl, estimatedSize, estimatedSize / 1_000_000)
+                            return Pair(estimatedSize, redirectUrl)
                         }
                     } else {
                         // No redirect location - fallback to estimated size
@@ -1116,7 +1226,9 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                        return Pair(estimateIptvSize(contentType), url)
+                        val estimatedSize = estimateIptvSize(contentType)
+                        logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+                        return Pair(estimatedSize, url)
                     }
                 }
                 
@@ -1128,7 +1240,9 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
-                    return Pair(estimateIptvSize(contentType), url)
+                    val estimatedSize = estimateIptvSize(contentType)
+                    logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+                    return Pair(estimatedSize, url)
                 }
                 
                 // Try to extract file size from Content-Range header first (e.g., "bytes 0-0/1882075726")
@@ -1145,6 +1259,7 @@ class IptvRequestService(
                                 } catch (e: Exception) {
                                     // Ignore errors when consuming response body
                                 }
+                        logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", url, totalSize, totalSize / 1_000_000)
                         return Pair(totalSize, url)
                     }
                 }
@@ -1158,10 +1273,13 @@ class IptvRequestService(
                                 }
                 if (contentLength != null && contentLength > 0) {
                     logger.debug("Retrieved actual file size from IPTV URL Content-Length header: $contentLength bytes ($url)")
+                    logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=false", url, contentLength, contentLength / 1_000_000)
                     return Pair(contentLength, url)
                 } else {
                     logger.debug("Content-Range and Content-Length headers not available for IPTV URL, using estimated size ($url)")
-                    return Pair(estimateIptvSize(contentType), url)
+                    val estimatedSize = estimateIptvSize(contentType)
+                    logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+                    return Pair(estimatedSize, url)
                 }
             } catch (e: Exception) {
                 val isNetworkError = e.message?.contains("timeout", ignoreCase = true) == true ||
@@ -1179,7 +1297,9 @@ class IptvRequestService(
         }
         
         // Fallback to estimated size if all retries failed
-        return Pair(estimateIptvSize(contentType), url)
+        val estimatedSize = estimateIptvSize(contentType)
+        logger.trace("FETCH_ACTUAL_FILE_SIZE_RESULT: finalUrl={}, fileSize={} bytes ({}MB), isEstimated=true", url, estimatedSize, estimatedSize / 1_000_000)
+        return Pair(estimatedSize, url)
     }
     
     /**
@@ -1475,6 +1595,21 @@ class IptvRequestService(
     }
     
     /**
+     * Builds movie URL for Xtream Codes provider.
+     * Format: {baseUrl}/movie/{username}/{password}/{vodId}.{extension}
+     */
+    private fun buildMovieUrl(
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        vodId: String,
+        extension: String = "mp4"
+    ): String? {
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
+        val username = providerConfig.xtreamUsername ?: return null
+        val password = providerConfig.xtreamPassword ?: return null
+        return "$baseUrl/movie/$username/$password/$vodId.$extension"
+    }
+    
+    /**
      * Maps video codec name to magnet title codec format.
      * Returns "x265" for HEVC/H.265, "x264" for H.264, or "x264" as default.
      */
@@ -1661,8 +1796,277 @@ class IptvRequestService(
         return title
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false): List<IptvSearchResult> {
-        val results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
+    /**
+     * Processes items in parallel batches with configurable concurrency.
+     * Splits items into batches and processes each batch in parallel, then moves to the next batch sequentially.
+     * 
+     * @param items List of items to process
+     * @param batchSize Number of concurrent operations per batch
+     * @param processor Function to process each item (should be thread-safe)
+     */
+    private suspend fun <T> processInBatches(
+        items: List<T>,
+        batchSize: Int,
+        processor: suspend (T) -> Unit
+    ) {
+        if (items.isEmpty()) return
+        
+        val batches = items.chunked(batchSize)
+        logger.debug("Processing ${items.size} items in ${batches.size} batches (batch size: $batchSize)")
+        
+        batches.forEachIndexed { batchIndex, batch ->
+            logger.debug("Processing batch ${batchIndex + 1}/${batches.size} with ${batch.size} items")
+            coroutineScope {
+                batch.map { item ->
+                    async {
+                        try {
+                            processor(item)
+                        } catch (e: Exception) {
+                            logger.warn("Error processing item in batch: ${e.message}", e)
+                            // Continue processing other items - don't fail entire batch
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+    }
+    
+    /**
+     * Processes movie metadata for a single entity (thread-safe).
+     * Extracts year, resolution, codec, and file size from movie metadata.
+     */
+    private suspend fun processMovieMetadata(
+        entity: IptvContentEntity,
+        entityMovieYears: ConcurrentHashMap<String, Int>,
+        entityMovieResolutions: ConcurrentHashMap<String, String>,
+        entityMovieCodecs: ConcurrentHashMap<String, String>,
+        entityMovieFileSizes: ConcurrentHashMap<String, Long>
+    ) {
+        val providerConfig = iptvConfigurationService.getProviderConfigurations()
+            .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+        
+        if (providerConfig != null) {
+            // Try to get from cache first
+            val cachedMetadata = iptvMovieMetadataRepository.findByProviderNameAndMovieId(entity.providerName, entity.contentId)
+            val movieInfo = if (cachedMetadata != null) {
+                // Parse from cached JSON response
+                logger.debug("Parsing movie metadata from cached JSON response for movie ${entity.contentId}")
+                var parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                
+                // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
+                if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled && parsedMovieInfo != null) {
+                    try {
+                        val enhanced = metadataEnhancer.enhanceMovieMetadata(cachedMetadata, parsedMovieInfo, providerConfig)
+                        if (enhanced) {
+                            iptvMovieMetadataRepository.save(cachedMetadata)
+                            logger.debug("Enhanced cached movie metadata saved for movie ${entity.contentId}")
+                            // Re-parse the enhanced JSON to get updated movie info
+                            parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                            // Debug: verify file size is in the re-parsed data
+                            parsedMovieInfo?.info?.video?.tags?.let { tags ->
+                                logger.debug("After enhancement re-parse, video tags for movie ${entity.contentId}: ${tags.keys.joinToString(", ")}")
+                                tags["NUMBER_OF_BYTES"]?.let { fileSizeStr ->
+                                    logger.debug("Found NUMBER_OF_BYTES in tags after re-parse for movie ${entity.contentId}: $fileSizeStr")
+                                } ?: logger.debug("NUMBER_OF_BYTES not found in tags after re-parse for movie ${entity.contentId}")
+                            } ?: logger.debug("No video tags found after re-parse for movie ${entity.contentId}")
+                        }
+                    } catch (e: Exception) {
+                        logger.warn("Failed to enhance cached movie metadata for movie ${entity.contentId}: ${e.message}", e)
+                        // Continue with original metadata - enhancement failure is non-blocking
+                    }
+                }
+                
+                parsedMovieInfo
+            } else {
+                // No cache, fetch and store
+                logger.debug("No cache found for movie ${entity.contentId}, fetching from API")
+                fetchAndCacheMovieMetadata(providerConfig, entity.providerName, entity.contentId)
+            }
+            
+            // Extract year from movie info
+            if (movieInfo != null) {
+                // Try multiple field names for release date (API may use different formats)
+                val releaseDateStr = movieInfo.releaseDate 
+                    ?: movieInfo.release_date 
+                    ?: movieInfo.info?.releaseDate 
+                    ?: movieInfo.info?.release_date 
+                    ?: movieInfo.info?.releasedate
+                val movieYear = extractYearFromReleaseDate(releaseDateStr)
+                if (movieYear != null) {
+                    entityMovieYears["${entity.providerName}_${entity.contentId}"] = movieYear
+                    logger.debug("Extracted year $movieYear from movie metadata for movie ${entity.contentId}")
+                }
+                
+                // Extract resolution, codec, and file size from video info
+                // Note: video field may be an empty array [] in some API responses, so we check if it's actually an object
+                movieInfo.info?.video?.let { videoInfo ->
+                    if (videoInfo.width != null && videoInfo.height != null) {
+                        val resolution = when {
+                            videoInfo.width!! >= 1920 || videoInfo.height!! >= 1080 -> "1080p"
+                            videoInfo.width!! >= 1280 || videoInfo.height!! >= 720 -> "720p"
+                            else -> "480p"
+                        }
+                        entityMovieResolutions["${entity.providerName}_${entity.contentId}"] = resolution
+                        logger.debug("Extracted resolution $resolution from movie metadata for movie ${entity.contentId} (${videoInfo.width}x${videoInfo.height})")
+                    }
+                    
+                    // Extract codec from video info
+                    videoInfo.codec_name?.let { codec ->
+                        val normalizedCodec = when {
+                            codec.contains("265", ignoreCase = true) || codec.contains("hevc", ignoreCase = true) -> "x265"
+                            codec.contains("264", ignoreCase = true) || codec.contains("avc", ignoreCase = true) -> "x264"
+                            else -> null
+                        }
+                        if (normalizedCodec != null) {
+                            entityMovieCodecs["${entity.providerName}_${entity.contentId}"] = normalizedCodec
+                            logger.debug("Extracted codec $normalizedCodec from movie metadata for movie ${entity.contentId} (codec: $codec)")
+                        }
+                    }
+                    
+                    // Extract file size from video tags (NUMBER_OF_BYTES) - most accurate
+                    // Debug: log tags to see what's available
+                    if (videoInfo.tags != null) {
+                        logger.debug("Video tags available for movie ${entity.contentId}: ${videoInfo.tags.keys.joinToString(", ")}")
+                    } else {
+                        logger.debug("No video tags found for movie ${entity.contentId}")
+                    }
+                    val fileSize = extractFileSizeFromVideoTags(videoInfo.tags)
+                    if (fileSize != null) {
+                        entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = fileSize
+                        logger.debug("Extracted file size ${fileSize / 1_000_000}MB from movie metadata for movie ${entity.contentId}")
+                    } else {
+                        // Fallback: calculate from duration and BPS/bitrate
+                        // Prefer BPS from video tags (more accurate than top-level bitrate)
+                        val calculatedSize = calculateFileSizeFromDurationAndBitrate(
+                            movieInfo.info?.duration_secs,
+                            movieInfo.info?.bitrate,
+                            videoInfo.tags
+                        )
+                        if (calculatedSize != null) {
+                            entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = calculatedSize
+                            val bps = extractBpsFromVideoTags(videoInfo.tags)
+                            if (bps != null) {
+                                logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and BPS for movie ${entity.contentId} (duration=${movieInfo.info?.duration_secs}s, BPS=${bps}bps)")
+                            } else {
+                                logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and bitrate for movie ${entity.contentId} (duration=${movieInfo.info?.duration_secs}s, bitrate=${movieInfo.info?.bitrate}kbps)")
+                            }
+                        }
+                    }
+                } ?: run {
+                    // Video info not available (empty array or null) - try to calculate from duration and bitrate if available
+                    val calculatedSize = calculateFileSizeFromDurationAndBitrate(
+                        movieInfo.info?.duration_secs,
+                        movieInfo.info?.bitrate,
+                        null // No video tags available
+                    )
+                    if (calculatedSize != null) {
+                        entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = calculatedSize
+                        logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and bitrate for movie ${entity.contentId} (video info not available, duration=${movieInfo.info?.duration_secs}s, bitrate=${movieInfo.info?.bitrate}kbps)")
+                    } else {
+                        logger.debug("Video info not available in movie metadata for movie ${entity.contentId} (video field may be empty array), and cannot calculate from duration/bitrate")
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Processes series metadata for a single entity (thread-safe).
+     * Extracts year, resolution, and codec from series metadata.
+     */
+    private suspend fun processSeriesMetadata(
+        entity: IptvContentEntity,
+        entitySeriesYears: ConcurrentHashMap<String, Int>,
+        entityResolutions: ConcurrentHashMap<String, String>,
+        entityCodecs: ConcurrentHashMap<String, String>
+    ) {
+        val providerConfig = iptvConfigurationService.getProviderConfigurations()
+            .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
+        
+        if (providerConfig != null) {
+            // Try to get from cache first
+            val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(entity.providerName, entity.contentId)
+            val (seriesInfo, episodes) = if (cachedMetadata != null) {
+                // Parse from cached JSON response
+                logger.debug("Parsing series metadata from cached JSON response for series ${entity.contentId}")
+                var parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                
+                // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
+                if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled && parsedResult.second.isNotEmpty()) {
+                    try {
+                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(cachedMetadata, parsedResult.second, providerConfig)
+                        if (enhanced) {
+                            iptvSeriesMetadataRepository.save(cachedMetadata)
+                            logger.debug("Enhanced cached series metadata saved for series ${entity.contentId}")
+                            // Re-parse the enhanced JSON to get updated series info and episodes
+                            parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                        }
+                    } catch (e: Exception) {
+                        logger.warn("Failed to enhance cached series metadata for series ${entity.contentId}: ${e.message}", e)
+                        // Continue with original metadata - enhancement failure is non-blocking
+                    }
+                }
+                
+                parsedResult
+            } else {
+                // No cache, fetch and store
+                logger.debug("No cache found for series ${entity.contentId}, fetching from API")
+                fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
+            }
+            
+            // Extract year from series info
+            if (seriesInfo != null) {
+                val seriesYear = extractYearFromReleaseDate(seriesInfo.release_date ?: seriesInfo.releaseDate)
+                if (seriesYear != null) {
+                    entitySeriesYears["${entity.providerName}_${entity.contentId}"] = seriesYear
+                    logger.debug("Extracted year $seriesYear from series metadata for series ${entity.contentId}")
+                }
+            }
+            
+            // Extract resolution and codec from first episode (S01E01) as reference
+            if (episodes.isNotEmpty()) {
+                val referenceEpisode = episodes.find { it.season == 1 && it.episode == 1 }
+                
+                if (referenceEpisode != null) {
+                    // Extract resolution from video metadata
+                    val resolution = referenceEpisode.info?.video?.let { video ->
+                        extractResolutionFromVideo(video.width, video.height)
+                    }
+                    if (resolution != null) {
+                        entityResolutions["${entity.providerName}_${entity.contentId}"] = resolution
+                        logger.debug("Extracted resolution from S01E01 for series ${entity.contentId}: $resolution (width=${referenceEpisode.info?.video?.width}, height=${referenceEpisode.info?.video?.height})")
+                    }
+                    
+                    // Extract codec from video metadata
+                    val codec = referenceEpisode.info?.video?.codec_name?.let { codecName ->
+                        mapCodecToMagnetFormat(codecName)
+                    }
+                    if (codec != null) {
+                        entityCodecs["${entity.providerName}_${entity.contentId}"] = codec
+                        logger.debug("Extracted codec from S01E01 for series ${entity.contentId}: $codec (codec_name=${referenceEpisode.info?.video?.codec_name})")
+                    }
+                } else {
+                    logger.debug("S01E01 not found for series ${entity.contentId}, will use default estimates")
+                }
+            }
+        }
+    }
+    
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null): List<IptvSearchResult> {
+        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}, limit={}", title, contentType, isTestRequest, fetchFileSize, limit)
+        var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
+        
+        // For test requests (connectivity tests), limit to first result early to avoid unnecessary processing
+        if (isTestRequest && results.isNotEmpty()) {
+            results = listOf(results.first())
+            logger.debug("Test request: limiting to first result only (${results.size} result)")
+        } else if (limit != null && limit > 0 && results.size > limit) {
+            // Apply limit after sorting (results are already sorted by relevance score from searchContent)
+            // This limits the number of results that will be processed for metadata enhancements
+            val originalSize = results.size
+            results = results.take(limit)
+            logger.debug("Limiting results to {} (from {} total) before metadata processing", limit, originalSize)
+        }
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
         val requestedSeason = episode?.let { parseSeasonFromEpisode(it) }
@@ -1671,185 +2075,70 @@ class IptvRequestService(
         
         // For series with episode parameter, fetch episodes to verify season availability and calculate accurate size
         // Store episode count per entity for size calculation
-        val entityEpisodeCounts = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: episode count
+        val entityEpisodeCounts = ConcurrentHashMap<String, Int>() // Key: "${providerName}_${contentId}", Value: episode count
         // Store requested episode number per entity for single episode size calculation
-        val entityRequestedEpisodeNumbers = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: requested episode number
+        val entityRequestedEpisodeNumbers = ConcurrentHashMap<String, Int>() // Key: "${providerName}_${contentId}", Value: requested episode number
         // Store series year from info per entity for magnet title
-        val entitySeriesYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: series year from info
+        val entitySeriesYears = ConcurrentHashMap<String, Int>() // Key: "${providerName}_${contentId}", Value: series year from info
         // Store reference episode file size per entity for accurate size calculation
         // Uses first episode of requested season if available, otherwise falls back to S01E01
-        val entityReferenceEpisodeFileSizes = mutableMapOf<String, Long>() // Key: "${providerName}_${contentId}", Value: reference episode file size in bytes
+        val entityReferenceEpisodeFileSizes = ConcurrentHashMap<String, Long>() // Key: "${providerName}_${contentId}", Value: reference episode file size in bytes
         // Store resolution per entity from reference episode video metadata
-        val entityResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
+        val entityResolutions = ConcurrentHashMap<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
         // Store codec per entity from reference episode video metadata
-        val entityCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
+        val entityCodecs = ConcurrentHashMap<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
         // Store movie year from info per entity for magnet title
-        val entityMovieYears = mutableMapOf<String, Int>() // Key: "${providerName}_${contentId}", Value: movie year from info
+        val entityMovieYears = ConcurrentHashMap<String, Int>() // Key: "${providerName}_${contentId}", Value: movie year from info
         // Store movie resolution per entity from video metadata
-        val entityMovieResolutions = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
+        val entityMovieResolutions = ConcurrentHashMap<String, String>() // Key: "${providerName}_${contentId}", Value: resolution (1080p, 720p, 480p)
         // Store movie codec per entity from video metadata
-        val entityMovieCodecs = mutableMapOf<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
+        val entityMovieCodecs = ConcurrentHashMap<String, String>() // Key: "${providerName}_${contentId}", Value: codec (x265, x264)
         // Store movie file size per entity from video metadata
-        val entityMovieFileSizes = mutableMapOf<String, Long>() // Key: "${providerName}_${contentId}", Value: file size in bytes
+        val entityMovieFileSizes = ConcurrentHashMap<String, Long>() // Key: "${providerName}_${contentId}", Value: file size in bytes
         
         // For movies, fetch metadata to get year, resolution, codec, and file size
-        if (contentType == ContentType.MOVIE) {
-            results.forEach { entity ->
-                val providerConfig = iptvConfigurationService.getProviderConfigurations()
-                    .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
-                
-                if (providerConfig != null) {
-                    // Try to get from cache first
-                    val cachedMetadata = iptvMovieMetadataRepository.findByProviderNameAndMovieId(entity.providerName, entity.contentId)
-                    val movieInfo = if (cachedMetadata != null) {
-                        // Parse from cached JSON response
-                        logger.debug("Parsing movie metadata from cached JSON response for movie ${entity.contentId}")
-                        parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
-                    } else {
-                        // No cache, fetch and store
-                        logger.debug("No cache found for movie ${entity.contentId}, fetching from API")
-                        fetchAndCacheMovieMetadata(providerConfig, entity.providerName, entity.contentId)
-                    }
-                    
-                    // Extract year from movie info
-                    if (movieInfo != null) {
-                        // Try multiple field names for release date (API may use different formats)
-                        val releaseDateStr = movieInfo.releaseDate 
-                            ?: movieInfo.release_date 
-                            ?: movieInfo.info?.releaseDate 
-                            ?: movieInfo.info?.release_date 
-                            ?: movieInfo.info?.releasedate
-                        val movieYear = extractYearFromReleaseDate(releaseDateStr)
-                        if (movieYear != null) {
-                            entityMovieYears["${entity.providerName}_${entity.contentId}"] = movieYear
-                            logger.debug("Extracted year $movieYear from movie metadata for movie ${entity.contentId}")
-                        }
-                        
-                        // Extract resolution, codec, and file size from video info
-                        // Note: video field may be an empty array [] in some API responses, so we check if it's actually an object
-                        movieInfo.info?.video?.let { videoInfo ->
-                            if (videoInfo.width != null && videoInfo.height != null) {
-                                val resolution = when {
-                                    videoInfo.width!! >= 1920 || videoInfo.height!! >= 1080 -> "1080p"
-                                    videoInfo.width!! >= 1280 || videoInfo.height!! >= 720 -> "720p"
-                                    else -> "480p"
-                                }
-                                entityMovieResolutions["${entity.providerName}_${entity.contentId}"] = resolution
-                                logger.debug("Extracted resolution $resolution from movie metadata for movie ${entity.contentId} (${videoInfo.width}x${videoInfo.height})")
-                            }
-                            
-                            // Extract codec from video info
-                            videoInfo.codec_name?.let { codec ->
-                                val normalizedCodec = when {
-                                    codec.contains("265", ignoreCase = true) || codec.contains("hevc", ignoreCase = true) -> "x265"
-                                    codec.contains("264", ignoreCase = true) || codec.contains("avc", ignoreCase = true) -> "x264"
-                                    else -> null
-                                }
-                                if (normalizedCodec != null) {
-                                    entityMovieCodecs["${entity.providerName}_${entity.contentId}"] = normalizedCodec
-                                    logger.debug("Extracted codec $normalizedCodec from movie metadata for movie ${entity.contentId} (codec: $codec)")
-                                }
-                            }
-                            
-                            // Extract file size from video tags (NUMBER_OF_BYTES) - most accurate
-                            val fileSize = extractFileSizeFromVideoTags(videoInfo.tags)
-                            if (fileSize != null) {
-                                entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = fileSize
-                                logger.debug("Extracted file size ${fileSize / 1_000_000}MB from movie metadata for movie ${entity.contentId}")
-                            } else {
-                                // Fallback: calculate from duration and BPS/bitrate
-                                // Prefer BPS from video tags (more accurate than top-level bitrate)
-                                val calculatedSize = calculateFileSizeFromDurationAndBitrate(
-                                    movieInfo.info?.duration_secs,
-                                    movieInfo.info?.bitrate,
-                                    videoInfo.tags
-                                )
-                                if (calculatedSize != null) {
-                                    entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = calculatedSize
-                                    val bps = extractBpsFromVideoTags(videoInfo.tags)
-                                    if (bps != null) {
-                                        logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and BPS for movie ${entity.contentId} (duration=${movieInfo.info?.duration_secs}s, BPS=${bps}bps)")
-                                    } else {
-                                        logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and bitrate for movie ${entity.contentId} (duration=${movieInfo.info?.duration_secs}s, bitrate=${movieInfo.info?.bitrate}kbps)")
-                                    }
-                                }
-                            }
-                        } ?: run {
-                            // Video info not available (empty array or null) - try to calculate from duration and bitrate if available
-                            val calculatedSize = calculateFileSizeFromDurationAndBitrate(
-                                movieInfo.info?.duration_secs,
-                                movieInfo.info?.bitrate,
-                                null // No video tags available
-                            )
-                            if (calculatedSize != null) {
-                                entityMovieFileSizes["${entity.providerName}_${entity.contentId}"] = calculatedSize
-                                logger.debug("Calculated file size ${calculatedSize / 1_000_000}MB from duration and bitrate for movie ${entity.contentId} (video info not available, duration=${movieInfo.info?.duration_secs}s, bitrate=${movieInfo.info?.bitrate}kbps)")
-                            } else {
-                                logger.debug("Video info not available in movie metadata for movie ${entity.contentId} (video field may be empty array), and cannot calculate from duration/bitrate")
-                            }
-                        }
-                    }
+        // IMPORTANT: Skip metadata fetching for test requests (connectivity tests) - we only need to verify IPTV content can be queried.
+        // Note: We may have resolved an IMDb ID to a title in the controller, but we skip fetching other metadata here.
+        logger.debug("Checking movie metadata fetch: contentType={}, isTestRequest={}, shouldSkip={}", contentType, isTestRequest, contentType == ContentType.MOVIE && isTestRequest)
+        if (contentType == ContentType.MOVIE && !isTestRequest) {
+            runBlocking {
+                processInBatches(
+                    items = results,
+                    batchSize = iptvConfigurationProperties.metadataFetchBatchSize
+                ) { entity ->
+                    processMovieMetadata(
+                        entity = entity,
+                        entityMovieYears = entityMovieYears,
+                        entityMovieResolutions = entityMovieResolutions,
+                        entityMovieCodecs = entityMovieCodecs,
+                        entityMovieFileSizes = entityMovieFileSizes
+                    )
                 }
             }
+        } else if (contentType == ContentType.MOVIE && isTestRequest) {
+            logger.debug("Skipping movie metadata fetch for test request (qTest parameter only)")
         }
         
         // For series, fetch metadata to get year, resolution, and codec (even when no episode parameter)
         // This ensures we always extract codec and resolution from the API, not just when episode parameter is provided
-        if (contentType == ContentType.SERIES) {
-            results.forEach { entity ->
-                val providerConfig = iptvConfigurationService.getProviderConfigurations()
-                    .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
-                
-                if (providerConfig != null) {
-                    // Try to get from cache first
-                    val cachedMetadata = iptvSeriesMetadataRepository.findByProviderNameAndSeriesId(entity.providerName, entity.contentId)
-                    val (seriesInfo, episodes) = if (cachedMetadata != null) {
-                        // Parse from cached JSON response
-                        logger.debug("Parsing series metadata from cached JSON response for series ${entity.contentId}")
-                        parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
-                    } else {
-                        // No cache, fetch and store
-                        logger.debug("No cache found for series ${entity.contentId}, fetching from API")
-                        fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
-                    }
-                    
-                    // Extract year from series info
-                    if (seriesInfo != null) {
-                        val seriesYear = extractYearFromReleaseDate(seriesInfo.release_date ?: seriesInfo.releaseDate)
-                        if (seriesYear != null) {
-                            entitySeriesYears["${entity.providerName}_${entity.contentId}"] = seriesYear
-                            logger.debug("Extracted year $seriesYear from series metadata for series ${entity.contentId}")
-                        }
-                    }
-                    
-                    // Extract resolution and codec from first episode (S01E01) as reference
-                    if (episodes.isNotEmpty()) {
-                        val referenceEpisode = episodes.find { it.season == 1 && it.episode == 1 }
-                        
-                        if (referenceEpisode != null) {
-                            // Extract resolution from video metadata
-                            val resolution = referenceEpisode.info?.video?.let { video ->
-                                extractResolutionFromVideo(video.width, video.height)
-                            }
-                            if (resolution != null) {
-                                entityResolutions["${entity.providerName}_${entity.contentId}"] = resolution
-                                logger.debug("Extracted resolution from S01E01 for series ${entity.contentId}: $resolution (width=${referenceEpisode.info?.video?.width}, height=${referenceEpisode.info?.video?.height})")
-                            }
-                            
-                            // Extract codec from video metadata
-                            val codec = referenceEpisode.info?.video?.codec_name?.let { codecName ->
-                                mapCodecToMagnetFormat(codecName)
-                            }
-                            if (codec != null) {
-                                entityCodecs["${entity.providerName}_${entity.contentId}"] = codec
-                                logger.debug("Extracted codec from S01E01 for series ${entity.contentId}: $codec (codec_name=${referenceEpisode.info?.video?.codec_name})")
-                            }
-                        } else {
-                            logger.debug("S01E01 not found for series ${entity.contentId}, will use default estimates")
-                        }
-                    }
+        // IMPORTANT: Skip metadata fetching for test requests (connectivity tests) - we only need to verify IPTV content can be queried.
+        // Note: We may have resolved an IMDb ID to a title in the controller, but we skip fetching other metadata here.
+        if (contentType == ContentType.SERIES && !isTestRequest) {
+            runBlocking {
+                processInBatches(
+                    items = results,
+                    batchSize = iptvConfigurationProperties.metadataFetchBatchSize
+                ) { entity ->
+                    processSeriesMetadata(
+                        entity = entity,
+                        entitySeriesYears = entitySeriesYears,
+                        entityResolutions = entityResolutions,
+                        entityCodecs = entityCodecs
+                    )
                 }
             }
+        } else if (contentType == ContentType.SERIES && isTestRequest) {
+            logger.debug("Skipping series metadata fetch for test request (qTest parameter only)")
         }
         
         val seriesWithEpisodes = if (contentType == ContentType.SERIES && requestedSeason != null) {
@@ -2304,8 +2593,78 @@ class IptvRequestService(
                     estimateIptvSize(entity.contentType)
                 }
             } else {
-                // For movies or series without episode parameter, use default estimate
-                estimateIptvSize(entity.contentType)
+                // For movies, try to use file size from metadata if available
+                if (entity.contentType == ContentType.MOVIE) {
+                    val mapKey = "${entity.providerName}_${entity.contentId}"
+                    val movieFileSize = entityMovieFileSizes[mapKey]
+                    
+                    // Check if metadata file size exists and is not the default estimated size
+                    val shouldFetchFromUrl = if (movieFileSize != null && movieFileSize > 0) {
+                        // If metadata has a file size, check if it's the default size
+                        if (isDefaultFileSize(movieFileSize, entity.contentType)) {
+                            logger.debug("File size from movie metadata for movie ${entity.contentId} is default estimate (${movieFileSize / 1_000_000}MB), will fetch actual size from URL")
+                            true // Need to fetch from URL
+                        } else {
+                            logger.debug("Using file size from movie metadata for movie ${entity.contentId}: ${movieFileSize / 1_000_000}MB")
+                            false // Use metadata size, don't fetch
+                        }
+                    } else {
+                        // Debug: log what's in the map
+                        logger.debug("File size not found in entityMovieFileSizes for movie ${entity.contentId} (key: $mapKey). Map contains ${entityMovieFileSizes.size} entries. Available keys: ${entityMovieFileSizes.keys.take(5).joinToString(", ")}")
+                        true // Need to fetch from URL
+                    }
+                    
+                    if (shouldFetchFromUrl) {
+                        // Try to fetch actual file size from URL (same method used in /api/v2/torrent/add)
+                        // Skip for test requests to keep them fast
+                        // File size fetching is controlled by Prowlarr config (fetchFileSize parameter)
+                        // This is separate from ffprobeMetadataEnhancementEnabled which controls FFprobe-based enhancement
+                        if (!isTestRequest && fetchFileSize) {
+                            try {
+                                val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)
+                                logger.debug("Fetching file size from URL for movie ${entity.contentId}: ${resolvedUrl.take(100)}")
+                                val (fetchedSize, _) = runBlocking {
+                                    fetchActualFileSize(resolvedUrl, entity.contentType, entity.providerName)
+                                }
+                                // Only use if it's not the default estimated size
+                                if (!isDefaultFileSize(fetchedSize, entity.contentType)) {
+                                    logger.debug("Fetched file size from URL for movie ${entity.contentId}: ${fetchedSize / 1_000_000}MB")
+                                    // Store the fetched file size in the metadata cache for future use
+                                    storeFileSizeInMetadataCache(entity.providerName, entity.contentId, fetchedSize)
+                                    // Also add to entityMovieFileSizes for consistency within this search request
+                                    entityMovieFileSizes[mapKey] = fetchedSize
+                                    fetchedSize
+                                } else {
+                                    logger.debug("Fetched file size from URL for movie ${entity.contentId} returned default estimate (${fetchedSize / 1_000_000}MB), using fallback")
+                                    estimateIptvSize(entity.contentType)
+                                }
+                            } catch (e: Exception) {
+                                logger.debug("Failed to fetch file size from URL for movie ${entity.contentId}: ${e.message}, using fallback estimate")
+                                estimateIptvSize(entity.contentType)
+                            }
+                        } else {
+                            if (isTestRequest) {
+                                logger.debug("Skipping file size fetch from URL for test request (qTest parameter only)")
+                            } else {
+                                logger.debug("Skipping file size fetch from URL - fetchFileSize parameter is false (controlled by Prowlarr indexer setting)")
+                            }
+                            // Fallback to default estimate (or use metadata size if it exists, even if default)
+                            movieFileSize ?: estimateIptvSize(entity.contentType)
+                        }
+                    } else {
+                        // Use the metadata file size (already verified it's not default)
+                        // movieFileSize is guaranteed to be non-null here because shouldFetchFromUrl is false
+                        movieFileSize ?: estimateIptvSize(entity.contentType)
+                    }
+                } else {
+                    // For series without episode parameter, use default estimate
+                    estimateIptvSize(entity.contentType)
+                }
+            }
+            
+            // Log the final size being used for debugging
+            if (entity.contentType == ContentType.MOVIE) {
+                logger.debug("Final file size for movie ${entity.contentId}: ${estimatedSize / 1_000_000}MB (isDefault: ${isDefaultFileSize(estimatedSize, entity.contentType)})")
             }
             
             IptvSearchResult(
@@ -2612,6 +2971,178 @@ class IptvRequestService(
         
         // Fallback for legacy records that might have full URL stored
         return tokenizedUrl
+    }
+    
+    /**
+     * Stores an externally fetched file size in the metadata cache JSON.
+     * This allows the file size to be reused when fetchFileSize=false.
+     * 
+     * @param providerName The IPTV provider name
+     * @param contentId The content ID (movie ID)
+     * @param fileSize The file size in bytes to store
+     */
+    private fun storeFileSizeInMetadataCache(providerName: String, contentId: String, fileSize: Long) {
+        try {
+            val cachedMetadata = iptvMovieMetadataRepository.findByProviderNameAndMovieId(providerName, contentId)
+            if (cachedMetadata != null) {
+                val updatedJson = updateMovieMetadataJsonWithFileSize(cachedMetadata.responseJson, fileSize)
+                if (updatedJson != null) {
+                    cachedMetadata.responseJson = updatedJson
+                    iptvMovieMetadataRepository.save(cachedMetadata)
+                    logger.debug("Stored externally fetched file size ${fileSize / 1_000_000}MB in metadata cache for movie $contentId")
+                }
+            } else {
+                logger.debug("No metadata cache found for movie $contentId, cannot store file size")
+            }
+        } catch (e: Exception) {
+            logger.warn("Failed to store file size in metadata cache for movie $contentId: ${e.message}", e)
+            // Non-blocking: continue even if cache update fails
+        }
+    }
+    
+    /**
+     * Updates movie metadata JSON with a file size by adding/updating NUMBER_OF_BYTES in video.tags.
+     * Handles different JSON formats (movie_data wrapper, direct info, etc.)
+     * 
+     * @param responseJson The current metadata JSON string
+     * @param fileSize The file size in bytes to store
+     * @return Updated JSON string, or null if update failed
+     */
+    private fun updateMovieMetadataJsonWithFileSize(responseJson: String, fileSize: Long): String? {
+        return try {
+            val jsonObject = json.parseToJsonElement(responseJson).jsonObject
+            
+            // Handle different JSON formats:
+            // Format 1: { "movie_data": { "info": { "video": {...} } } }
+            // Format 2: { "info": { "video": {...} } }
+            val updatedJson = when {
+                jsonObject.containsKey("movie_data") -> {
+                    // Format 1: wrapped in movie_data
+                    val movieData = jsonObject["movie_data"]?.jsonObject
+                    if (movieData != null) {
+                        val updatedMovieData = updateVideoTagsWithFileSize(movieData, fileSize)
+                        buildJsonObject {
+                            putJsonObject("movie_data") {
+                                updatedMovieData.forEach { (key, value) ->
+                                    put(key, value)
+                                }
+                            }
+                            // Copy other top-level fields
+                            jsonObject.forEach { (key, value) ->
+                                if (key != "movie_data") {
+                                    put(key, value)
+                                }
+                            }
+                        }
+                    } else {
+                        jsonObject
+                    }
+                }
+                jsonObject.containsKey("info") -> {
+                    // Format 2: info at top level
+                    updateVideoTagsWithFileSize(jsonObject, fileSize)
+                }
+                else -> {
+                    // Try to find info nested somewhere
+                    updateVideoTagsWithFileSize(jsonObject, fileSize)
+                }
+            }
+            
+            json.encodeToString(JsonObject.serializer(), updatedJson)
+        } catch (e: Exception) {
+            logger.warn("Failed to update movie metadata JSON with file size: ${e.message}", e)
+            null
+        }
+    }
+    
+    /**
+     * Updates video tags in a JSON object with a file size.
+     * Adds or updates NUMBER_OF_BYTES in info.video.tags.
+     * 
+     * @param jsonObject The JSON object to update
+     * @param fileSize The file size in bytes
+     * @return Updated JSON object
+     */
+    private fun updateVideoTagsWithFileSize(jsonObject: JsonObject, fileSize: Long): JsonObject {
+        val infoObj = jsonObject["info"]?.jsonObject
+        if (infoObj == null) {
+            // No info object, create one with video tags
+            return buildJsonObject {
+                jsonObject.forEach { (key, value) ->
+                    put(key, value)
+                }
+                putJsonObject("info") {
+                    putJsonObject("video") {
+                        putJsonObject("tags") {
+                            put("NUMBER_OF_BYTES", fileSize.toString())
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Update existing info object
+        val videoObj = infoObj["video"]?.jsonObject
+        val updatedVideoObj = if (videoObj == null) {
+            // Create new video object with tags
+            buildJsonObject {
+                putJsonObject("tags") {
+                    put("NUMBER_OF_BYTES", fileSize.toString())
+                }
+            }
+        } else {
+            // Update existing video object
+            val existingTags = videoObj["tags"]?.jsonObject
+            val updatedTags = buildJsonObject {
+                existingTags?.forEach { (key, value) ->
+                    put(key, value)
+                }
+                put("NUMBER_OF_BYTES", fileSize.toString())
+            }
+            buildJsonObject {
+                // Preserve existing video fields
+                videoObj.forEach { (key, value) ->
+                    if (key != "tags") {
+                        put(key, value)
+                    }
+                }
+                putJsonObject("tags") {
+                    updatedTags.forEach { (key, value) ->
+                        put(key, value)
+                    }
+                }
+            }
+        }
+        
+        // Rebuild info object
+        val updatedInfoObj = buildJsonObject {
+            infoObj.forEach { (key, value) ->
+                if (key == "video") {
+                    putJsonObject("video") {
+                        updatedVideoObj.forEach { (k, v) ->
+                            put(k, v)
+                        }
+                    }
+                } else {
+                    put(key, value)
+                }
+            }
+        }
+        
+        // Rebuild root object
+        return buildJsonObject {
+            jsonObject.forEach { (key, value) ->
+                if (key == "info") {
+                    putJsonObject("info") {
+                        updatedInfoObj.forEach { (k, v) ->
+                            put(k, v)
+                        }
+                    }
+                } else {
+                    put(key, value)
+                }
+            }
+        }
     }
 }
 

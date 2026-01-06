@@ -23,9 +23,11 @@ import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
@@ -1121,6 +1123,45 @@ class XtreamCodesClient(
         }
     }
     
+    /**
+     * Custom serializer for XtreamMovieInfo that handles both object and empty array cases.
+     * Some APIs return {"info":{...}} (object) while others return {"info":[]} (empty array).
+     * Empty arrays are treated as null.
+     */
+    private object XtreamMovieInfoOrEmptyArraySerializer : KSerializer<XtreamMovieInfo?> {
+        override val descriptor: SerialDescriptor = buildClassSerialDescriptor("XtreamMovieInfoOrEmptyArray") {
+            element<XtreamMovieInfo?>("value", isOptional = true)
+        }
+
+        override fun serialize(encoder: Encoder, value: XtreamMovieInfo?) {
+            val jsonEncoder = encoder as JsonEncoder
+            if (value == null) {
+                jsonEncoder.encodeJsonElement(JsonArray(emptyList()))
+            } else {
+                jsonEncoder.encodeSerializableValue(XtreamMovieInfo.serializer(), value)
+            }
+        }
+
+        override fun deserialize(decoder: Decoder): XtreamMovieInfo? {
+            val jsonDecoder = decoder as JsonDecoder
+            val element = jsonDecoder.decodeJsonElement()
+            
+            return when {
+                // Empty array - return null
+                element is JsonArray && element.isEmpty() -> null
+                // Object - deserialize normally
+                element is JsonObject -> {
+                    val json = Json { ignoreUnknownKeys = true }
+                    json.decodeFromJsonElement(XtreamMovieInfo.serializer(), element)
+                }
+                // Null - return null
+                element is JsonPrimitive && element.isString && element.content == "null" -> null
+                // Unexpected format - return null
+                else -> null
+            }
+        }
+    }
+    
     @Serializable
     private data class XtreamVodStream(
         val num: Int? = null,
@@ -1260,6 +1301,7 @@ class XtreamCodesClient(
         val name: String? = null,
         val releaseDate: String? = null,
         val release_date: String? = null,
+        @Serializable(with = XtreamMovieInfoOrEmptyArraySerializer::class)
         val info: XtreamMovieInfo? = null
     )
     

@@ -139,18 +139,19 @@ class IptvSyncService(
 
         // For Xtream Codes providers, verify account is active before syncing
         // Apply rate limiting to prevent excessive API calls (shared across all services)
+        // Use atomic check-and-record to prevent race conditions in parallel processing
         if (providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
-            if (iptvLoginRateLimitService.shouldRateLimit(providerConfig.name)) {
-                val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerConfig.name)
-                logger.debug("Skipping IPTV provider login call for ${providerConfig.name} (rate limited, last call was ${timeSinceLastCall}ms ago)")
-            } else {
+            if (iptvLoginRateLimitService.shouldProceedWithLoginCall(providerConfig.name)) {
+                // This thread won the race - proceed with verification call
                 val isAccountActive = xtreamCodesClient.verifyAccount(providerConfig)
-                // Update timestamp after call
-                iptvLoginRateLimitService.recordLoginCall(providerConfig.name)
                 if (!isAccountActive) {
                     logger.error("Account verification failed for provider ${providerConfig.name}. Skipping sync.")
                     return
                 }
+            } else {
+                // Rate limited - another thread already made the call or it was made recently
+                val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerConfig.name)
+                logger.debug("Skipping IPTV provider login call for ${providerConfig.name} (rate limited, last call was ${timeSinceLastCall}ms ago)")
             }
         }
 

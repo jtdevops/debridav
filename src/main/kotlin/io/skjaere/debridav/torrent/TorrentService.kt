@@ -354,6 +354,14 @@ class TorrentService(
     fun getTorrentByHash(hash: TorrentHash): Torrent? {
         return torrentRepository.getByHashIgnoreCase(hash.hash)
     }
+    
+    /**
+     * Gets a torrent by hash string directly (without TorrentHash wrapper).
+     * This is useful for hashes that may not be 40 characters (e.g., numeric hashes from hashCode().toString()).
+     */
+    fun getTorrentByHashString(hash: String): Torrent? {
+        return torrentRepository.getByHashIgnoreCase(hash)
+    }
 
     @Transactional
     fun deleteTorrentByHash(hash: String) {
@@ -363,17 +371,9 @@ class TorrentService(
             val torrentName = torrent.name ?: "unknown"
             val fileCount = torrent.files.size
             val fileDetails = torrent.files.mapNotNull { file ->
-                when (file) {
-                    is RemotelyCachedEntity -> {
-                        val fileName = file.name ?: "unknown"
-                        val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
-                        "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
-                    }
-                    else -> {
-                        val fileName = file.name ?: "unknown"
-                        "$fileName (id: ${file.id}, type: ${file.javaClass.simpleName})"
-                    }
-                }
+                val fileName = file.name ?: "unknown"
+                val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+                "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
             }
             
             logger.info("Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount")

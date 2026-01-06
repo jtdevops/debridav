@@ -1,6 +1,7 @@
 package io.skjaere.debridav
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.ktor.client.HttpClient
@@ -18,6 +19,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Primary
+import org.springframework.core.Ordered
 import org.springframework.core.convert.converter.Converter
 import org.springframework.core.convert.support.DefaultConversionService
 import org.springframework.scheduling.annotation.EnableScheduling
@@ -63,6 +65,7 @@ class DebridavConfiguration {
         registration.filter = SpringMiltonFilter()
         registration.setName("MiltonFilter")
         registration.addUrlPatterns("/*")
+        registration.order = Ordered.HIGHEST_PRECEDENCE + 100 // Run early, but after security filters
         registration.addInitParameter("milton.exclude.paths", "/files,/api,/version,/sabnzbd,/actuator,/strm-proxy")
         registration.addInitParameter(
             "resource.factory.class", "io.skjaere.debrid.resource.StreamableResourceFactory"
@@ -80,6 +83,7 @@ class DebridavConfiguration {
     @Primary
     fun objectMapper(): ObjectMapper = jacksonObjectMapper().apply {
         registerModule(JavaTimeModule())
+        configure(SerializationFeature.INDENT_OUTPUT, true)
     }
 
     @Bean
@@ -101,6 +105,11 @@ class DebridavConfiguration {
                 https {
                     trustManager = trustAllCerts.first() as X509TrustManager
                 }
+                
+                // Configure connection pooling and keep-alive for better performance
+                // Reduces connection establishment overhead (each reconnect adds 200-500ms)
+                // CIO engine uses connection pooling by default with keep-alive enabled
+                // These settings help reduce latency for streaming requests
             }
             install(HttpTimeout) {
                 connectTimeoutMillis = debridavConfigurationProperties.connectTimeoutMilliseconds

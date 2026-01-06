@@ -27,6 +27,7 @@ import io.github.resilience4j.ratelimiter.RateLimiter
 import io.github.resilience4j.ratelimiter.RateLimiterConfig
 import io.ktor.client.HttpClient
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.util.VideoFileExtensions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -56,7 +57,6 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 
 
-private const val DEFAULT_BUFFER_SIZE = 65536L //64kb
 private const val STREAMING_METRICS_POLLING_RATE_S = 5L //5 seconds
 private const val BYTE_CHANNEL_CAPACITY = 2000
 private const val MAX_COMPLETED_DOWNLOADS_HISTORY = 1000
@@ -74,7 +74,8 @@ data class DownloadTrackingContext(
     var downloadEndTime: Instant? = null,
     var completionStatus: String = "in_progress",
     val httpHeaders: Map<String, String> = emptyMap(),
-    val sourceIpAddress: String? = null
+    val sourceIpAddress: String? = null,
+    val provider: DebridProvider? = null
 )
 
 data class HttpRequestInfo(
@@ -196,10 +197,9 @@ class StreamingService(
             } else if (providerName != null && iptvConfigurationProperties != null && iptvConfigurationService != null && iptvResponseFileService != null && iptvLoginRateLimitService != null) {
                 try {
                     // Rate limiting: shared across all services per provider
-                    if (iptvLoginRateLimitService.shouldRateLimit(providerName)) {
-                        val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
-                        logger.debug("Skipping IPTV provider login call for $providerName (rate limited, last call was ${timeSinceLastCall}ms ago)")
-                    } else {
+                    // Use atomic check-and-record to prevent race conditions in parallel processing
+                    if (iptvLoginRateLimitService.shouldProceedWithLoginCall(providerName)) {
+                        // This thread won the race - proceed with verification call
                         val providerConfigs = iptvConfigurationService.getProviderConfigurations()
                         val providerConfig = providerConfigs.find { it.name == providerName }
                         if (providerConfig != null && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
@@ -207,12 +207,14 @@ class StreamingService(
                             val userAgent = iptvConfigurationProperties?.userAgent
                             val xtreamCodesClient = io.skjaere.debridav.iptv.client.XtreamCodesClient(httpClient, iptvResponseFileService, userAgent)
                             val loginSuccess = xtreamCodesClient.verifyAccount(providerConfig)
-                            // Update timestamp after successful call
-                            iptvLoginRateLimitService.recordLoginCall(providerName)
                             if (!loginSuccess) {
                                 logger.warn("IPTV provider login verification failed for $providerName, but continuing with stream attempt")
                             }
                         }
+                    } else {
+                        // Rate limited - another thread already made the call or it was made recently
+                        val timeSinceLastCall = iptvLoginRateLimitService.getTimeSinceLastCall(providerName)
+                        logger.debug("Skipping IPTV provider login call for $providerName (rate limited, last call was ${timeSinceLastCall}ms ago)")
                     }
                 } catch (e: Exception) {
                     logger.warn("Failed to make initial login call to IPTV provider $providerName: ${e.message}, continuing with stream attempt", e)
@@ -276,6 +278,15 @@ class StreamingService(
 
         // Use the original range for normal streaming
         val appliedRange = originalRange
+        val requestedChunkSize = appliedRange.finish - appliedRange.start + 1
+        val requestedChunkSizeMB = requestedChunkSize / (1024 * 1024)
+        
+        // Warn if chunk size exceeds configured threshold (may cause buffer underruns)
+        if (requestedChunkSizeMB > debridavConfigProperties.streamingMaxChunkSizeWarningMb) {
+            logger.warn("LARGE_CHUNK_REQUEST: file={}, range={}-{}, chunkSize={} bytes ({} MB), exceeds warning threshold of {} MB. Large chunks may cause video playback pauses due to buffer underruns.", 
+                remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
+                requestedChunkSize, requestedChunkSizeMB, debridavConfigProperties.streamingMaxChunkSizeWarningMb)
+        }
         
         // Determine provider label for logging - use DebridProvider.IPTV for IPTV content, otherwise use debrid provider
         val providerLabel = if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent || debridLink.provider == io.skjaere.debridav.debrid.DebridProvider.IPTV) {
@@ -284,9 +295,9 @@ class StreamingService(
             debridLink.provider?.toString() ?: "null"
         }
         
-        logger.debug("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes, provider={}, source={}", 
+        logger.debug("EXTERNAL_FILE_STREAMING: file={}, range={}-{}, size={} bytes ({} MB), provider={}, source={}", 
             remotelyCachedEntity.name ?: "unknown", appliedRange.start, appliedRange.finish, 
-            appliedRange.finish - appliedRange.start + 1, providerLabel, httpRequestInfo.sourceInfo)
+            requestedChunkSize, requestedChunkSizeMB, providerLabel, httpRequestInfo.sourceInfo)
         
         val trackingId = initializeDownloadTracking(debridLink, range, remotelyCachedEntity, httpRequestInfo)
         
@@ -506,15 +517,32 @@ class StreamingService(
     private suspend fun streamBytes(
         remotelyCachedEntity: RemotelyCachedEntity, range: Range, debridLink: CachedFile, outputStream: OutputStream, trackingId: String?
     ) = coroutineScope {
-        launch {
-            val streamingPlan = streamPlanningService.generatePlan(
-                fileChunkCachingService.getAllCachedChunksForEntity(remotelyCachedEntity),
-                LongRange(range.start, range.finish),
-                debridLink
-            )
-            val sources = getSources(streamingPlan)
-            val byteArrays = getByteArrays(sources)
-            sendContent(byteArrays, outputStream, remotelyCachedEntity, trackingId)
+        val streamingPlan = streamPlanningService.generatePlan(
+            fileChunkCachingService.getAllCachedChunksForEntity(remotelyCachedEntity),
+            LongRange(range.start, range.finish),
+            debridLink
+        )
+        
+        // Optimize for direct streaming when there are no cached chunks and both caching and buffering are disabled
+        // This ensures data flows directly from external provider to client without server-side buffering
+        val shouldUseDirectStreaming = !debridavConfigProperties.enableChunkCaching && 
+                                      !debridavConfigProperties.enableInMemoryBuffering &&
+                                      streamingPlan.sources.size == 1 && 
+                                      streamingPlan.sources.first() is StreamPlanningService.StreamSource.Remote
+        
+        if (shouldUseDirectStreaming) {
+            // Direct streaming: bypass channel buffering, stream directly from HTTP to client
+            val remoteSource = streamingPlan.sources.first() as StreamPlanningService.StreamSource.Remote
+            logger.debug("DIRECT_STREAMING: Using direct streaming path (no caching, single remote source): file={}, range={}-{}", 
+                remotelyCachedEntity.name, remoteSource.range.first, remoteSource.range.last)
+            streamDirectlyFromHttp(remoteSource, outputStream, trackingId)
+        } else {
+            // Use channel-based streaming for cached chunks or when caching is enabled
+            launch {
+                val sources = getSources(streamingPlan)
+                val byteArrays = getByteArrays(sources)
+                sendContent(byteArrays, outputStream, remotelyCachedEntity, trackingId)
+            }
         }
     }
 
@@ -551,6 +579,200 @@ class StreamingService(
                 is StreamPlanningService.StreamSource.Cached -> sendCachedBytes(sourceContext)
                 is StreamPlanningService.StreamSource.Remote -> sendBytesFromHttpStreamWithKtor(sourceContext)
             }
+        }
+    }
+
+    /**
+     * Direct streaming: streams data directly from HTTP response to client output stream
+     * without buffering through channels. Used when caching is disabled and there are no cached chunks.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun streamDirectlyFromHttp(
+        source: StreamPlanningService.StreamSource.Remote,
+        outputStream: OutputStream,
+        trackingId: String?
+    ) {
+        val range = Range(source.range.start, source.range.last)
+        val byteRangeInfo = fileChunkCachingService.getByteRange(
+            range, source.cachedFile.size!!
+        )
+        val started = Instant.now()
+        val isIptv = isIptvUrl(source.cachedFile.link ?: "")
+        val expectedBytes = byteRangeInfo!!.length()
+        
+        // Prepare HTTP request (same logic as sendBytesFromHttpStreamWithKtor)
+        val httpStatement = try {
+            val debridClient = debridClients.firstOrNull { it.getProvider() == source.cachedFile.provider }
+            if (debridClient != null) {
+                debridClient.prepareStreamUrl(source.cachedFile, range)
+            } else {
+                val rateLimiter = RateLimiter.of("iptv", RateLimiterConfig.custom()
+                    .limitForPeriod(100)
+                    .limitRefreshPeriod(java.time.Duration.ofSeconds(1))
+                    .build())
+                val iptvUserAgent = iptvConfigurationProperties?.userAgent
+                val linkPreparer = DefaultStreamableLinkPreparer(
+                    httpClient,
+                    debridavConfigProperties,
+                    rateLimiter,
+                    iptvUserAgent
+                )
+                linkPreparer.prepareStreamUrl(source.cachedFile, range)
+            }
+        } catch (e: NoSuchElementException) {
+            val rateLimiter = RateLimiter.of("iptv", RateLimiterConfig.custom()
+                .limitForPeriod(100)
+                .limitRefreshPeriod(java.time.Duration.ofSeconds(1))
+                .build())
+            val iptvUserAgent = iptvConfigurationProperties?.userAgent
+            val linkPreparer = DefaultStreamableLinkPreparer(
+                httpClient,
+                debridavConfigProperties,
+                rateLimiter,
+                iptvUserAgent
+            )
+            linkPreparer.prepareStreamUrl(source.cachedFile, range)
+        } catch (e: Exception) {
+            logger.trace("STREAMING_EXCEPTION: Error preparing stream URL: path={}, link={}, provider={}, exceptionClass={}", 
+                source.cachedFile.path, source.cachedFile.link?.take(100), source.cachedFile.provider, e::class.simpleName, e)
+            logger.trace("STREAMING_EXCEPTION_STACK_TRACE", e)
+            throw e
+        }
+        
+        // Execute HTTP request and stream directly to output
+        httpStatement.execute { response ->
+            // Handle redirects (same logic as sendBytesFromHttpStreamWithKtor)
+            if (response.status.value in 300..399) {
+                val redirectLocationHeader = response.headers["Location"]
+                if (redirectLocationHeader != null) {
+                    logger.debug("DIRECT_STREAMING_REDIRECT: Following redirect: path={}, redirectLocation={}", 
+                        source.cachedFile.path, redirectLocationHeader.take(100))
+                    
+                    try {
+                        response.body<ByteReadChannel>()
+                    } catch (e: Exception) {
+                        // Ignore errors when consuming redirect body
+                    }
+                    response.cancel()
+                    
+                    val redirectUrl = if (redirectLocationHeader.startsWith("http://") || redirectLocationHeader.startsWith("https://")) {
+                        redirectLocationHeader
+                    } else {
+                        val originalUri = URI(source.cachedFile.link!!)
+                        originalUri.resolve(redirectLocationHeader).toString()
+                    }
+                    
+                    // Calculate dynamic timeout for redirect
+                    val chunkSizeBytes = source.range.last - source.range.first + 1
+                    val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
+                    
+                    // Use shorter connect timeout for redirects (2 seconds) since redirects are typically fast
+                    // This reduces latency when following redirect chains
+                    val redirectConnectTimeout = minOf(2000L, debridavConfigProperties.connectTimeoutMilliseconds)
+                    
+                    val redirectStatement = httpClient.prepareGet(redirectUrl) {
+                        headers {
+                            val rangeHeader = "bytes=${source.range.start}-${source.range.last}"
+                            append(HttpHeaders.Range, rangeHeader)
+                            iptvConfigurationProperties?.userAgent?.let {
+                                append(HttpHeaders.UserAgent, it)
+                            }
+                        }
+                        timeout {
+                            requestTimeoutMillis = 20_000_000
+                            socketTimeoutMillis = dynamicSocketTimeout
+                            connectTimeoutMillis = redirectConnectTimeout
+                        }
+                    }
+                    
+                    redirectStatement.execute { redirectResponse ->
+                        if (redirectResponse.status.value in 300..399) {
+                            redirectResponse.cancel()
+                            throw ReadFromHttpStreamException("Redirect chain detected", RuntimeException("Multiple redirects"))
+                        }
+                        
+                        // Stream redirect response directly to output
+                        redirectResponse.body<ByteReadChannel>().toInputStream().use { inputStream ->
+                            streamDirectlyToOutput(inputStream, outputStream, expectedBytes, trackingId, source.cachedFile.path!!)
+                        }
+                        redirectResponse.cancel()
+                    }
+                } else {
+                    response.cancel()
+                    throw ReadFromHttpStreamException("Redirect without Location header", RuntimeException("No Location header"))
+                }
+            } else {
+                // Stream response directly to output (no redirect)
+                response.body<ByteReadChannel>().toInputStream().use { inputStream ->
+                    streamDirectlyToOutput(inputStream, outputStream, expectedBytes, trackingId, source.cachedFile.path!!)
+                }
+            }
+        }
+    }
+    
+    /**
+     * Streams data directly from input stream to output stream with minimal buffering.
+     * Uses a configurable buffer size for efficient streaming without excessive memory usage.
+     */
+    private suspend fun streamDirectlyToOutput(
+        inputStream: java.io.InputStream,
+        outputStream: OutputStream,
+        expectedBytes: Long,
+        trackingId: String?,
+        filePath: String
+    ) = withContext(Dispatchers.IO) {
+        val bufferSize = debridavConfigProperties.streamingBufferSize.toInt()
+        val buffer = ByteArray(bufferSize)
+        val flushInterval = debridavConfigProperties.streamingBufferSize * debridavConfigProperties.streamingFlushMultiplier
+        var totalBytesRead = 0L
+        var bytesRead: Int
+        var bytesSinceLastFlush = 0L
+        var isFirstWrite = true
+        
+        try {
+            while (totalBytesRead < expectedBytes) {
+                val bytesToRead = minOf(buffer.size.toLong(), expectedBytes - totalBytesRead).toInt()
+                bytesRead = inputStream.read(buffer, 0, bytesToRead)
+                
+                if (bytesRead == -1) {
+                    logger.trace("DIRECT_STREAMING_EOF: Stream ended early: path={}, expectedBytes={}, actualBytesRead={}", 
+                        filePath, expectedBytes, totalBytesRead)
+                    break
+                }
+                
+                // Write directly to output stream
+                outputStream.write(buffer, 0, bytesRead)
+                totalBytesRead += bytesRead
+                bytesSinceLastFlush += bytesRead
+                
+                // Update tracking
+                trackingId?.let { id ->
+                    activeDownloads[id]?.bytesDownloaded?.addAndGet(bytesRead.toLong())
+                }
+                
+                // Immediate flush after first buffer write to get first bytes to client faster
+                if (isFirstWrite) {
+                    outputStream.flush()
+                    isFirstWrite = false
+                    bytesSinceLastFlush = 0L
+                } else {
+                    // Flush periodically to ensure data flows to client
+                    if (bytesSinceLastFlush >= flushInterval) {
+                        outputStream.flush()
+                        bytesSinceLastFlush = 0L
+                    }
+                }
+            }
+            
+            // Final flush
+            outputStream.flush()
+            
+            logger.trace("DIRECT_STREAMING_COMPLETE: path={}, expectedBytes={}, actualBytesRead={}", 
+                filePath, expectedBytes, totalBytesRead)
+        } catch (e: Exception) {
+            logger.trace("DIRECT_STREAMING_EXCEPTION: path={}, bytesRead={}, exceptionClass={}", 
+                filePath, totalBytesRead, e::class.simpleName, e)
+            throw e
         }
     }
 
@@ -690,6 +912,10 @@ class StreamingService(
                     val chunkSizeBytes = source.range.last - source.range.first + 1 // Both are inclusive
                     val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
                     
+                    // Use shorter connect timeout for redirects (2 seconds) since redirects are typically fast
+                    // This reduces latency when following redirect chains
+                    val redirectConnectTimeout = minOf(2000L, debridavConfigProperties.connectTimeoutMilliseconds)
+                    
                     val redirectStatement = httpClient.prepareGet(redirectUrl) {
                         headers {
                             // Apply Range headers to redirect URLs to preserve range requests (e.g., when skipping in video)
@@ -705,7 +931,7 @@ class StreamingService(
                         timeout {
                             requestTimeoutMillis = 20_000_000
                             socketTimeoutMillis = dynamicSocketTimeout
-                            connectTimeoutMillis = debridavConfigProperties.connectTimeoutMilliseconds
+                            connectTimeoutMillis = redirectConnectTimeout
                         }
                     }
                     
@@ -906,7 +1132,8 @@ class StreamingService(
         
         while (remaining > 0) {
             readIterations++
-            val size = listOf(remaining, DEFAULT_BUFFER_SIZE).min()
+            val bufferSize = debridavConfigProperties.streamingBufferSize
+            val size = listOf(remaining, bufferSize).min()
 
             val bytes = try {
                 streamingContext.inputStream.readNBytes(size.toInt())
@@ -1112,13 +1339,21 @@ class StreamingService(
             "$it/$fileName" 
         } ?: fileName
 
+        // Determine provider - use DebridProvider.IPTV for IPTV content, otherwise use debrid provider
+        val provider = if (remotelyCachedEntity.contents is io.skjaere.debridav.fs.DebridIptvContent || debridLink.provider == DebridProvider.IPTV) {
+            DebridProvider.IPTV
+        } else {
+            debridLink.provider
+        }
+
         val context = DownloadTrackingContext(
             filePath = actualFilePath,
             fileName = fileName,
             requestedRange = range,
             requestedSize = requestedSize,
             httpHeaders = httpRequestInfo.headers,
-            sourceIpAddress = httpRequestInfo.sourceIpAddress
+            sourceIpAddress = httpRequestInfo.sourceIpAddress,
+            provider = provider
         )
         
         activeDownloads[trackingId] = context

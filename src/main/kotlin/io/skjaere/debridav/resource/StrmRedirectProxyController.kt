@@ -156,6 +156,12 @@ class StrmRedirectProxyController(
             // Set response headers
             response.contentType = file.mimeType ?: MediaType.APPLICATION_OCTET_STREAM_VALUE
             
+            // Set optimization headers to prevent buffering delays
+            response.setHeader("Cache-Control", "no-store")
+            response.setHeader("Content-Encoding", "identity")
+            response.setHeader("X-Accel-Buffering", "no")
+            response.setHeader("Accept-Ranges", "bytes")
+            
             // Set Content-Length and Content-Range headers for range requests
             if (range != null && cachedFile.size != null) {
                 val contentLength = range.finish - range.start + 1
@@ -165,6 +171,9 @@ class StrmRedirectProxyController(
             } else {
                 cachedFile.size?.let { response.setHeader(HttpHeaders.CONTENT_LENGTH, it.toString()) }
             }
+            
+            // Flush headers immediately to send first byte faster
+            response.flushBuffer()
             
             // Stream the content
             val result = streamingService.streamContents(

@@ -15,13 +15,9 @@ import io.milton.http.Range
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.client.realdebrid.RealDebridClient
 import io.skjaere.debridav.fs.CachedFile
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.retry
+import kotlinx.coroutines.delay
 import org.apache.commons.io.FileUtils
 import org.slf4j.LoggerFactory
-
-const val RETRIES = 3L
 
 class DefaultStreamableLinkPreparer(
     override val httpClient: HttpClient,
@@ -110,104 +106,149 @@ class DefaultStreamableLinkPreparer(
     @Suppress("MagicNumber")
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
         val isIptv = isIptvUrl(debridLink.link ?: "")
+        val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
+        val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
+        val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
         
-        return try {
-            rateLimiter.executeSuspendFunction {
-                httpClient.prepareGet(debridLink.link!!) {
-                headers {
-                    // Apply Range headers to the original URL (including IPTV URLs)
-                    // Range headers will be re-applied to redirect URLs in StreamingService to ensure providers honor the requested range
-                    range?.let { range ->
-                        getByteRange(range, debridLink.size!!)?.let { byteRange ->
-                            // Only apply byte range if chunking is not disabled
-                            if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
-                                logger.debug(
-                                    "Applying byteRange $byteRange " +
-                                            "for ${debridLink.link}" +
-                                            " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) " +
-                                            if (isIptv) "(IPTV - Range header will be re-applied on redirect URLs)" else ""
-                                )
+        for (attempt in 0..maxRetries) {
+            try {
+                return rateLimiter.executeSuspendFunction {
+                    httpClient.prepareGet(debridLink.link!!) {
+                    headers {
+                        // Apply Range headers to the original URL (including IPTV URLs)
+                        // Range headers will be re-applied to redirect URLs in StreamingService to ensure providers honor the requested range
+                        range?.let { range ->
+                            getByteRange(range, debridLink.size!!)?.let { byteRange ->
+                                // Only apply byte range if chunking is not disabled
+                                if (!debridavConfigurationProperties.disableByteRangeRequestChunking) {
+                                    logger.debug(
+                                        "Applying byteRange $byteRange " +
+                                                "for ${debridLink.link}" +
+                                                " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) " +
+                                                if (isIptv) "(IPTV - Range header will be re-applied on redirect URLs)" else ""
+                                    )
 
-                                if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                    append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
-                                }
-                            } else {
-                                logger.debug("Byte range chunking disabled - using exact user range" +
-                                        if (isIptv) " (IPTV - Range header will be re-applied on redirect URLs)" else "")
-                                // When chunking is disabled, use the exact range requested by user
-                                if (!(range.start == 0L && range.finish == debridLink.size)) {
-                                    append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                    if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                        append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
+                                    }
+                                } else {
+                                    logger.debug("Byte range chunking disabled - using exact user range" +
+                                            if (isIptv) " (IPTV - Range header will be re-applied on redirect URLs)" else "")
+                                    // When chunking is disabled, use the exact range requested by user
+                                    if (!(range.start == 0L && range.finish == debridLink.size)) {
+                                        append(HttpHeaders.Range, "bytes=${range.start}-${range.finish}")
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Use user agent from constructor if provided
-                    userAgent?.let {
-                        append(HttpHeaders.UserAgent, it)
+                        // Use user agent from constructor if provided
+                        userAgent?.let {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
+                    
+                    if (isIptv) {
+                        logger.debug("Detected IPTV URL - Range headers applied to original URL, will be re-applied on redirect URLs: ${debridLink.link?.take(100)}")
+                    }
+                    
+                    // Calculate dynamic socket timeout based on chunk size
+                    val chunkSizeBytes = range?.let { 
+                        // Calculate chunk size: finish - start + 1 (both are inclusive)
+                        it.finish - it.start + 1
+                    } ?: debridLink.size!!
+                    val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
+                    
+                    logger.debug("Dynamic socket timeout calculated: chunkSize={} bytes ({}), timeout={} ms", 
+                        chunkSizeBytes, FileUtils.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
+                    
+                    timeout {
+                        requestTimeoutMillis = 20_000_000
+                        socketTimeoutMillis = dynamicSocketTimeout
+                        connectTimeoutMillis = debridavConfigurationProperties.connectTimeoutMilliseconds
                     }
                 }
-                
-                if (isIptv) {
-                    logger.debug("Detected IPTV URL - Range headers applied to original URL, will be re-applied on redirect URLs: ${debridLink.link?.take(100)}")
                 }
+            } catch (e: Exception) {
+                // Check if this is a network/connection error that should be retried
+                val isNetworkError = e.message?.contains("timeout", ignoreCase = true) == true ||
+                        e.message?.contains("connection", ignoreCase = true) == true ||
+                        e.message?.contains("network", ignoreCase = true) == true ||
+                        e.message?.contains("connect", ignoreCase = true) == true
                 
-                // Calculate dynamic socket timeout based on chunk size
-                val chunkSizeBytes = range?.let { 
-                    // Calculate chunk size: finish - start + 1 (both are inclusive)
-                    it.finish - it.start + 1
-                } ?: debridLink.size!!
-                val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
+                // Only retry on network/connection errors, not on HTTP errors (404, 403, etc.)
+                // HTTP errors are typically not retryable and should fail immediately
+                val shouldRetry = isNetworkError && attempt < maxRetries
                 
-                logger.debug("Dynamic socket timeout calculated: chunkSize={} bytes ({}), timeout={} ms", 
-                    chunkSizeBytes, FileUtils.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
-                
-                timeout {
-                    requestTimeoutMillis = 20_000_000
-                    socketTimeoutMillis = dynamicSocketTimeout
-                    connectTimeoutMillis = debridavConfigurationProperties.connectTimeoutMilliseconds
+                if (shouldRetry) {
+                    val waitTime = if (isNetworkError) waitAfterNetworkError else delayBetweenRetries
+                    logger.debug("Failed to prepare stream URL (attempt ${attempt + 1}/${maxRetries + 1}), retrying after ${waitTime.toMillis()}ms: path={}, provider={}, error={}", 
+                        debridLink.path, debridLink.provider, e.message)
+                    delay(waitTime.toMillis())
+                } else {
+                    // TRACE level logging for HTTP request exceptions with full stack trace
+                    logger.trace("HTTP_REQUEST_EXCEPTION: Exception preparing HTTP request: path={}, link={}, provider={}, exceptionClass={}, attempt=${attempt + 1}/${maxRetries + 1}", 
+                        debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, attempt + 1, maxRetries + 1)
+                    // Explicitly log stack trace to ensure it appears
+                    logger.trace("HTTP_REQUEST_EXCEPTION_STACK_TRACE", e)
+                    throw e
                 }
             }
         }
-        } catch (e: Exception) {
-            // TRACE level logging for HTTP request exceptions with full stack trace
-            logger.trace("HTTP_REQUEST_EXCEPTION: Exception preparing HTTP request: path={}, link={}, provider={}, exceptionClass={}", 
-                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
-            // Explicitly log stack trace to ensure it appears
-            logger.trace("HTTP_REQUEST_EXCEPTION_STACK_TRACE", e)
-            throw e
-        }
+        
+        // Should never reach here, but throw exception as fallback
+        throw RuntimeException("Failed to prepare stream URL after ${maxRetries + 1} attempts: path=${debridLink.path}")
     }
 
-    override suspend fun isLinkAlive(debridLink: CachedFile): Boolean = flow {
-        logger.debug("LINK_ALIVE_HTTP_CHECK: file={}, provider={}, link={}, size={} bytes", 
-            debridLink.path, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size)
-        val isIptv = isIptvUrl(debridLink.link ?: "")
-        try {
-            rateLimiter.executeSuspendFunction {
-                // Use GET with Range header (bytes=0-0) instead of HEAD
-                // HEAD requests are not supported by all servers, but byte range requests are more universally supported
-                val result = httpClient.get(debridLink.link!!) {
-                    headers {
-                        append(io.ktor.http.HttpHeaders.Range, "bytes=0-0")
-                    }
-                    timeout {
-                        requestTimeoutMillis = 5000 // 5 second timeout - fail fast
-                        connectTimeoutMillis = 2000 // 2 second connect timeout
-                    }
-                }.status.isSuccess()
-                logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
-                    debridLink.path, debridLink.provider, result)
-                emit(result)
+    override suspend fun isLinkAlive(debridLink: CachedFile): Boolean {
+        val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
+        val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
+        val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
+        
+        for (attempt in 0..maxRetries) {
+            try {
+                logger.debug("LINK_ALIVE_HTTP_CHECK: file={}, provider={}, link={}, size={} bytes", 
+                    debridLink.path, debridLink.provider, debridLink.link?.take(50) + "...", debridLink.size)
+                val isIptv = isIptvUrl(debridLink.link ?: "")
+                
+                return rateLimiter.executeSuspendFunction {
+                    // Use GET with Range header (bytes=0-0) instead of HEAD
+                    // HEAD requests are not supported by all servers, but byte range requests are more universally supported
+                    val result = httpClient.get(debridLink.link!!) {
+                        headers {
+                            append(io.ktor.http.HttpHeaders.Range, "bytes=0-0")
+                        }
+                        timeout {
+                            requestTimeoutMillis = 5000 // 5 second timeout - fail fast
+                            connectTimeoutMillis = 2000 // 2 second connect timeout
+                        }
+                    }.status.isSuccess()
+                    logger.debug("LINK_ALIVE_HTTP_RESULT: file={}, provider={}, isAlive={}", 
+                        debridLink.path, debridLink.provider, result)
+                    result
+                }
+            } catch (e: Exception) {
+                val isNetworkError = e.message?.contains("timeout", ignoreCase = true) == true ||
+                        e.message?.contains("connection", ignoreCase = true) == true ||
+                        e.message?.contains("network", ignoreCase = true) == true
+                
+                if (attempt < maxRetries) {
+                    val waitTime = if (isNetworkError) waitAfterNetworkError else delayBetweenRetries
+                    logger.debug("Failed to check if link is alive (attempt ${attempt + 1}/${maxRetries + 1}), retrying after ${waitTime.toMillis()}ms: path={}, provider={}, error={}", 
+                        debridLink.path, debridLink.provider, e.message)
+                    delay(waitTime.toMillis())
+                } else {
+                    // TRACE level logging for HTTP request exceptions with full stack trace
+                    logger.trace("HTTP_RANGE_REQUEST_EXCEPTION: Exception checking link alive after ${maxRetries + 1} attempts: path={}, link={}, provider={}, exceptionClass={}", 
+                        debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+                    // Explicitly log stack trace to ensure it appears
+                    logger.trace("HTTP_RANGE_REQUEST_EXCEPTION_STACK_TRACE", e)
+                    throw e
+                }
             }
-        } catch (e: Exception) {
-            // TRACE level logging for HTTP request exceptions with full stack trace
-            logger.trace("HTTP_RANGE_REQUEST_EXCEPTION: Exception checking link alive: path={}, link={}, provider={}, exceptionClass={}", 
-                debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
-            // Explicitly log stack trace to ensure it appears
-            logger.trace("HTTP_RANGE_REQUEST_EXCEPTION_STACK_TRACE", e)
-            throw e
         }
-    }.retry(RETRIES)
-        .first()
+        
+        // Should never reach here, but return false as fallback
+        return false
+    }
 }

@@ -69,7 +69,7 @@ class LocalVideoService(
             // Stream the requested range from the local file
             FileInputStream(localVideoFile).use { inputStream ->
                 inputStream.skip(start)
-                val buffer = ByteArray(65536) // 64KB buffer
+                val buffer = ByteArray(debridavConfigProperties.streamingBufferSize.toInt())
                 var remaining = end - start + 1
                 var position = start
 
