@@ -6,10 +6,14 @@ import io.milton.resource.CollectionResource
 import io.milton.resource.Resource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.configuration.HostnameDetectionService
+import io.skjaere.debridav.debrid.DebridProvider
+import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
+import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.LocalContentsService
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 import org.springframework.boot.autoconfigure.web.ServerProperties
 import org.springframework.core.env.Environment
 import kotlinx.coroutines.async
@@ -111,7 +115,11 @@ class StrmDirectoryResource(
             else -> {
                 // For files, check if they should be converted to STRM
                 val fileName = entity.name ?: return null
-                if (debridavConfigurationProperties.shouldCreateStrmFile(fileName)) {
+                
+                // Determine provider for provider-based filtering
+                val provider = determineProvider(entity)
+                
+                if (debridavConfigurationProperties.shouldCreateStrmFile(fileName, provider)) {
                     // Convert media files to STRM files
                     val originalPath = originalDirectory.fileSystemPath() ?: return null
                     val fullOriginalPath = "$originalPath/$fileName"
@@ -131,6 +139,30 @@ class StrmDirectoryResource(
                 }
             }
         }
+    }
+
+    /**
+     * Determines the provider for a DbEntity.
+     * @param entity The entity to check
+     * @return The provider, or null if unable to determine or not a remotely cached entity
+     */
+    private fun determineProvider(entity: DbEntity): DebridProvider? {
+        if (entity !is RemotelyCachedEntity) {
+            return null // Local files don't have providers
+        }
+        
+        // Reload the entity to ensure contents are loaded
+        val reloadedFile = fileService.reloadRemotelyCachedEntity(entity) ?: return null
+        val contents = reloadedFile.contents ?: return null
+        
+        // Check if it's IPTV content
+        if (contents is DebridIptvContent) {
+            return DebridProvider.IPTV
+        }
+        
+        // Try to get provider from debridLinks
+        val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+        return cachedFile?.provider
     }
 }
 

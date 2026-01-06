@@ -88,6 +88,26 @@ services:
 
       - IPTV_METADATA_OMDB_API_KEY=${IPTV_METADATA_OMDB_API_KEY}
       - IPTV_INCLUDE_PROVIDER_IN_MAGNET_TITLE=true
+      # IPTV Metadata Fetch Batch Size - Number of concurrent metadata fetch requests per batch (default: 5)
+      - IPTV_METADATA_FETCH_BATCH_SIZE=${IPTV_METADATA_FETCH_BATCH_SIZE:-5}
+      
+      # IPTV FFprobe Metadata Enhancement Configuration
+      # Enable FFprobe-based metadata enhancement (extracts resolution, codec, and file size from media files using FFprobe)
+      # When disabled, FFprobe will not be used for metadata extraction
+      # Note: File size fetching in search results is controlled by Prowlarr indexer setting (fetchFileSize)
+      # Default: false
+      - IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=${IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED:-false}
+      
+      # Path to FFprobe executable
+      # Default: "ffprobe" (assumes ffprobe is in system PATH)
+      # Example: IPTV_FFPROBE_PATH=ffprobe
+      # Example: IPTV_FFPROBE_PATH=/usr/bin/ffprobe
+      - IPTV_FFPROBE_PATH=${IPTV_FFPROBE_PATH:-ffprobe}
+      
+      # FFprobe execution timeout
+      # Format: Duration (e.g., PT30S for 30 seconds, PT60S for 60 seconds)
+      # Default: PT30S (30 seconds)
+      - IPTV_FFPROBE_TIMEOUT=${IPTV_FFPROBE_TIMEOUT:-PT30S}
 
       # - IPTV_USE_LOCAL_RESPONSES=true
       - IPTV_RESPONSE_SAVE_FOLDER=/iptv_cache
@@ -150,18 +170,29 @@ services:
       # Disable the legacy import of .debridav files fom the /debridav container folder
       - DEBRIDAV_ENABLE_FILE_IMPORT_ON_STARTUP=false
 
-      ### Buffer configuration options
-      # For Default Behavior (5MB database caching)
+      ### Streaming and Caching Configuration Options
+      #
+      # Option 1: Default Behavior - Database Caching Enabled (Recommended for metadata extraction)
+      # Uses channel-based streaming with database caching for requests under the threshold.
+      # Benefits: Faster repeated requests, better metadata extraction performance, can serve from cached chunks.
+      # Trade-offs: Higher server resource usage, database storage required.
       #- DEBRIDAV_ENABLE_CHUNK_CACHING=true
       #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
       ##- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD defaults to 5120000 (5MB)
-
-      # 256KB In-Memory Buffer Only
+      #
+      # Option 2: In-Memory Buffering Only (No Database Caching)
+      # Uses channel-based streaming with in-memory buffering (~128MB channel capacity) but no database persistence.
+      # The CHUNK_CACHING_SIZE_THRESHOLD is ignored when chunk caching is disabled.
+      # Benefits: More control over streaming than direct mode, no database storage overhead.
+      # Trade-offs: No caching benefits, higher memory usage than direct streaming.
       #- DEBRIDAV_ENABLE_CHUNK_CACHING=false
       #- DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=true
-      #- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD=262144 # 256KB buffer
-
-      # Complete Direct Streaming (No buffering)
+      #- DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD=262144 # Ignored when chunk caching is disabled
+      #
+      # Option 3: Complete Direct Streaming (No Buffering)
+      # Streams directly from external provider to client with minimal 64KB (configurable) buffer size.
+      # Benefits: Minimal latency, lowest server resource usage, direct data flow.
+      # Trade-offs: No caching benefits, no ability to serve from cached chunks, less control over streaming.
       - DEBRIDAV_ENABLE_CHUNK_CACHING=false
       - DEBRIDAV_ENABLE_IN_MEMORY_BUFFERING=false
       ###
@@ -170,10 +201,36 @@ services:
       - DEBRIDAV_STREAMING_DELAY_BETWEEN_RETRIES=50ms
       - DEBRIDAV_STREAMING_RETRIES_ON_PROVIDER_ERROR=2
       - DEBRIDAV_STREAMING_WAIT_AFTER_NETWORK_ERROR=100ms
+      # Customize buffer size (e.g., 64KB)
+      # - DEBRIDAV_STREAMING_BUFFER_SIZE=65536
+      # Customize flush multiplier (e.g., 4 = flush every 256KB with 64KB buffer)
+      # - DEBRIDAV_STREAMING_FLUSH_MULTIPLIER=4
       
+      # Enable optimization headers for VFS path (Milton) streaming
+      # When false (default), the MediaStreamingOptimizationFilter is completely disabled and will not run
+      # When true, the filter is enabled and optimization headers are added/overridden (Cache-Control: no-store, Content-Encoding: identity, X-Accel-Buffering: no, Accept-Ranges: bytes)
+      # This is an opt-in feature - the filter only runs when this is explicitly set to true
+      - DEBRIDAV_ENABLE_VFS_OPTIMIZATION_HEADERS=${DEBRIDAV_ENABLE_VFS_OPTIMIZATION_HEADERS:-false}
+      
+      # Log existing Milton headers before modification (for debugging/verification)
+      # When false (default), no header logging occurs
+      # When true, logs all response headers that Milton sets at DEBUG level
+      # Independent of enable-vfs-optimization-headers - can log headers even when not applying optimizations
+      - DEBRIDAV_LOG_VFS_HEADERS=${DEBRIDAV_LOG_VFS_HEADERS:-false}
+
       # Cache durations
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
       - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
+
+      # Downloads cleanup configuration
+      # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)
+      # When true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes
+      # When false (default), cleanup is immediate (no age check) - all orphaned content is removed immediately
+      - DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED=${DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED:-false}
+      # Time threshold in minutes for time-based cleanup (default: 10 minutes)
+      # Only used if enable-downloads-cleanup-time-based is true
+      # Files/torrents older than this threshold will be cleaned up
+      - DEBRIDAV_DOWNLOADS_CLEANUP_TIME_BASED_THRESHOLD_MINUTES=${DEBRIDAV_DOWNLOADS_CLEANUP_TIME_BASED_THRESHOLD_MINUTES:-10}
 
       # Byte range chunking control - set to true to prevent aggressive chunking and caching
       - DEBRIDAV_DISABLE_BYTE_RANGE_REQUEST_CHUNKING=true
@@ -194,14 +251,33 @@ services:
       - DEBRIDAV_STRM_ENABLED=false
       - DEBRIDAV_STRM_FOLDER_MAPPINGS=tv=tv_strm,movies=movies_strm
       - DEBRIDAV_STRM_ROOT_PATH_PREFIX=/data
+      
+      # Control which providers use STRM files (takes precedence over URL settings below)
+      # This determines IF STRM files are created for providers
+      # Optional: Control which providers use STRM files (default: * = all providers)
+      # Examples:
+      # - DEBRIDAV_STRM_PROVIDERS=*  # All providers use STRM files (default)
+      # - DEBRIDAV_STRM_PROVIDERS=*,!IPTV  # All providers except IPTV use STRM files
+      # - DEBRIDAV_STRM_PROVIDERS=REAL_DEBRID,PREMIUMIZE  # Only these providers use STRM files
+      # Note: If a provider is excluded here, URL settings below have no effect for that provider
+      
+      # File filtering and naming
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
       - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+      # Optional: Exclude files matching regex pattern from STRM file creation
+      # Examples:
+      # - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*sample.*  # Exclude files containing "sample"
+      # - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*\\.sample\\.mkv$  # Exclude files ending with ".sample.mkv"
+      
+      # Control what URL type goes inside STRM files (only applies if STRM files are created above)
       # Optional: Use external URLs only for specific providers (e.g., IPTV)
+      # Note: Only applies if STRM files are created for the provider (see DEBRIDAV_STRM_PROVIDERS above)
       # - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV
       # Optional: Use proxy URLs for external URLs (for providers with expiring URLs like PREMIUMIZE)
       # Proxy URLs ensure expired URLs are automatically refreshed when accessed
       # Takes priority over DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS
+      # Note: Only applies if STRM files are created for the provider (see DEBRIDAV_STRM_PROVIDERS above)
       # Examples:
       #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE
       #   - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=PREMIUMIZE,REAL_DEBRID

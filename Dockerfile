@@ -12,15 +12,22 @@ COPY gradle.properties .
 # Copy the source code
 COPY src src
 
+#RUN ./gradlew bootJar
 # Build the application
-RUN ./gradlew bootJar
+# Use gradle command directly since base image already has Gradle 8.11 installed
+# This avoids wrapper download issues (503 errors from distribution servers)
+# The gradle:8.11-jdk21 image already has Gradle 8.11 pre-installed
+RUN gradle bootJar --no-daemon
 
 # Runtime stage
 FROM openjdk:26-ea-21-jdk-slim
 
 WORKDIR /app
 
-RUN apt update && apt install curl -y
+RUN apt update && apt install -y curl ffmpeg
+# Clean up after 'apt update'
+RUN apt-get clean \
+    && rm -Rf /var/lib/apt/lists/*
 
 RUN mkdir app
 # Copy the built JAR from the build stage

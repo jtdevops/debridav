@@ -52,10 +52,17 @@ class StrmFileResource(
      * 3. VFS path (default)
      */
     private fun computeStrmContent(): String {
+        val fileName = originalFile.name ?: "unknown"
+        val filePath = originalFilePath
+        
+        // Determine the provider if this is a RemotelyCachedEntity
+        val provider = if (originalFile is RemotelyCachedEntity) {
+            determineProvider(originalFile)
+        } else {
+            null
+        }
+        
         if (originalFile is RemotelyCachedEntity) {
-            // Determine the provider for provider-specific configuration checks
-            val provider = determineProvider(originalFile)
-            
             // Check if proxy URLs are enabled (takes priority - proxy URLs implicitly enable external URLs)
             val shouldUseProxy = provider != null && 
                 provider != DebridProvider.IPTV &&
@@ -65,6 +72,7 @@ class StrmFileResource(
                 // Generate proxy URL (proxy URLs are external URLs, so this takes priority)
                 val proxyUrl = generateProxyUrl(originalFile)
                 if (proxyUrl != null) {
+                    StrmFileAccessLogger.logContentComputed(filePath, provider?.toString(), "proxy", proxyUrl)
                     return proxyUrl
                 }
             }
@@ -74,12 +82,15 @@ class StrmFileResource(
                 // Use direct external URL
                 val externalUrl = getExternalUrl(originalFile)
                 if (externalUrl != null) {
+                    StrmFileAccessLogger.logContentComputed(filePath, provider?.toString(), "external", externalUrl)
                     return externalUrl
                 }
             }
         }
         // Fall back to VFS path
-        return debridavConfigurationProperties.getStrmContentPath(originalFilePath)
+        val vfsPath = debridavConfigurationProperties.getStrmContentPath(originalFilePath)
+        StrmFileAccessLogger.logContentComputed(filePath, provider?.toString(), "VFS", vfsPath)
+        return vfsPath
     }
 
     /**
@@ -211,15 +222,21 @@ class StrmFileResource(
     ) {
         // Compute content dynamically (proxy URLs are generated when refresh is enabled)
         val strmContentBytes = getStrmContentBytes()
+        val fileName = originalFile.name ?: "unknown"
+        val filePath = originalFilePath
+        
         if (range != null && range.start != null && range.finish != null) {
             // Handle range request
             val start = range.start.toInt().coerceAtLeast(0)
             val end = range.finish.toInt().coerceAtMost(strmContentBytes.size - 1)
             if (start <= end && start < strmContentBytes.size) {
-                out.write(strmContentBytes, start, (end - start + 1).coerceAtMost(strmContentBytes.size - start))
+                val contentLength = (end - start + 1).coerceAtMost(strmContentBytes.size - start)
+                StrmFileAccessLogger.logContentSent(filePath, "$start-$end", contentLength)
+                out.write(strmContentBytes, start, contentLength)
             }
         } else {
             // Write full content
+            StrmFileAccessLogger.logContentSent(filePath, null, strmContentBytes.size)
             out.write(strmContentBytes)
         }
     }
@@ -233,7 +250,12 @@ class StrmFileResource(
     }
 
     override fun getContentLength(): Long {
-        return getStrmContentBytes().size.toLong()
+        val strmContentBytes = getStrmContentBytes()
+        val length = strmContentBytes.size.toLong()
+        val fileName = originalFile.name ?: "unknown"
+        val filePath = originalFilePath
+        StrmFileAccessLogger.logContentLengthQueried(filePath, length)
+        return length
     }
 
     override fun isDigestAllowed(): Boolean {

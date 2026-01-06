@@ -299,22 +299,15 @@ class QBittorrentEmulationController(
         hashes.forEach { hash ->
             try {
                 // Get torrent details before deletion for enhanced logging
-                val torrent = torrentService.getTorrentByHash(TorrentHash(hash))
+                // Use getTorrentByHashString to avoid TorrentHash validation (supports any hash length)
+                val torrent = torrentService.getTorrentByHashString(hash)
                 if (torrent != null) {
                     val torrentName = torrent.name ?: "unknown"
                     val fileCount = torrent.files.size
                     val fileDetails = torrent.files.mapNotNull { file ->
-                        when (file) {
-                            is RemotelyCachedEntity -> {
-                                val fileName = file.name ?: "unknown"
-                                val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
-                                "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
-                            }
-                            else -> {
-                                val fileName = file.name ?: "unknown"
-                                "$fileName (id: ${file.id}, type: ${file.javaClass.simpleName})"
-                            }
-                        }
+                        val fileName = file.name ?: "unknown"
+                        val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
+                        "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
                     }
                     
                     logger.info("Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount")

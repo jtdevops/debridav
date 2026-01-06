@@ -2,16 +2,24 @@
 
 The following environment variables can be used in Docker Compose to configure the STRM file enhancement feature.
 
+> [!IMPORTANT]
+> **Media Server Compatibility**: **Plex does not support STRM files** - use VFS paths for Plex. Jellyfin and Emby fully support STRM files.
+
+> [!TIP]
+> **Why Use STRM Files?** STRM files help reduce the amount of data that media servers download when analyzing media files (movies/TV shows). This is particularly important for providers that track download usage and may cap or limit downloads, such as Premiumize (see their [Fair Use policy](https://www.premiumize.me/fairuse)). By using STRM files, media servers can access metadata and stream content more efficiently without downloading entire files during library scans.
+
 ## STRM Configuration Environment Variables
 
 | Environment Variable | Description | Default | Example |
 |---------------------|-------------|---------|---------|
 | `DEBRIDAV_STRM_ENABLED` | Enable/disable STRM feature | `false` | `true` |
 | `DEBRIDAV_STRM_FOLDER_MAPPINGS` | Maps root folders to STRM folders (comma-separated key=value pairs) | (empty) | `tv=tv_strm,movies=movies_strm` |
-| `DEBRIDAV_STRM_ROOT_PATH_PREFIX` | Optional prefix for paths written in STRM files | (empty) | `/media` |
+| `DEBRIDAV_STRM_ROOT_PATH_PREFIX` | Optional prefix for paths written in STRM files. This should match your Docker volume mapping (typically `/data`) | (empty) | `/data` |
 | `DEBRIDAV_STRM_FILE_EXTENSION_MODE` | How to handle file extensions: `REPLACE` (episode.mkv -> episode.strm) or `APPEND` (episode.mkv -> episode.mkv.strm) | `REPLACE` | `REPLACE` or `APPEND` |
 | `DEBRIDAV_STRM_FILE_FILTER_MODE` | Which files to convert: `ALL` (all files), `MEDIA_ONLY` (only media extensions), `NON_STRM` (all except .strm) | `MEDIA_ONLY` | `ALL`, `MEDIA_ONLY`, or `NON_STRM` |
 | `DEBRIDAV_STRM_MEDIA_EXTENSIONS` | Comma-separated list of media file extensions when filter mode is `MEDIA_ONLY` | `mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts` | `mkv,mp4,avi,mov` |
+| `DEBRIDAV_STRM_PROVIDERS` | Comma-separated list of provider names for which to create STRM files. Supports `ALL`/`*` for all providers and `!` prefix for negation | `*` (all providers) | `*`, `*,!IPTV`, or `REAL_DEBRID,PREMIUMIZE` |
+| `DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX` | Optional regex pattern to match filenames that should be excluded from STRM file creation | (empty) | `.*sample.*` or `.*\\.sample\\.mkv$` |
 | `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS` | Comma-separated list of provider names for which to use external URLs. Supports `ALL`/`*` for all providers and `!` prefix for negation | (empty) | `IPTV`, `ALL`, `*,!REAL_DEBRID`, or `IPTV,REAL_DEBRID` |
 | `DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS` | Comma-separated list of provider names for which external URLs should use proxy URLs instead of direct URLs. When enabled, STRM files contain proxy URLs that check and refresh expired URLs. Supports `ALL`/`*` for all providers and `!` prefix for negation | (empty) | `PREMIUMIZE`, `ALL`, `*,!IPTV`, or `PREMIUMIZE,REAL_DEBRID` |
 | `DEBRIDAV_STRM_PROXY_BASE_URL` | Base URL for STRM redirect proxy. Defaults to `http://{detected-hostname}:8080` if not set (hostname detected via network at startup) | (empty - uses `http://{detected-hostname}:8080`) | `http://debridav:8080` or `http://192.168.1.100:8080` |
@@ -32,10 +40,19 @@ services:
       # STRM Configuration
       - DEBRIDAV_STRM_ENABLED=true
       - DEBRIDAV_STRM_FOLDER_MAPPINGS=tv=tv_strm,movies=movies_strm
-      - DEBRIDAV_STRM_ROOT_PATH_PREFIX=/media
+      - DEBRIDAV_STRM_ROOT_PATH_PREFIX=/data
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
       - DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+      # Optional: Control which providers use STRM files (default: * = all providers)
+      # Examples:
+      # - DEBRIDAV_STRM_PROVIDERS=*  # All providers use STRM files (default)
+      # - DEBRIDAV_STRM_PROVIDERS=*,!IPTV  # All providers except IPTV use STRM files
+      # - DEBRIDAV_STRM_PROVIDERS=REAL_DEBRID,PREMIUMIZE  # Only these providers use STRM files
+      # Optional: Exclude files matching regex pattern from STRM file creation
+      # Examples:
+      # - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*sample.*  # Exclude files containing "sample"
+      # - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*\\.sample\\.mkv$  # Exclude files ending with ".sample.mkv"
       # Optional: Use external URLs only for specific providers
       # Examples:
       # - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV  # Only IPTV
@@ -60,10 +77,19 @@ Alternatively, you can define these in your `.env` file and reference them in do
 # STRM Configuration
 DEBRIDAV_STRM_ENABLED=true
 DEBRIDAV_STRM_FOLDER_MAPPINGS=tv=tv_strm,movies=movies_strm
-DEBRIDAV_STRM_ROOT_PATH_PREFIX=/media
+DEBRIDAV_STRM_ROOT_PATH_PREFIX=/data
 DEBRIDAV_STRM_FILE_EXTENSION_MODE=REPLACE
 DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY
 DEBRIDAV_STRM_MEDIA_EXTENSIONS=mkv,mp4,avi,mov,m4v
+# Optional: Control which providers use STRM files (default: * = all providers)
+# Examples:
+# DEBRIDAV_STRM_PROVIDERS=*  # All providers use STRM files (default)
+# DEBRIDAV_STRM_PROVIDERS=*,!IPTV  # All providers except IPTV use STRM files
+# DEBRIDAV_STRM_PROVIDERS=REAL_DEBRID,PREMIUMIZE  # Only these providers use STRM files
+# Optional: Exclude files matching regex pattern from STRM file creation
+# Examples:
+# DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*sample.*  # Exclude files containing "sample"
+# DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=.*\\.sample\\.mkv$  # Exclude files ending with ".sample.mkv"
 # Optional: Use external URLs only for specific providers
 # Examples:
 # DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV  # Only IPTV
@@ -92,6 +118,8 @@ services:
       - DEBRIDAV_STRM_FILE_EXTENSION_MODE=${DEBRIDAV_STRM_FILE_EXTENSION_MODE:-REPLACE}
       - DEBRIDAV_STRM_FILE_FILTER_MODE=${DEBRIDAV_STRM_FILE_FILTER_MODE:-MEDIA_ONLY}
       - DEBRIDAV_STRM_MEDIA_EXTENSIONS=${DEBRIDAV_STRM_MEDIA_EXTENSIONS:-mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts}
+      - DEBRIDAV_STRM_PROVIDERS=${DEBRIDAV_STRM_PROVIDERS:-*}
+      - DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX=${DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX:-}
       - DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=${DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS:-}
       - DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS=${DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS:-}
       - DEBRIDAV_STRM_PROXY_BASE_URL=${DEBRIDAV_STRM_PROXY_BASE_URL:-}
@@ -101,7 +129,7 @@ services:
 
 - **DEBRIDAV_STRM_ENABLED**: Set to `true` to enable the STRM feature. When `false`, STRM folders will not appear.
 - **DEBRIDAV_STRM_FOLDER_MAPPINGS**: Format is `original_folder=strm_folder` pairs separated by commas. Example: `tv=tv_strm,movies=movies_strm` creates `/tv_strm` mirroring `/tv` and `/movies_strm` mirroring `/movies`.
-- **DEBRIDAV_STRM_ROOT_PATH_PREFIX**: Optional prefix added to paths in STRM file content. If set to `/media`, a file at `/tv/show/episode.mkv` will have STRM content `/media/tv/show/episode.mkv`.
+- **DEBRIDAV_STRM_ROOT_PATH_PREFIX**: Optional prefix added to paths in STRM file content. If set to `/data`, a file at `/tv/show/episode.mkv` will have STRM content `/data/tv/show/episode.mkv`. This should match your Docker volume mapping (typically `/data`).
 - **DEBRIDAV_STRM_FILE_EXTENSION_MODE**: 
   - `REPLACE`: Replaces the original extension with `.strm` (e.g., `episode.mkv` -> `episode.strm`)
   - `APPEND`: Appends `.strm` to the filename (e.g., `episode.mkv` -> `episode.mkv.strm`)
@@ -110,21 +138,49 @@ services:
   - `MEDIA_ONLY`: Only convert files with extensions listed in `DEBRIDAV_STRM_MEDIA_EXTENSIONS`
   - `NON_STRM`: Convert all files except `.strm` files
 - **DEBRIDAV_STRM_MEDIA_EXTENSIONS**: Comma-separated list of file extensions (without dots). Only used when `DEBRIDAV_STRM_FILE_FILTER_MODE=MEDIA_ONLY`.
+- **DEBRIDAV_STRM_PROVIDERS**: 
+  - Configuration option for controlling which providers should have STRM files created
+  - **Takes precedence over `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS`** - if a provider is excluded here, no STRM files are created for it, regardless of the external URL setting
+  - Comma-separated list of provider names
+  - Valid provider names: `IPTV`, `REAL_DEBRID`, `PREMIUMIZE`, `EASYNEWS`, `TORBOX`
+  - **Default**: `*` (all providers use STRM files)
+  - **Special values**:
+    - `ALL` or `*` - Create STRM files for all providers (default)
+    - `!PROVIDER_NAME` - Negation prefix to exclude a provider (e.g., `*,!IPTV` means all providers except IPTV)
+  - **Examples**:
+    - `*` - All providers will use STRM files (default behavior)
+    - `*,!IPTV` - All providers except IPTV will use STRM files (IPTV files use original media files directly)
+    - `REAL_DEBRID,PREMIUMIZE` - Only Real-Debrid and Premiumize will use STRM files
+  - Files from providers not in this list will use original media files directly (same behavior as files that don't match extension filters)
+  - **Use case**: Some providers may work better with direct file access rather than STRM files. This allows you to selectively enable STRM files only for providers that benefit from them.
+  - **Interaction with `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS`**: If a provider is excluded in `DEBRIDAV_STRM_PROVIDERS` (e.g., `*,!IPTV`), no STRM files are created for that provider, and `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS` has no effect for that provider. For example, with `DEBRIDAV_STRM_PROVIDERS=*,!IPTV` and `DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS=IPTV`, no STRM files are created for IPTV, so the external URL setting is irrelevant.
+- **DEBRIDAV_STRM_EXCLUDE_FILENAME_REGEX**: 
+  - Optional regex pattern to match filenames that should be excluded from STRM file creation
+  - Files matching this pattern will use original media files instead of STRM files
+  - This check happens after provider filtering but before extension filtering
+  - **Examples**:
+    - `.*sample.*` - Exclude files containing "sample" in the filename (case-sensitive)
+    - `.*\\.sample\\.mkv$` - Exclude files ending with ".sample.mkv"
+    - `^sample_` - Exclude files starting with "sample_"
+  - If not set (empty), no filename-based exclusion is performed
+  - **Use case**: Exclude sample files, test files, or other files that should always use original media files directly
 - **DEBRIDAV_STRM_USE_EXTERNAL_URL_FOR_PROVIDERS**: 
   - Configuration option for controlling which providers use external URLs in STRM files
+  - **Important**: When enabled for a provider, STRM files are still created but contain direct external URLs instead of VFS paths. This setting only changes what URL is written inside the STRM file, not whether the STRM file is created.
+  - **Note**: This only applies if STRM files are created for the provider (see `DEBRIDAV_STRM_PROVIDERS`). If a provider is excluded from STRM creation via `DEBRIDAV_STRM_PROVIDERS`, this setting has no effect for that provider.
   - Comma-separated list of provider names
   - Valid provider names: `IPTV`, `REAL_DEBRID`, `PREMIUMIZE`, `EASYNEWS`, `TORBOX`
   - **Special values**:
     - `ALL` or `*` - Use external URLs for all providers
     - `!PROVIDER_NAME` - Negation prefix to exclude a provider (e.g., `*,!REAL_DEBRID` means all providers except Real-Debrid)
   - **Examples**:
-    - `IPTV` - Only IPTV content will use external URLs, all debrid providers will use VFS paths
-    - `IPTV,REAL_DEBRID` - Both IPTV and Real-Debrid content will use external URLs
-    - `ALL` or `*` - All providers will use external URLs
-    - `*,!REAL_DEBRID` - All providers except Real-Debrid will use external URLs
-    - `IPTV,PREMIUMIZE,!EASYNEWS` - IPTV and Premiumize will use external URLs, but not EasyNews (negation takes precedence)
-  - If not set (empty), all providers will use VFS paths (default behavior)
-  - If external URL is not available for a provider, falls back to VFS path
+    - `IPTV` - Only IPTV content will use external URLs in STRM files, all debrid providers will use VFS paths in STRM files
+    - `IPTV,REAL_DEBRID` - Both IPTV and Real-Debrid content will use external URLs in STRM files
+    - `ALL` or `*` - All providers will use external URLs in STRM files
+    - `*,!REAL_DEBRID` - All providers except Real-Debrid will use external URLs in STRM files
+    - `IPTV,PREMIUMIZE,!EASYNEWS` - IPTV and Premiumize will use external URLs in STRM files, but not EasyNews (negation takes precedence)
+  - If not set (empty), all providers will use VFS paths in STRM files (default behavior)
+  - If external URL is not available for a provider, falls back to VFS path in the STRM file
   - **Use case**: IPTV URLs are stable and don't expire, so they're safe to use in STRM files. Some debrid provider URLs may expire, making them unreliable for STRM files that are accessed later. This allows you to selectively enable external URLs only for providers with stable URLs.
 - **DEBRIDAV_STRM_PROXY_EXTERNAL_URL_FOR_PROVIDERS**: 
   - Configuration option for controlling which providers should use proxy URLs instead of direct external URLs in STRM files

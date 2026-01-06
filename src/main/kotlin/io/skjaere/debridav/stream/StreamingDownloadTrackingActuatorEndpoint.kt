@@ -41,9 +41,26 @@ class StreamingDownloadTrackingActuatorEndpoint(
                     java.time.Duration.between(context.downloadStartTime, endTime).toMillis()
                 },
                 httpHeaders = context.httpHeaders,
-                sourceInfo = httpRequestInfo.sourceInfo
+                sourceInfo = httpRequestInfo.sourceInfo,
+                provider = context.provider?.toString()
             )
         }.sortedByDescending { trackingInfo -> trackingInfo.downloadStartTime }
+        
+        // Calculate provider metrics
+        val providerMetrics = trackingInfoList
+            .groupBy { it.provider ?: "UNKNOWN" }
+            .map { (provider, entries) ->
+                val totalDownloadedBytes = entries.sumOf { it.actualBytesSent ?: it.bytesDownloaded }
+                val filePaths = entries.map { it.filePath }.distinct().sorted()
+                
+                ProviderMetrics(
+                    provider = provider,
+                    totalDownloadedBytes = totalDownloadedBytes,
+                    totalDownloadedBytesFormatted = FileUtils.byteCountToDisplaySize(totalDownloadedBytes),
+                    filePaths = filePaths
+                )
+            }
+            .sortedBy { it.provider }
         
         // Calculate metrics grouped by filePath
         val metricsByFilePath = trackingInfoList
@@ -79,6 +96,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
             .sortedByDescending { it.lastAccessTime ?: Instant.EPOCH }
         
         return TrackingResponse(
+            providerMetrics = providerMetrics,
             metrics = metricsByFilePath,
             details = trackingInfoList
         )
@@ -90,8 +108,16 @@ class StreamingDownloadTrackingActuatorEndpoint(
     }
 
     data class TrackingResponse(
+        val providerMetrics: List<ProviderMetrics>,
         val metrics: List<FilePathMetrics>,
         val details: List<DownloadTrackingInfo>
+    )
+    
+    data class ProviderMetrics(
+        val provider: String,
+        val totalDownloadedBytes: Long,
+        val totalDownloadedBytesFormatted: String,
+        val filePaths: List<String>
     )
     
     data class FilePathMetrics(
@@ -132,6 +158,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
         val completionStatus: String,
         val durationMs: Long?,
         val httpHeaders: Map<String, String>,
-        val sourceInfo: String?
+        val sourceInfo: String?,
+        val provider: String?
     )
 }

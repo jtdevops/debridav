@@ -53,10 +53,23 @@ class IptvApiController(
         @RequestParam(required = false) episode: String?,
         @RequestParam(required = false) tvdbid: String?,
         @RequestParam(required = false) rid: String?,
+        // File size retrieval toggle (from Prowlarr config)
+        // Accept as String to handle Prowlarr's format (e.g., ".True", ".False")
+        // Note: When Prowlarr disables this option, it sends an empty string, which should be treated as false
+        @RequestParam(required = false) fetchFileSize: String?,
+        // Maximum number of results to process (from Prowlarr custom field)
+        // Accept as String to handle Prowlarr's format
+        // If not specified, empty string, or "0", process all results (default behavior)
+        @RequestParam(required = false) limit: String?,
         request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
         logger.debug("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
             query, type, category, request.queryString)
+        
+        // Parse fetchFileSize string to boolean, handling Prowlarr's format (e.g., ".True", ".False")
+        // When parameter is missing (null), default to true. When empty string, treat as false (disabled).
+        val fetchFileSizeBool = parseBooleanParameter(fetchFileSize, defaultValue = true)
+        logger.debug("Parsed fetchFileSize parameter: '{}' -> {}", fetchFileSize, fetchFileSizeBool)
         
         // Resolve hostname from IP address
         val remoteAddr = request.remoteAddr
@@ -95,9 +108,18 @@ class IptvApiController(
         // If q or imdbid are provided but fail to find results, we don't fall back to qTest.
         
         // Check if this is a test request (only qTest parameter, no q or imdbid)
-        val isTestRequest = qTest?.takeIf { it.isNotBlank() } != null && 
-                           q?.takeIf { it.isNotBlank() } == null && 
-                           imdbid?.takeIf { it.isNotBlank() } == null
+        // IMPORTANT: When only qTest is provided, this is a connectivity test from Sonarr/Radarr.
+        // For connectivity tests, we should:
+        // 1. If qTest is an IMDb ID, resolve it to a title (using OMDB API) so we can search IPTV content
+        // 2. Query IPTV content using the resolved title (or qTest text if not an IMDb ID)
+        // 3. Skip fetching other metadata (resolution, codec, file size, etc.) for the IPTV content results
+        // 4. Return only the first valid result (since we're just testing connectivity)
+        val hasQTest = qTest?.takeIf { it.isNotBlank() } != null
+        val hasQ = q?.takeIf { it.isNotBlank() } != null
+        val hasImdbid = imdbid?.takeIf { it.isNotBlank() } != null
+        val isTestRequest = hasQTest && !hasQ && !hasImdbid
+        logger.debug("Test request detection: qTest='{}' (hasQTest={}), q='{}' (hasQ={}), imdbid='{}' (hasImdbid={}), isTestRequest={}", 
+            qTest, hasQTest, q, hasQ, imdbid, hasImdbid, isTestRequest)
         
         val searchQuery = determineSearchQuery(
             imdbid = imdbid,
@@ -126,11 +148,22 @@ class IptvApiController(
         }
         
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest)
+        // Parse limit parameter: if not specified, empty string, or "0", process all results (default behavior)
+        val resultLimit = parseLimitParameter(limit)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool, resultLimit)
+        
+        // For test requests (connectivity tests), only return the first valid result and skip detailed logging
+        // This is a connectivity test - we just need to verify IPTV content can be queried.
+        // Note: We may have resolved an IMDb ID to a title, but we skip fetching other metadata (resolution, codec, file size, etc.) for the IPTV content
+        val finalResults = if (isTestRequest && results.isNotEmpty()) {
+            listOf(results.first())
+        } else {
+            results
+        }
         
         // For test requests, only log if there are no results (WARN level)
         if (isTestRequest) {
-            if (results.isEmpty()) {
+            if (finalResults.isEmpty()) {
                 // Determine the reason for failure
                 val failureReason = determineFailureReason(qTest, searchQuery, contentType)
                 logger.warn("Prowlarr test connection failed - no results found: qTest='{}', reason={}", qTest, failureReason)
@@ -164,10 +197,10 @@ class IptvApiController(
                     contentType?.let { ", type=$it" } ?: "",
                     episodeInfo?.let { ", episode=$it" } ?: "",
                     results.size,
-                    firstResultTitle)
+                    firstResultTitle                )
             }
         }
-        return ResponseEntity.ok(results)
+        return ResponseEntity.ok(finalResults)
     }
     
     /**
@@ -193,7 +226,14 @@ class IptvApiController(
      * Note: qTest should only be used when q and imdbid are not provided.
      * If q or imdbid are provided but fail to find results, we don't fall back to qTest.
      * 
-     * @param isTestRequest Whether this is a test request (affects logging level)
+     * IMPORTANT: When isTestRequest is true (only qTest parameter provided), this is a connectivity test.
+     * For connectivity tests:
+     * - If qTest is an IMDb ID, we still resolve it to a title (using OMDB API) so we can search IPTV content
+     * - Once we have the title, we query IPTV content but skip fetching other metadata (resolution, codec, file size, etc.)
+     * - If qTest is text, we use it directly to search IPTV content
+     * This ensures we can properly search IPTV content while avoiding unnecessary metadata fetching for connectivity tests.
+     * 
+     * @param isTestRequest Whether this is a test request (affects logging level and metadata fetching)
      */
     private fun determineSearchQuery(
         imdbid: String?,
@@ -252,18 +292,24 @@ class IptvApiController(
         
         // Priority 3: Use 'qTest' parameter (testing data) - ONLY if q and imdbid are NOT provided
         // Can be either a text string or an IMDb ID
+        // IMPORTANT: When only qTest is provided (isTestRequest = true), this is a connectivity test.
+        // For connectivity tests:
+        // - If qTest is an IMDb ID, we still need to resolve it to a title (using OMDB API) so we can search IPTV content
+        // - Once we find IPTV content, we skip fetching other metadata (resolution, codec, file size, etc.) for that content
+        // - If qTest is text, use it directly to search IPTV content
         if (!hasImdbId && !hasQ) {
             val qTestParam = qTest?.takeIf { it.isNotBlank() }
             if (qTestParam != null) {
                 // Check if qTest looks like an IMDb ID (starts with "tt" followed by digits)
+                // For test requests, we still need to resolve IMDb IDs to titles so we can search IPTV content
                 if (isImdbId(qTestParam)) {
-                    logger.debug("qTest parameter detected as IMDb ID: '$qTestParam', attempting to fetch metadata")
+                    logger.debug("qTest parameter detected as IMDb ID: '$qTestParam', resolving to title for connectivity test")
                     val metadata = runBlocking {
                         metadataService.getMetadataByImdbId(qTestParam)
                     }
                     
                     if (metadata != null) {
-                        logger.debug("Successfully resolved qTest IMDb ID '$qTestParam' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear})")
+                        logger.debug("Successfully resolved qTest IMDb ID '$qTestParam' to title: '${metadata.title}' (startYear: ${metadata.startYear}, endYear: ${metadata.endYear}) for connectivity test")
                         return SearchQuery(
                             title = metadata.title,
                             year = metadata.startYear,
@@ -278,7 +324,11 @@ class IptvApiController(
                 }
                 
                 // Treat as text string (either not an IMDb ID, or IMDb ID resolution failed)
-                logger.debug("Using 'qTest' parameter as text (testing): '$qTestParam'")
+                if (isTestRequest) {
+                    logger.debug("qTest parameter provided for connectivity test: '$qTestParam' (treating as text)")
+                } else {
+                    logger.debug("Using 'qTest' parameter as text (testing): '$qTestParam'")
+                }
                 return extractTitleAndYear(qTestParam, useArticleVariations = true)
             }
         } else {
@@ -472,5 +522,82 @@ class IptvApiController(
         val season: Int? = null, // Season number for series (e.g., 8)
         val episode: Int? = null // Episode number within season (optional)
     )
+    
+    /**
+     * Parses a boolean parameter from a string value.
+     * Handles various formats that Prowlarr might send:
+     * - ".True", ".False" (with dot prefix)
+     * - "true", "false" (standard boolean strings)
+     * - "1", "0" (numeric)
+     * - null (parameter missing) -> returns default
+     * - Empty string (parameter present but empty, e.g., when disabled in Prowlarr) -> returns false
+     * 
+     * @param value The string value to parse
+     * @param defaultValue The default value to return if parameter is missing (null) or parsing fails
+     * @return The parsed boolean value
+     */
+    private fun parseBooleanParameter(value: String?, defaultValue: Boolean): Boolean {
+        // If parameter is completely missing (null), use default
+        if (value == null) {
+            return defaultValue
+        }
+        
+        // If parameter is present but empty/blank, treat as false (disabled)
+        // This handles the case when Prowlarr sends fetchFileSize= (empty) when the option is disabled
+        if (value.isBlank()) {
+            return false
+        }
+        
+        // Remove any leading/trailing dots or whitespace
+        val cleaned = value.trim().removePrefix(".").removeSuffix(".").lowercase()
+        
+        return when (cleaned) {
+            "true", "1", "yes", "on" -> true
+            "false", "0", "no", "off" -> false
+            else -> {
+                logger.warn("Unable to parse boolean parameter value '{}', using default: {}", value, defaultValue)
+                defaultValue
+            }
+        }
+    }
+    
+    /**
+     * Parses a limit parameter from a string value.
+     * Handles various formats that Prowlarr might send:
+     * - null (parameter missing) -> returns null (process all)
+     * - Empty string -> returns null (process all)
+     * - "0" -> returns null (process all)
+     * - Positive integer string -> returns the integer value
+     * 
+     * @param value The string value to parse
+     * @return The parsed integer limit, or null if all results should be processed
+     */
+    private fun parseLimitParameter(value: String?): Int? {
+        // If parameter is completely missing (null), process all
+        if (value == null) {
+            return null
+        }
+        
+        // If parameter is present but empty/blank, process all
+        if (value.isBlank()) {
+            return null
+        }
+        
+        // Try to parse as integer
+        val parsed = value.trim().toIntOrNull()
+        
+        // If parsing failed or value is 0, process all
+        if (parsed == null || parsed == 0) {
+            return null
+        }
+        
+        // If negative, treat as "process all" (invalid limit)
+        if (parsed < 0) {
+            logger.warn("Invalid limit parameter value '{}' (negative), processing all results", value)
+            return null
+        }
+        
+        return parsed
+    }
 }
 
