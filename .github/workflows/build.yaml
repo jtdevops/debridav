@@ -131,23 +131,21 @@ jobs:
           if [ "$HAS_PREVIOUS_TAG" = "true" ] && [ -n "$PREVIOUS_TAG" ]; then
             COMPARE_URL="https://github.com/${REPO}/compare/${PREVIOUS_TAG}...${NEW_TAG}"
             DIFF_URL="https://github.com/${REPO}/compare/${PREVIOUS_TAG}...${NEW_TAG}.diff"
-            RELEASE_BODY="## Changes
-
-[View changes](${COMPARE_URL}) | [Download diff](${DIFF_URL})"
             echo "compareUrl=$COMPARE_URL" >> $GITHUB_OUTPUT
             echo "diffUrl=$DIFF_URL" >> $GITHUB_OUTPUT
             echo "hasComparison=true" >> $GITHUB_OUTPUT
             echo "releaseBody<<EOF" >> $GITHUB_OUTPUT
-            echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+            echo "## Changes" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "[View changes](${COMPARE_URL}) | [Download diff](${DIFF_URL})" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
             echo "Generated comparison URLs:"
             echo "  Compare: $COMPARE_URL"
             echo "  Diff: $DIFF_URL"
           else
-            RELEASE_BODY="## Initial Release"
             echo "hasComparison=false" >> $GITHUB_OUTPUT
             echo "releaseBody<<EOF" >> $GITHUB_OUTPUT
-            echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+            echo "## Initial Release" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
             echo "No previous tag found, skipping comparison URLs"
           fi
