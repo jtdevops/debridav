@@ -36,37 +36,38 @@ class MediaStreamingOptimizationFilter(
         response: HttpServletResponse,
         filterChain: FilterChain
     ) {
+        // Note: Request context is already set up by DebridavRequestContextFilter which runs earlier
         // Only process GET requests
         if (request.method != "GET") {
             filterChain.doFilter(request, response)
             return
         }
-        
-        // Skip endpoints that are excluded from Milton processing to reduce log noise
-        // These match the paths excluded in Milton filter configuration
-        val requestUri = request.requestURI
-        val excludedPaths = listOf("/actuator", "/api", "/files", "/version", "/sabnzbd", "/strm-proxy")
-        if (excludedPaths.any { requestUri.startsWith(it) }) {
-            filterChain.doFilter(request, response)
-            return
-        }
-        
-        // Check if direct streaming is enabled
-        val isDirectStreaming = !debridavConfigurationProperties.enableChunkCaching && 
-                               !debridavConfigurationProperties.enableInMemoryBuffering
-        
-        if (!isDirectStreaming) {
-            filterChain.doFilter(request, response)
-            return
-        }
-        
-        // Check if we should process headers (optimization headers or header logging enabled)
-        val shouldProcessHeaders = debridavConfigurationProperties.enableVfsOptimizationHeaders || 
-                                  debridavConfigurationProperties.logVfsHeaders
-        
-        // Always wrap response to ensure request context flows properly, even if we don't process headers
-        // This ensures RequestContextHolder works correctly for downstream components
-        val wrappedResponse = if (shouldProcessHeaders) {
+            
+            // Skip endpoints that are excluded from Milton processing to reduce log noise
+            // These match the paths excluded in Milton filter configuration
+            val requestUri = request.requestURI
+            val excludedPaths = listOf("/actuator", "/api", "/files", "/version", "/sabnzbd", "/strm-proxy")
+            if (excludedPaths.any { requestUri.startsWith(it) }) {
+                filterChain.doFilter(request, response)
+                return
+            }
+            
+            // Check if direct streaming is enabled
+            val isDirectStreaming = !debridavConfigurationProperties.enableChunkCaching && 
+                                   !debridavConfigurationProperties.enableInMemoryBuffering
+            
+            if (!isDirectStreaming) {
+                filterChain.doFilter(request, response)
+                return
+            }
+            
+            // Check if we should process headers (optimization headers or header logging enabled)
+            val shouldProcessHeaders = debridavConfigurationProperties.enableVfsOptimizationHeaders || 
+                                      debridavConfigurationProperties.logVfsHeaders
+            
+            // Only wrap response when we need to process headers
+            // When not processing headers, pass through the original response to avoid interfering with request context
+            val wrappedResponse = if (shouldProcessHeaders) {
             // Log at TRACE level when optimization headers are enabled
             if (debridavConfigurationProperties.enableVfsOptimizationHeaders) {
                 logger.trace("VFS_FILTER_ACTIVE: Processing request URI={}, directStreaming={}", 
@@ -204,11 +205,9 @@ class MediaStreamingOptimizationFilter(
                 }
             }
         } else {
-            // When headers processing is disabled, use a pass-through wrapper that doesn't intercept anything
-            // This ensures request context flows properly without any processing overhead
-            object : HttpServletResponseWrapper(response) {
-                // No overrides - just pass through all calls
-            }
+            // When headers processing is disabled, don't wrap the response at all
+            // Pass through the original response to ensure request context flows properly
+            response
         }
         
         filterChain.doFilter(request, wrappedResponse)
