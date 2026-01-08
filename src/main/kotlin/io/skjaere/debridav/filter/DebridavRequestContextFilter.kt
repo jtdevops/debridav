@@ -3,7 +3,6 @@ package io.skjaere.debridav.filter
 import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.core.Ordered
 import org.springframework.core.annotation.Order
 import org.springframework.stereotype.Component
@@ -19,9 +18,11 @@ import org.springframework.web.filter.OncePerRequestFilter
  * 
  * Note: This filter complements Spring Boot's built-in RequestContextFilter by ensuring context is set
  * very early in the filter chain, before filters like MediaStreamingOptimizationFilter that may wrap the response.
+ * 
+ * This filter is always active (not conditional) because it's required for download tracking functionality
+ * and other features that rely on RequestContextHolder, regardless of optimization header settings.
  */
 @Component
-@ConditionalOnProperty(name = ["debridav.enable-vfs-optimization-headers"], havingValue = "true", matchIfMissing = false)
 @Order(Ordered.HIGHEST_PRECEDENCE + 40) // Run very early, before MediaStreamingOptimizationFilter
 class DebridavRequestContextFilter : OncePerRequestFilter() {
     
