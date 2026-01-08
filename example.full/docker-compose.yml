@@ -4,6 +4,7 @@
     # - docker-compose.plex.yml
     # - docker-compose.jellyfin.yml
     # - docker-compose.emby.yml
+    # - docker-compose.bazarr.yml
     # - docker-compose.jellyseerr.yml
 
 x-rclone-base: &rclone-base
@@ -222,6 +223,12 @@ services:
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
       - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
 
+      # Local entity storage configuration
+      # File extensions that should always be stored as LocalEntity (bypass size checks)
+      # Default: srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf
+      # These files (typically subtitle files) will be stored in the database regardless of size
+      - DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS=${DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS:-srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf}
+
       # Downloads cleanup configuration
       # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)
       # When true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes
@@ -310,7 +317,7 @@ services:
       start_period: 2s
       retries: 1000
     depends_on:
-      postgres-debridav:
+      postgres:
         condition: service_healthy
 
   # --- First service with ports ---
@@ -377,7 +384,7 @@ services:
       - rclone_arrs
     restart: unless-stopped
 
-  prowlarr-debridav:
+  prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr-debridav
     environment:
@@ -390,7 +397,7 @@ services:
       - "9696:9696"
     restart: unless-stopped
 
-  postgres-debridav:
+  postgres:
     image: postgres:17
     container_name: postgres-debridav
     environment:

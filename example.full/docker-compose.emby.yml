@@ -2,7 +2,7 @@
 services:
   emby:
     image: ghcr.io/linuxserver/emby
-    container_name: emby
+    container_name: emby-debridav
     restart: unless-stopped
     environment:
       - TZ=${TZ}
@@ -18,8 +18,8 @@ services:
       - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
 #      - /opt/vc/lib:/opt/vc/lib #optional
     ports:
-      - 8096:8096
-#      - 8920:8920 #optional
+      - 8097:8096
+#      - 8921:8920 #optional
     # devices:
     #   - /dev/dvb:/dev/dvb # Uncomment this device for typical USB TV Tuner cards
     #   - /dev/dri:/dev/dri # Uncomment this to use intel GPUs for Hardware Transcoding

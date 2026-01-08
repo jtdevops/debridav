@@ -83,7 +83,8 @@ data class DebridavConfigurationProperties(
     val strmProxyBaseUrl: String? = null, // Base URL for STRM redirect proxy (e.g., http://debridav:8080). If not set, defaults to http://{detected-hostname}:8080
     val strmProxyStreamMode: Boolean = false, // If true, stream content directly through proxy instead of redirecting. Provides more control over content delivery.
     val strmProviders: String? = "*", // Comma-separated list of provider names for which to create STRM files. Supports ALL/* for all providers and ! prefix for negation. Default: * (all providers)
-    val strmExcludeFilenameRegex: String? = null // Optional regex pattern to match filenames. Files matching this pattern will use original media files instead of STRM files.
+    val strmExcludeFilenameRegex: String? = null, // Optional regex pattern to match filenames. Files matching this pattern will use original media files instead of STRM files.
+    val localEntityAlwaysStoreExtensions: List<String> = listOf("srt", "vtt", "ass", "ssa", "sub", "idx", "sup", "ttml", "dfxp", "usf") // File extensions that should always be stored as LocalEntity (bypass size checks)
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -753,5 +754,21 @@ data class DebridavConfigurationProperties(
         
         // If no configuration is set, default to false (use direct URLs)
         return false
+    }
+
+    /**
+     * Checks if a file should always be stored as LocalEntity (bypassing size checks).
+     * This is used for subtitle files and other small metadata files that should always
+     * be stored in the database regardless of size.
+     * @param fileName The file name to check
+     * @return true if the file extension is in the whitelist, false otherwise
+     */
+    fun shouldAlwaysStoreAsLocalEntity(fileName: String): Boolean {
+        if (localEntityAlwaysStoreExtensions.isEmpty()) {
+            return false
+        }
+        
+        val extension = fileName.substringAfterLast(".", "").lowercase()
+        return localEntityAlwaysStoreExtensions.any { it.lowercase() == extension }
     }
 }

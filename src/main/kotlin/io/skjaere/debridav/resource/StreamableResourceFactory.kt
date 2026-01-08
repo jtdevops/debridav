@@ -135,7 +135,7 @@ class StreamableResourceFactory(
         if (dbItem !is DbDirectory) {
             error("Not a directory")
         }
-        return DirectoryResource(dbItem, this, localContentsService, fileService)
+        return DirectoryResource(dbItem, this, localContentsService, fileService, arrRequestDetector)
     }
 
     fun toFileResource(dbItem: DbEntity): Resource? {

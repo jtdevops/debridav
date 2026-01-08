@@ -2,7 +2,7 @@
 services:
   plex:
     image: ghcr.io/linuxserver/plex
-    container_name: plex
+    container_name: plex-debridav
     restart: unless-stopped
     # network_mode: host # Uncomment and define ports below
     ports:
