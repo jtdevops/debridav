@@ -20,4 +20,18 @@ interface TorrentRepository : CrudRepository<Torrent, Long> {
     fun markTorrentAsDeleted(torrent: Torrent)
 
     fun getTorrentByFilesContains(file: DbEntity): List<Torrent>
+    
+    /**
+     * Finds all LIVE torrents with their category loaded.
+     * Uses JOIN FETCH to avoid N+1 queries when accessing category.
+     */
+    @Query("SELECT DISTINCT t FROM Torrent t LEFT JOIN FETCH t.category WHERE t.status = :status")
+    fun findAllByStatusWithCategory(status: Status): List<Torrent>
+    
+    /**
+     * Finds LIVE torrents in the downloads folder with their category loaded.
+     * Filters by status and savePath prefix in the database to avoid loading unnecessary data.
+     */
+    @Query("SELECT DISTINCT t FROM Torrent t LEFT JOIN FETCH t.category WHERE t.status = :status AND t.savePath LIKE :savePathPrefix%")
+    fun findAllByStatusAndSavePathPrefixWithCategory(status: Status, savePathPrefix: String): List<Torrent>
 }
