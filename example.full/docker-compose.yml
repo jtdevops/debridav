@@ -225,9 +225,10 @@ services:
 
       # Local entity storage configuration
       # File extensions that should always be stored as LocalEntity (bypass size checks)
-      # Default: srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf
+      # Default: empty (disabled) - feature is opt-in
+      # To enable, set to comma-separated list of extensions (e.g., "srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf")
       # These files (typically subtitle files) will be stored in the database regardless of size
-      - DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS=${DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS:-srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf}
+      - DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS=${DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS:-}
 
       # Downloads cleanup configuration
       # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)
