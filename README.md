@@ -398,7 +398,6 @@ The IPTV integration allows DebriDav to index and serve VOD (Video on Demand) co
 | IPTV_PROVIDER_{PROVIDER_NAME}_M3U_FILE_PATH    | Local file path to M3U playlist file. Alternative to `M3U_URL` when playlist is stored locally. Required when `TYPE=m3u` and `M3U_URL` is not specified. Example: `/path/to/playlist.m3u`.                            |                  |
 | IPTV_PROVIDER_{PROVIDER_NAME}_PRIORITY         | Priority for provider fallback. Lower numbers have higher priority. When searching, providers are queried in priority order. Example: `1` (highest priority), `2` (lower priority).                                 |                  |
 | IPTV_PROVIDER_{PROVIDER_NAME}_SYNC_ENABLED     | Enable or disable syncing for a specific provider. When disabled, the provider's content will not be synced. Useful for temporarily disabling problematic providers.                                              | true             |
-| IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED      | Enable FFprobe-based metadata enhancement (extracts resolution, codec, and file size from media files using FFprobe). When disabled, FFprobe will not be used for metadata extraction. Note: File size fetching in search results is controlled by Prowlarr indexer setting (fetchFileSize). | false            |
 | IPTV_FFPROBE_PATH                              | Path to FFprobe executable. Default: "ffprobe" (assumes ffprobe is in system PATH). Example: `/usr/bin/ffprobe`.                                                                                                    | ffprobe          |
 | IPTV_FFPROBE_TIMEOUT                           | FFprobe execution timeout. Format: ISO8601 duration string (e.g., PT30S for 30 seconds, PT60S for 60 seconds).                                                                                                    | PT30S            |
 | IPTV_METADATA_FETCH_BATCH_SIZE                 | Number of concurrent metadata fetch requests per batch during IPTV search operations. When multiple movies or series are identified during search, metadata fetching is processed in parallel batches.            | 5                |
@@ -430,7 +429,7 @@ IPTV_PROVIDER_PROVIDER2_PRIORITY=2
 IPTV_METADATA_OMDB_API_KEY=your_omdb_api_key
 
 # Optional: FFprobe metadata enhancement (extracts resolution, codec, and file size from media files)
-IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=false
+# Note: Metadata enhancement is now controlled via Prowlarr indexer setting (enhanceMetadata)
 IPTV_FFPROBE_PATH=ffprobe
 IPTV_FFPROBE_TIMEOUT=PT30S
 

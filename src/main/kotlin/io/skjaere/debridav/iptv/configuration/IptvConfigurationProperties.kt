@@ -22,7 +22,6 @@ data class IptvConfigurationProperties(
     val includeProviderInMagnetTitle: Boolean = false, // Include provider name in magnet title after -IPTV (e.g., -IPTV-provider1-NL) for debugging
     val maxSearchResults: Int = 0, // Maximum number of search results to return (0 = unlimited, default: unlimited)
     val loginRateLimit: Duration = Duration.ofMinutes(1), // Rate limit for IPTV provider login/credential verification calls (default: 1 minute)
-    val ffprobeMetadataEnhancementEnabled: Boolean = false, // Enable FFprobe-based metadata enhancement (extracts resolution, codec, and file size from media files using FFprobe)
     val ffprobePath: String = "ffprobe", // Path to FFprobe executable (default: "ffprobe" in PATH)
     val ffprobeTimeout: Duration = Duration.ofSeconds(30), // Timeout for FFprobe execution (default: 30 seconds)
     val metadataFetchBatchSize: Int = 5 // Number of concurrent metadata fetch requests per batch during search operations (default: 5)

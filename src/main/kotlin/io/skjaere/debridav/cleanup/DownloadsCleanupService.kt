@@ -11,7 +11,7 @@ import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.torrent.Status
 import io.skjaere.debridav.torrent.Torrent
 import io.skjaere.debridav.torrent.TorrentRepository
-import jakarta.transaction.Transactional
+import org.springframework.transaction.annotation.Transactional
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Duration
@@ -649,6 +649,7 @@ class DownloadsCleanupService(
             
             // Re-query for empty directories (parent directories may have become empty)
             if (!dryRun) {
+                val downloadPathPrefix = convertPathToLtree(debridavConfigurationProperties.downloadPath)
                 currentEmptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
                 if (currentEmptyDirectories.isNotEmpty()) {
                     logger.debug("Found {} additional empty directory(ies) after deletion, continuing cleanup", currentEmptyDirectories.size)
@@ -672,6 +673,8 @@ class DownloadsCleanupService(
             dryRun = dryRun
         )
         
+        val useTimeBased = debridavConfigurationProperties.enableDownloadsCleanupTimeBased
+        val thresholdMinutes = debridavConfigurationProperties.downloadsCleanupTimeBasedThresholdMinutes
         val cleanupMode = if (useTimeBased) {
             "time-based (${thresholdMinutes} minutes)"
         } else {
