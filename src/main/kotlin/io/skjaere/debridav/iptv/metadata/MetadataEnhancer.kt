@@ -87,7 +87,7 @@ class MetadataEnhancer(
         val videoInfo = movieInfo.info?.video
         val existingWidth = videoInfo?.width
         val existingHeight = videoInfo?.height
-        val existingCodec = videoInfo?.codecName
+        val existingCodec = videoInfo?.codec_name
         val existingFileSize = videoInfo?.tags?.let { tags ->
             val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
             sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
@@ -102,8 +102,8 @@ class MetadataEnhancer(
         if (!needsEnhancement) {
             val metadataDetails = buildString {
                 append("width=${existingWidth ?: "null"}, height=${existingHeight ?: "null"}")
-                existingCodec?.let { append(", codec=$it") }
-                existingFileSize?.let { append(", fileSize=${it / 1_000_000}MB") }
+                existingCodec?.let { codec -> append(", codec=$codec") }
+                existingFileSize?.let { size -> append(", fileSize=${size / 1_000_000}MB") }
             }
             logger.debug("Movie metadata for ${metadata.movieId} already has complete video info ($metadataDetails), skipping FFprobe extraction (enhanceMetadata=true but metadata already exists)")
             return false
@@ -241,7 +241,7 @@ class MetadataEnhancer(
         val videoInfo = referenceEpisode.info?.video
         val existingWidth = videoInfo?.width
         val existingHeight = videoInfo?.height
-        val existingCodec = videoInfo?.codecName
+        val existingCodec = videoInfo?.codec_name
         val existingFileSize = videoInfo?.tags?.let { tags ->
             val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
             sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
@@ -256,8 +256,8 @@ class MetadataEnhancer(
         if (!needsEnhancement) {
             val metadataDetails = buildString {
                 append("width=${existingWidth ?: "null"}, height=${existingHeight ?: "null"}")
-                existingCodec?.let { append(", codec=$it") }
-                existingFileSize?.let { append(", fileSize=${it / 1_000_000}MB") }
+                existingCodec?.let { codec -> append(", codec=$codec") }
+                existingFileSize?.let { size -> append(", fileSize=${size / 1_000_000}MB") }
             }
             logger.debug("Series metadata for ${metadata.seriesId} reference episode (S01E01) already has complete video info ($metadataDetails), skipping FFprobe extraction (enhanceMetadata=true but metadata already exists)")
             return false
