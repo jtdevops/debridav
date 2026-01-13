@@ -9,12 +9,15 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.stereotype.Component
 import java.time.Instant
 import io.skjaere.debridav.stream.HttpRequestInfo
+import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 
 @Component
 @Endpoint(id = "streaming-download-tracking")
 @ConditionalOnExpression("\${debridav.enable-streaming-download-tracking:false}")
 class StreamingDownloadTrackingActuatorEndpoint(
-    private val streamingService: StreamingService
+    private val streamingService: StreamingService,
+    private val databaseFileService: DatabaseFileService
 ) {
     @ReadOperation
     fun getHistoricalDownloadTracking(): TrackingResponse {
@@ -65,7 +68,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
         // Calculate metrics grouped by filePath
         val metricsByFilePath = trackingInfoList
             .groupBy { it.filePath }
-            .mapValues { (_, entries) ->
+            .mapValues { (filePath, entries) ->
                 val totalRequestedBytes = entries.sumOf { it.requestedSize }
                 val totalDownloadedBytes = entries.sumOf { it.bytesDownloaded }
                 val totalActualBytesSent = entries.sumOf { it.actualBytesSent ?: 0L }
@@ -75,9 +78,14 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 val completionStatusCounts = entries.groupingBy { it.completionStatus }.eachCount()
                 val totalDurationMs = entries.sumOf { it.durationMs ?: 0L }
                 
+                // Get VFS file size
+                val fileSize = getFileSize(filePath)
+                
                 FilePathMetrics(
                     filePath = entries.first().filePath,
                     fileName = entries.first().fileName,
+                    fileSize = fileSize,
+                    fileSizeFormatted = fileSize?.let { FileUtils.byteCountToDisplaySize(it) },
                     totalRequestedBytes = totalRequestedBytes,
                     totalRequestedBytesFormatted = FileUtils.byteCountToDisplaySize(totalRequestedBytes),
                     totalDownloadedBytes = totalDownloadedBytes,
@@ -106,6 +114,24 @@ class StreamingDownloadTrackingActuatorEndpoint(
     fun clearMetrics() {
         streamingService.clearCompletedDownloads()
     }
+    
+    /**
+     * Gets the file size for the given file path from VFS.
+     * Checks both the entity's size property and, for RemotelyCachedEntity, the contents size.
+     */
+    private fun getFileSize(filePath: String): Long? {
+        return try {
+            val entity = databaseFileService.getFileAtPath(filePath)
+            when {
+                entity == null -> null
+                entity.size != null -> entity.size
+                entity is RemotelyCachedEntity -> entity.contents?.size
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     data class TrackingResponse(
         val providerMetrics: List<ProviderMetrics>,
@@ -123,6 +149,8 @@ class StreamingDownloadTrackingActuatorEndpoint(
     data class FilePathMetrics(
         val filePath: String,
         val fileName: String,
+        val fileSize: Long?,
+        val fileSizeFormatted: String?,
         val totalRequestedBytes: Long,
         val totalRequestedBytesFormatted: String,
         val totalDownloadedBytes: Long,
