@@ -14,6 +14,7 @@ private const val DEFAULT_STREAMING_NETWORK_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_CLIENT_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_PROVIDER_ERROR_WAIT_MINUTES = 1L
 private const val DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS = 24L
+private const val DEFAULT_STREAMING_DOWNLOAD_TRACKING_ACTIVE_TIMEOUT_MINUTES = 15L
 private const val DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS = 30L
 private const val DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB = 1024L // 1 GB - warn when chunks exceed this size
 private const val DEFAULT_STREAMING_BUFFER_SIZE = 65536L // 64KB - buffer size for direct streaming
@@ -53,6 +54,7 @@ data class DebridavConfigurationProperties(
     val disableByteRangeRequestChunking: Boolean = false,
     val enableStreamingDownloadTracking: Boolean = false,
     val streamingDownloadTrackingCacheExpirationHours: Duration = Duration.ofHours(DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS),
+    val streamingDownloadTrackingActiveTimeoutMinutes: Duration = Duration.ofMinutes(DEFAULT_STREAMING_DOWNLOAD_TRACKING_ACTIVE_TIMEOUT_MINUTES),
     val debridDirectDlResponseCacheExpirationSeconds: Duration = Duration.ofSeconds(DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS),
     val streamingMaxChunkSizeWarningMb: Long = DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB, // Warn when chunk size exceeds this threshold (in MB)
     val streamingBufferSize: Long = DEFAULT_STREAMING_BUFFER_SIZE, // Buffer size in bytes for direct streaming (default: 64KB)
