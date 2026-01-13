@@ -222,6 +222,12 @@ services:
       # To enable, set to comma-separated list of extensions (e.g., "srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf")
       # These files (typically subtitle files) will be stored in the database regardless of size
       - DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS=${DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS:-}
+      # Enable scanning and converting RemotelyCachedEntity items to LocalEntity on startup
+      # Default: false (disabled) - feature is opt-in
+      # When enabled, scans all RemotelyCachedEntity items on application startup and converts matching files
+      # (based on DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS) to LocalEntity by downloading and storing their contents
+      # Requires DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS to be configured with at least one extension
+      - DEBRIDAV_ENABLE_LOCAL_ENTITY_CONVERSION_STARTUP_SCAN=${DEBRIDAV_ENABLE_LOCAL_ENTITY_CONVERSION_STARTUP_SCAN:-false}
 
       # Downloads cleanup configuration
       # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)

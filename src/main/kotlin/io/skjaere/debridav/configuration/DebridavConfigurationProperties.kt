@@ -86,7 +86,8 @@ data class DebridavConfigurationProperties(
     val strmProxyStreamMode: Boolean = false, // If true, stream content directly through proxy instead of redirecting. Provides more control over content delivery.
     val strmProviders: String? = "*", // Comma-separated list of provider names for which to create STRM files. Supports ALL/* for all providers and ! prefix for negation. Default: * (all providers)
     val strmExcludeFilenameRegex: String? = null, // Optional regex pattern to match filenames. Files matching this pattern will use original media files instead of STRM files.
-    val localEntityAlwaysStoreExtensions: List<String> = emptyList() // File extensions that should always be stored as LocalEntity (bypass size checks). Default: empty (disabled). Set to enable (e.g., "srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf")
+    val localEntityAlwaysStoreExtensions: List<String> = emptyList(), // File extensions that should always be stored as LocalEntity (bypass size checks). Default: empty (disabled). Set to enable (e.g., "srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf")
+    val enableLocalEntityConversionStartupScan: Boolean = false // Enable scanning and converting RemotelyCachedEntity items to LocalEntity on startup for files matching localEntityAlwaysStoreExtensions. Default: false (disabled)
 ) {
     init {
         require(debridClients.isNotEmpty()) {
