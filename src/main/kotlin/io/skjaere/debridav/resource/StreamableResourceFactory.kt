@@ -17,6 +17,7 @@ import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.LocalContentsService
 import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.stream.StreamingService
 import org.springframework.boot.autoconfigure.web.ServerProperties
 import org.springframework.core.env.Environment
@@ -32,8 +33,12 @@ class StreamableResourceFactory(
     private val arrRequestDetector: ArrRequestDetector,
     internal val serverProperties: ServerProperties,
     internal val environment: Environment,
-    internal val hostnameDetectionService: HostnameDetectionService
+    internal val hostnameDetectionService: HostnameDetectionService,
+    private val iptvConfigurationProperties: IptvConfigurationProperties?
 ) : ResourceFactory {
+    
+    // Expose iptvConfigurationProperties for DirectoryResource
+    val iptvConfig: IptvConfigurationProperties? get() = iptvConfigurationProperties
     private val logger = LoggerFactory.getLogger(StreamableResourceFactory::class.java)
 
     @Throws(NotAuthorizedException::class, BadRequestException::class)
@@ -116,19 +121,44 @@ class StreamableResourceFactory(
             }
             
             // Not a STRM path, handle normally
-            fileService.getFileAtPath(path)
-                ?.let {
-                    if (it is DbDirectory) {
-                        toDirectoryResource(it)
-                    } else {
-                        toFileResource(it)
-                    }
+            // Check folder visibility before returning
+            val entity = fileService.getFileAtPath(path)
+            if (entity != null) {
+                val entityPath = when (entity) {
+                    is DbDirectory -> entity.fileSystemPath()
+                    else -> path
                 }
+                if (entityPath != null && !isFolderVisible(entityPath)) {
+                    return null // Folder is hidden
+                }
+            }
+            
+            entity?.let {
+                if (it is DbDirectory) {
+                    toDirectoryResource(it)
+                } else {
+                    toFileResource(it)
+                }
+            }
 
         } catch (e: Exception) {
             logger.error("could not load item at path: $path", e)
             null
         }
+    }
+
+    /**
+     * Checks if a folder is visible based on feature toggles.
+     * @param folderPath The folder path to check (e.g., "/live")
+     * @return true if folder should be visible, false if hidden
+     */
+    fun isFolderVisible(folderPath: String): Boolean {
+        // Check /live folder visibility
+        if (folderPath == "/live" || folderPath.startsWith("/live/")) {
+            return iptvConfigurationProperties?.liveEnabled == true
+        }
+        // Add other folder visibility checks here in the future
+        return true
     }
 
     fun toDirectoryResource(dbItem: DbEntity): DirectoryResource {

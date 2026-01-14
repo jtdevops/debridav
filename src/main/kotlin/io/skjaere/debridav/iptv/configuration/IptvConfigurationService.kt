@@ -25,6 +25,22 @@ class IptvConfigurationService(
             val priority = environment.getProperty("iptv.provider.$providerName.priority", Int::class.java, 1)
             val syncEnabled = environment.getProperty("iptv.provider.$providerName.sync-enabled", Boolean::class.java, true)
             val useLocalResponses = environment.getProperty("iptv.provider.$providerName.use-local-responses", Boolean::class.java)
+            val liveSyncEnabled = environment.getProperty("iptv.provider.$providerName.live.sync-enabled", Boolean::class.java, false)
+
+            // Load live filtering configuration
+            val liveDbCategoryExclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.db.category.exclude")
+            val liveDbCategoryExcludeIndex = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.db.category.exclude-index")
+            val liveDbChannelExclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.db.channel.exclude")
+            val liveDbChannelExcludeIndex = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.db.channel.exclude-index")
+            
+            val liveCategoryInclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.category.include")
+            val liveCategoryIncludeIndex = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.category.include-index")
+            val liveCategoryExclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.category.exclude")
+            val liveCategoryExcludeIndex = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.category.exclude-index")
+            val liveChannelInclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.channel.include")
+            val liveChannelIncludeIndex = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.channel.include-index")
+            val liveChannelExclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.channel.exclude")
+            val liveChannelExcludeIndex = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.channel.exclude-index")
 
             when (type) {
                 IptvProvider.M3U -> {
@@ -40,7 +56,20 @@ class IptvConfigurationService(
                         m3uFilePath = m3uFilePath,
                         priority = priority,
                         syncEnabled = syncEnabled,
-                        useLocalResponses = useLocalResponses
+                        useLocalResponses = useLocalResponses,
+                        liveSyncEnabled = liveSyncEnabled,
+                        liveDbCategoryExclude = liveDbCategoryExclude,
+                        liveDbCategoryExcludeIndex = liveDbCategoryExcludeIndex,
+                        liveDbChannelExclude = liveDbChannelExclude,
+                        liveDbChannelExcludeIndex = liveDbChannelExcludeIndex,
+                        liveCategoryInclude = liveCategoryInclude,
+                        liveCategoryIncludeIndex = liveCategoryIncludeIndex,
+                        liveCategoryExclude = liveCategoryExclude,
+                        liveCategoryExcludeIndex = liveCategoryExcludeIndex,
+                        liveChannelInclude = liveChannelInclude,
+                        liveChannelIncludeIndex = liveChannelIncludeIndex,
+                        liveChannelExclude = liveChannelExclude,
+                        liveChannelExcludeIndex = liveChannelExcludeIndex
                     )
                 }
                 IptvProvider.XTREAM_CODES -> {
@@ -58,11 +87,58 @@ class IptvConfigurationService(
                         xtreamPassword = password,
                         priority = priority,
                         syncEnabled = syncEnabled,
-                        useLocalResponses = useLocalResponses
+                        useLocalResponses = useLocalResponses,
+                        liveSyncEnabled = liveSyncEnabled,
+                        liveDbCategoryExclude = liveDbCategoryExclude,
+                        liveDbCategoryExcludeIndex = liveDbCategoryExcludeIndex,
+                        liveDbChannelExclude = liveDbChannelExclude,
+                        liveDbChannelExcludeIndex = liveDbChannelExcludeIndex,
+                        liveCategoryInclude = liveCategoryInclude,
+                        liveCategoryIncludeIndex = liveCategoryIncludeIndex,
+                        liveCategoryExclude = liveCategoryExclude,
+                        liveCategoryExcludeIndex = liveCategoryExcludeIndex,
+                        liveChannelInclude = liveChannelInclude,
+                        liveChannelIncludeIndex = liveChannelIncludeIndex,
+                        liveChannelExclude = liveChannelExclude,
+                        liveChannelExcludeIndex = liveChannelExcludeIndex
                     )
                 }
             }
         }.sortedBy { it.priority }
+    }
+
+    /**
+     * Combines indexed and comma-separated list properties.
+     * Indexed entries are added first (to preserve order), followed by comma-separated entries.
+     * Similar to how languagePrefixes work.
+     */
+    private fun combineIndexedAndCommaSeparated(environment: Environment, baseProperty: String): List<String>? {
+        val combined = mutableListOf<String>()
+        
+        // Load indexed properties (e.g., property-index[0], property-index[1], etc.)
+        var index = 0
+        while (true) {
+            val indexedValue = environment.getProperty("$baseProperty[$index]")
+            if (indexedValue == null) {
+                break
+            }
+            combined.add(indexedValue)
+            index++
+        }
+        
+        // Load comma-separated property
+        val commaSeparated = environment.getProperty(baseProperty)
+        if (commaSeparated != null) {
+            // Split by comma and add each item
+            commaSeparated.split(",").forEach { item ->
+                val trimmed = item.trim()
+                if (trimmed.isNotEmpty()) {
+                    combined.add(trimmed)
+                }
+            }
+        }
+        
+        return if (combined.isEmpty()) null else combined
     }
 }
 

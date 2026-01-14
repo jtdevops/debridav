@@ -337,6 +337,7 @@ class XtreamCodesClient(
                 val streamTypePath = when (contentType) {
                     ContentType.MOVIE -> "movie"
                     ContentType.SERIES -> "series"
+                    ContentType.LIVE -> "live"
                 }
                 val streamUrl = "$baseUrl/$streamTypePath/$username/$password/${stream.stream_id}.$extension"
                 
@@ -585,6 +586,222 @@ class XtreamCodesClient(
     }
 
     /**
+     * Gets live streams from the Xtream Codes provider
+     * Returns a list of XtreamLiveStream objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    private suspend fun getLiveStreams(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamLiveStream> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // If pre-fetched body is provided, use it directly
+            if (preFetchedBody != null) {
+                logger.debug("Using pre-fetched live streams response (length: ${preFetchedBody.length} characters)")
+                val liveStreams: List<XtreamLiveStream> = json.decodeFromString(preFetchedBody)
+                logger.debug("Successfully parsed ${liveStreams.size} live streams")
+                return liveStreams
+            }
+            
+            val liveStreamsUrl = "$baseUrl/player_api.php"
+            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+            
+            val responseBody = if (useLocal) {
+                logger.info("Using local response file for live streams from provider ${providerConfig.name}")
+                responseFileService.loadResponse(providerConfig, "live_streams") 
+                    ?: run {
+                        logger.warn("Local response file not found for live streams, falling back to HTTP request")
+                        null
+                    }
+            } else {
+                null
+            }
+            
+            val finalLiveStreamsBody = responseBody ?: run {
+                // Note: Removed internal verifyAccount call here to ensure rate limiting is handled at service layer
+                // Rate limiting should be applied by the calling service (IptvRequestService, IptvSyncService, etc.)
+                val liveStreamsRequestUrl = "$liveStreamsUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_live_streams"
+                logger.debug("Fetching live streams from Xtream Codes provider ${providerConfig.name}: $liveStreamsRequestUrl")
+                
+                val response: HttpResponse = httpClient.get(liveStreamsUrl) {
+                    parameter("username", username)
+                    parameter("password", password)
+                    parameter("action", "get_live_streams")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
+                }
+                
+                logger.debug("Received response status ${response.status} for live streams request")
+                
+                if (response.status != HttpStatusCode.OK) {
+                    logger.error("Failed to fetch live streams from Xtream Codes: ${response.status}")
+                    return emptyList()
+                }
+                
+                val body = response.body<String>()
+                
+                // Save response if configured
+                if (responseFileService.shouldSaveResponses()) {
+                    responseFileService.saveResponse(providerConfig, "live_streams", body)
+                }
+                
+                body
+            }
+            
+            logger.debug("Parsing live streams response (length: ${finalLiveStreamsBody.length} characters)")
+            val liveStreams: List<XtreamLiveStream> = json.decodeFromString(finalLiveStreamsBody)
+            logger.debug("Successfully parsed ${liveStreams.size} live streams")
+            
+            return liveStreams
+        } catch (e: Exception) {
+            logger.error("Error fetching live streams from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    /**
+     * Gets live categories from the Xtream Codes provider
+     * Returns a list of XtreamCategory objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    private suspend fun getLiveCategoriesInternal(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamCategory> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // If pre-fetched body is provided, use it directly
+            if (preFetchedBody != null) {
+                logger.debug("Using pre-fetched live categories response (length: ${preFetchedBody.length} characters)")
+                val parsedCategories = json.decodeFromString<List<XtreamCategory>>(preFetchedBody)
+                logger.debug("Successfully parsed ${parsedCategories.size} live categories")
+                return parsedCategories
+            }
+            
+            val apiUrl = "$baseUrl/player_api.php"
+            val useLocal = responseFileService.shouldUseLocalResponses(providerConfig)
+            
+            val categoriesBody = if (useLocal) {
+                logger.info("Using local response file for live categories from provider ${providerConfig.name}")
+                responseFileService.loadResponse(providerConfig, "live_categories")
+                    ?: run {
+                        logger.warn("Local response file not found for live categories, falling back to HTTP request")
+                        null
+                    }
+            } else {
+                null
+            }
+            
+            val categories: List<XtreamCategory> = if (categoriesBody != null) {
+                logger.debug("Parsing live categories response (length: ${categoriesBody.length} characters)")
+                val parsedCategories = json.decodeFromString<List<XtreamCategory>>(categoriesBody)
+                logger.debug("Successfully parsed ${parsedCategories.size} live categories")
+                parsedCategories
+            } else {
+                val categoriesRequestUrl = "$apiUrl?username=${URLEncoder.encode(username, "UTF-8")}&password=***&action=get_live_categories"
+                logger.debug("Fetching live categories from Xtream Codes provider ${providerConfig.name}: $categoriesRequestUrl")
+                
+                val categoriesResponse: HttpResponse = httpClient.get(apiUrl) {
+                    parameter("username", username)
+                    parameter("password", password)
+                    parameter("action", "get_live_categories")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
+                }
+                
+                logger.debug("Received response status ${categoriesResponse.status} for live categories request")
+                
+                if (categoriesResponse.status == HttpStatusCode.OK) {
+                    val body = categoriesResponse.body<String>()
+                    
+                    // Save response if configured
+                    if (responseFileService.shouldSaveResponses()) {
+                        responseFileService.saveResponse(providerConfig, "live_categories", body)
+                    }
+                    
+                    logger.debug("Parsing live categories response (length: ${body.length} characters)")
+                    val parsedCategories = json.decodeFromString<List<XtreamCategory>>(body)
+                    logger.debug("Successfully parsed ${parsedCategories.size} live categories")
+                    parsedCategories
+                } else {
+                    logger.warn("Failed to fetch live categories: ${categoriesResponse.status}")
+                    emptyList()
+                }
+            }
+            
+            return categories
+        } catch (e: Exception) {
+            logger.error("Error fetching live categories from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    suspend fun getLiveContent(providerConfig: IptvProviderConfiguration, categories: List<XtreamCategory>? = null, preFetchedStreamsBody: String? = null): List<IptvContentItem> {
+        require(providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+            "Provider ${providerConfig.name} is not an Xtream Codes provider"
+        }
+        
+        val baseUrl = providerConfig.xtreamBaseUrl ?: return emptyList()
+        val username = providerConfig.xtreamUsername ?: return emptyList()
+        val password = providerConfig.xtreamPassword ?: return emptyList()
+        
+        try {
+            // Get live streams (use pre-fetched body if available)
+            val liveStreams = getLiveStreams(providerConfig, preFetchedStreamsBody)
+            
+            // Get live categories (use provided categories or fetch them)
+            val liveCategories = categories ?: getLiveCategoriesInternal(providerConfig)
+            
+            // Convert category_id from Int to String for matching (API returns category_id as String in some cases)
+            val categoryMap = liveCategories.associateBy { it.category_id.toString() }
+            
+            return liveStreams.mapNotNull { stream ->
+                // Handle category_id - it may be a String in the JSON response
+                val categoryIdStr = stream.category_id
+                
+                // Live streams are always LIVE type
+                val contentType = ContentType.LIVE
+                
+                // Construct stream URL from available fields
+                // Xtream Codes format: {baseUrl}/live/{username}/{password}/{stream_id}.{extension}
+                val extension = stream.container_extension ?: "m3u8"
+                val streamUrl = "$baseUrl/live/$username/$password/${stream.stream_id}.$extension"
+                
+                // Tokenize URL
+                val tokenizedUrl = tokenizeUrl(streamUrl, providerConfig)
+                
+                IptvContentItem(
+                    id = stream.stream_id.toString(),
+                    title = stream.name,
+                    url = tokenizedUrl,
+                    categoryId = categoryIdStr,
+                    categoryType = "live",
+                    type = contentType,
+                    episodeInfo = null
+                )
+            }
+        } catch (e: Exception) {
+            logger.error("Error fetching live content from Xtream Codes provider ${providerConfig.name}", e)
+            return emptyList()
+        }
+    }
+
+    /**
      * Gets movie info from the Xtream Codes provider using get_vod_info API
      * Returns the movie info for the given vod_id
      * Uses local file caching if configured (files named: {provider}_movie_info_{vodId}.json)
@@ -826,6 +1043,23 @@ class XtreamCodesClient(
     }
 
     /**
+     * Gets live categories from the Xtream Codes provider
+     * Returns a list of category ID to category name mappings
+     */
+    suspend fun getLiveCategories(providerConfig: IptvProviderConfiguration): List<Pair<String, String>> {
+        val categories = getLiveCategoriesInternal(providerConfig)
+        return categories.map { it.category_id.toString() to it.category_name }
+    }
+
+    /**
+     * Gets live categories as XtreamCategory objects
+     * @param preFetchedBody Optional pre-fetched response body to use instead of fetching
+     */
+    suspend fun getLiveCategoriesAsObjects(providerConfig: IptvProviderConfiguration, preFetchedBody: String? = null): List<XtreamCategory> {
+        return getLiveCategoriesInternal(providerConfig, preFetchedBody)
+    }
+
+    /**
      * Gets a single endpoint response body for hash checking
      * Returns the response body string, or null if fetch failed
      */
@@ -847,6 +1081,8 @@ class XtreamCodesClient(
             "vod_streams" -> "get_vod_streams"
             "series_categories" -> "get_series_categories"
             "series_streams" -> "get_series"
+            "live_categories" -> "get_live_categories"
+            "live_streams" -> "get_live_streams"
             else -> return null
         }
         
@@ -901,6 +1137,13 @@ class XtreamCodesClient(
      * Parses series categories from a response body string
      */
     fun parseSeriesCategoriesFromBody(body: String): List<XtreamCategory> {
+        return json.decodeFromString<List<XtreamCategory>>(body)
+    }
+
+    /**
+     * Parses live categories from a response body string
+     */
+    fun parseLiveCategoriesFromBody(body: String): List<XtreamCategory> {
         return json.decodeFromString<List<XtreamCategory>>(body)
     }
 
@@ -1025,6 +1268,58 @@ class XtreamCodesClient(
                 }
             }
             result["series_categories"] = seriesCategoriesBody
+            
+            // Get live streams
+            // Suppress "not found" logging during hash check to avoid duplicate logs
+            val liveStreamsBody = if (useLocal) {
+                responseFileService.loadResponse(providerConfig, "live_streams", logNotFound = false)
+            } else {
+                null
+            } ?: run {
+                val response: HttpResponse = httpClient.get(apiUrl) {
+                    parameter("username", username)
+                    parameter("password", password)
+                    parameter("action", "get_live_streams")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
+                }
+                if (response.status == HttpStatusCode.OK) {
+                    response.body<String>()
+                } else {
+                    logger.warn("Failed to fetch live streams for hash check: ${response.status}")
+                    return emptyMap()
+                }
+            }
+            result["live_streams"] = liveStreamsBody
+            
+            // Get live categories
+            // Suppress "not found" logging during hash check to avoid duplicate logs
+            val liveCategoriesBody = if (useLocal) {
+                responseFileService.loadResponse(providerConfig, "live_categories", logNotFound = false)
+            } else {
+                null
+            } ?: run {
+                val response: HttpResponse = httpClient.get(apiUrl) {
+                    parameter("username", username)
+                    parameter("password", password)
+                    parameter("action", "get_live_categories")
+                    userAgent?.let {
+                        headers {
+                            append(HttpHeaders.UserAgent, it)
+                        }
+                    }
+                }
+                if (response.status == HttpStatusCode.OK) {
+                    response.body<String>()
+                } else {
+                    logger.warn("Failed to fetch live categories for hash check: ${response.status}")
+                    "" // Return empty string if failed, but don't fail the whole operation
+                }
+            }
+            result["live_categories"] = liveCategoriesBody
             
         } catch (e: Exception) {
             logger.error("Error fetching raw response bodies for provider ${providerConfig.name}", e)
@@ -1212,6 +1507,30 @@ class XtreamCodesClient(
         val container_extension: String? = null,
         val custom_sid: String? = null,
         val direct_source: String? = null
+    )
+
+    @Serializable
+    private data class XtreamLiveStream(
+        val num: Int? = null,
+        val name: String,
+        val stream_type: String? = null,
+        val stream_id: Int,
+        val stream_icon: String? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
+        val rating: String? = null,
+        val rating_5based: Double? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
+        val added: String? = null,
+        @Serializable(with = IntOrStringSerializer::class)
+        val is_adult: Int? = null,
+        @Serializable(with = StringOrNumberSerializer::class)
+        val category_id: String? = null,
+        val container_extension: String? = null,
+        val custom_sid: String? = null,
+        val direct_source: String? = null,
+        val epg_channel_id: String? = null,
+        val tv_archive: Int? = null,
+        val tv_archive_duration: Int? = null
     )
 
     @Serializable

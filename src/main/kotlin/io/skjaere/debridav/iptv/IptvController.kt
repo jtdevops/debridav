@@ -26,6 +26,17 @@ class IptvController(
         return ResponseEntity.ok(mapOf("status" to "sync triggered"))
     }
 
+    @PostMapping("/live/sync")
+    fun triggerLiveSync(): ResponseEntity<Map<String, String>> {
+        if (!iptvConfigurationProperties.liveEnabled) {
+            return ResponseEntity.badRequest().body(mapOf("status" to "error", "message" to "IPTV Live is disabled"))
+        }
+        logger.info("Manual IPTV live sync triggered")
+        // Trigger live-only sync for all providers
+        iptvSyncService.syncLiveContentOnly()
+        return ResponseEntity.ok(mapOf("status" to "live sync triggered"))
+    }
+
     @GetMapping("/config")
     fun getStatus(): ResponseEntity<Map<String, Any>> {
         return ResponseEntity.ok(mapOf(

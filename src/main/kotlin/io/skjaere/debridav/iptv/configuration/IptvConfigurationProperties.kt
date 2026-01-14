@@ -24,7 +24,12 @@ data class IptvConfigurationProperties(
     val loginRateLimit: Duration = Duration.ofMinutes(1), // Rate limit for IPTV provider login/credential verification calls (default: 1 minute)
     val ffprobePath: String = "ffprobe", // Path to FFprobe executable (default: "ffprobe" in PATH)
     val ffprobeTimeout: Duration = Duration.ofSeconds(30), // Timeout for FFprobe execution (default: 30 seconds)
-    val metadataFetchBatchSize: Int = 5 // Number of concurrent metadata fetch requests per batch during search operations (default: 5)
+    val metadataFetchBatchSize: Int = 5, // Number of concurrent metadata fetch requests per batch during search operations (default: 5)
+    val liveEnabled: Boolean = false, // Master toggle for IPTV Live feature (default: disabled)
+    val liveFlatCategories: Boolean = false, // Hide category folders, show channels directly under provider folders (default: false)
+    val liveFlatProviders: Boolean = false, // Hide provider folders, show channels directly under /live (default: false)
+    val liveSortAlphabetically: Boolean = false, // Sort channels alphabetically instead of provider order (default: false, uses provider order)
+    val liveSyncInterval: Duration? = null // Separate sync interval for live content (default: null, uses main sync interval)
 ) {
     /**
      * Combined language prefixes from both comma-separated and indexed formats.

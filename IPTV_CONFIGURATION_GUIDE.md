@@ -299,6 +299,185 @@ curl -X POST http://localhost:8080/api/iptv/sync
 - Sonarr/Radarr will rename and move files to `/tv/` and `/movies/` as configured
 - Virtual filesystem shows no indication of IPTV vs Debrid source
 
+## IPTV Live TV Channels
+
+IPTV Live TV channel support allows you to sync and access live TV channels from Xtream Codes providers. Live channels appear in the `/live` folder in the virtual filesystem.
+
+### Feature Toggle
+
+IPTV Live has two separate toggles:
+
+1. **Global Folder Visibility** (`IPTV_LIVE_ENABLED`): Controls whether the `/live` folder is visible in the VFS
+2. **Per-Provider Sync Toggle** (`IPTV_PROVIDER_{NAME}_LIVE_SYNC_ENABLED`): Controls whether to sync live content from each provider (opt-in, defaults to `false`)
+
+#### Global Folder Visibility
+
+```yaml
+# Enable /live folder visibility (default: false)
+IPTV_LIVE_ENABLED=true
+```
+
+```properties
+iptv.live.enabled=true
+```
+
+When `IPTV_LIVE_ENABLED=false`, the `/live` folder is hidden from directory listings but persists in the database (similar to `/movies` and `/tv`).
+
+#### Per-Provider Live Sync (Opt-In)
+
+Live sync is **disabled by default** for each provider. You must explicitly enable it per provider:
+
+```yaml
+# Enable live sync for a specific provider (opt-in, defaults to false)
+IPTV_PROVIDER_PROVIDER1_LIVE_SYNC_ENABLED=true
+
+# Another provider without this setting will not sync live content (default: false)
+# IPTV_PROVIDER_PROVIDER2_LIVE_SYNC_ENABLED is not set, so it defaults to false
+```
+
+```properties
+# Per-provider setting (default: false)
+iptv.provider.provider1.live.sync-enabled=true
+```
+
+**Behavior:**
+- `IPTV_LIVE_ENABLED` controls `/live` folder visibility only
+- Per-provider `live.sync-enabled` defaults to `false` and must be explicitly set to `true` to sync live content from that provider
+- Even if `IPTV_LIVE_ENABLED=true`, you still need to set `IPTV_PROVIDER_{NAME}_LIVE_SYNC_ENABLED=true` for each provider you want to sync live content from
+- This allows you to enable the `/live` folder but selectively sync live content from only specific providers
+
+### Configuration
+
+#### Basic Configuration
+
+```yaml
+# Enable IPTV Live
+IPTV_LIVE_ENABLED=true
+
+# Optional: Separate sync interval for live content (more frequent than VOD/Series)
+# If not set, live content syncs during the main sync interval
+IPTV_LIVE_SYNC_INTERVAL=PT1H
+
+# Optional: Hide category folders, show channels directly under provider folders
+# Default: false (shows category folders)
+# When true: /live/provider1/BBC One.m3u8 (instead of /live/provider1/Sports/BBC One.m3u8)
+IPTV_LIVE_FLAT_CATEGORIES=false
+
+# Optional: Hide provider folders, show their contents directly under /live
+# Default: false (shows provider folders)
+# When true: /live/Sports/BBC One.m3u8 (or /live/BBC One.m3u8 if categories also flattened)
+IPTV_LIVE_FLAT_PROVIDERS=false
+
+# Optional: Sort channels alphabetically instead of provider order
+# Default: false (uses provider order)
+IPTV_LIVE_SORT_ALPHABETICALLY=false
+```
+
+#### Database Filtering (Exclude Only)
+
+Database filtering controls what gets synced to the database. **Only exclude lists are used** - all channels are imported except those explicitly excluded. This ensures content is available for later VFS inclusion without re-syncing from the provider.
+
+```yaml
+# Exclude categories from database sync (regex supported)
+# Excluding a category also excludes all channels within that category
+IPTV_PROVIDER_PROVIDER1_LIVE_DB_CATEGORY_EXCLUDE=Adult,XXX
+# Or use indexed format for better readability:
+IPTV_PROVIDER_PROVIDER1_LIVE_DB_CATEGORY_EXCLUDE_INDEX_0=Adult
+IPTV_PROVIDER_PROVIDER1_LIVE_DB_CATEGORY_EXCLUDE_INDEX_1=XXX
+
+# Exclude channels from database sync (regex supported)
+# Only applies to channels in non-excluded categories
+IPTV_PROVIDER_PROVIDER1_LIVE_DB_CHANNEL_EXCLUDE=.*Test.*
+# Or use indexed format:
+IPTV_PROVIDER_PROVIDER1_LIVE_DB_CHANNEL_EXCLUDE_INDEX_0=.*Test.*
+IPTV_PROVIDER_PROVIDER1_LIVE_DB_CHANNEL_EXCLUDE_INDEX_1=.*Demo.*
+```
+
+#### VFS Filtering (Include/Exclude)
+
+VFS filtering controls what appears in the `/live` folder from database content. **Both include and exclude lists are used**. Exclude takes precedence over include.
+
+```yaml
+# Include categories in /live folder (regex supported)
+# Including a category includes all channels within that category (unless channel is excluded)
+IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_INCLUDE=Sports,News,Entertainment
+# Or use indexed format:
+IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_INCLUDE_INDEX_0=Sports
+IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_INCLUDE_INDEX_1=News
+
+# Exclude categories from /live folder (regex supported)
+# Excluding a category also excludes all channels within that category
+IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_EXCLUDE=.*HD.*
+# Or use indexed format:
+IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_EXCLUDE_INDEX_0=.*HD.*
+
+# Include channels in /live folder (regex supported)
+# Only applies to channels in included categories
+IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_INCLUDE=.*BBC.*
+# Or use indexed format:
+IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_INCLUDE_INDEX_0=.*BBC.*
+
+# Exclude channels from /live folder (regex supported)
+# Only applies to channels in included categories
+IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_EXCLUDE=.*Test.*
+# Or use indexed format:
+IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_EXCLUDE_INDEX_0=.*Test.*
+```
+
+### Filtering Behavior
+
+1. **Category Exclusion Cascades**: Excluding a category (in DB or VFS filtering) excludes all channels within that category.
+2. **Category Inclusion Cascades**: Including a category (in VFS filtering) includes all channels within that category (unless the channel is explicitly excluded).
+3. **Channel Filters Apply Within Categories**: Channel filters only apply to channels in included categories (for VFS filtering) or non-excluded categories (for DB filtering).
+4. **Exclude Takes Precedence**: In VFS filtering, exclude patterns take precedence over include patterns.
+
+### File Structure
+
+Live channels are **always stored** as `/live/{provider}/{category}/{channel}.{extension}` in the database/VFS, where:
+- `{provider}` is the sanitized provider name (prevents collisions between providers)
+- `{category}` is the sanitized category name
+- `{channel}` is the sanitized channel name
+- `{extension}` is the actual media extension from the provider (e.g., `.m3u8`, `.ts`)
+
+**Example paths:**
+- `/live/provider1/Sports/BBC One.m3u8`
+- `/live/provider1/News/CNN.m3u8`
+- `/live/provider2/Sports/ESPN.m3u8`
+
+Two separate options control folder flattening:
+
+- **`IPTV_LIVE_FLAT_CATEGORIES`**: When `true`, hides category folders in provider directories, showing channels directly under provider folders (e.g., `/live/provider1/BBC One.m3u8`)
+- **`IPTV_LIVE_FLAT_PROVIDERS`**: When `true`, hides provider folders in `/live`, showing their contents directly under `/live` (e.g., `/live/Sports/BBC One.m3u8` or `/live/BBC One.m3u8` if categories are also flattened)
+
+**Presentation Examples:**
+- Both `false`: `/live/provider1/Sports/BBC One.m3u8` (full structure)
+- Only `FLAT_CATEGORIES=true`: `/live/provider1/BBC One.m3u8` (channels directly under provider, categories hidden)
+- Only `FLAT_PROVIDERS=true`: `/live/Sports/BBC One.m3u8` (categories directly under /live, providers hidden)
+- Both `true`: `/live/BBC One.m3u8` (all channels directly under /live, both providers and categories hidden)
+
+Files are always stored with the full path structure (`/live/{provider}/{category}/{channel}.{extension}`) internally, regardless of presentation options.
+
+### Sync Behavior
+
+- **Main Sync**: Live content syncs concurrently with VOD/Series content during the main scheduled sync.
+- **Independent Sync**: If `IPTV_LIVE_SYNC_INTERVAL` is configured, live content syncs separately at that interval (more frequent than main sync).
+- **Manual Sync**: Trigger live-only sync via `POST /api/iptv/live/sync`.
+
+### Manual Live Sync
+
+```http
+POST /api/iptv/live/sync
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8080/api/iptv/live/sync
+```
+
+### STRM File Compatibility
+
+The STRM file generation feature respects folder visibility. If `/live` is hidden (when `IPTV_LIVE_ENABLED=false`), no STRM files are generated for it, even if configured in `DEBRIDAV_STRM_FOLDER_MAPPINGS`.
+
 ## Troubleshooting
 
 ### IPTV Content Not Syncing

@@ -134,6 +134,8 @@ class DebriDavApplication : SpringBootServletInitializer() {
             logger.info("")
             logger.info("IPTV Management Endpoints:")
             logger.info("  POST    $baseUrl/api/iptv/sync")
+            logger.info("  POST    $baseUrl/api/iptv/live/sync")
+            logger.info("          (Manually trigger live content sync only)")
             logger.info("  GET     $baseUrl/api/iptv/config")
             logger.info("  GET     $baseUrl/api/iptv/content")
             logger.info("  DELETE  $baseUrl/api/iptv/provider/{providerName}")

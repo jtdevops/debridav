@@ -89,14 +89,36 @@ class DirectoryResource(
     override fun getChildren(): List<Resource> {
         val children = directoryChildren ?: getChildren(directory).toMutableList()
         
-        // If this is the root directory and STRM is enabled, add STRM folders
         val directoryPath = directory.fileSystemPath()
+        
+        // Filter out hidden folders (e.g., /live when IPTV Live is disabled)
+        val filteredChildren = children.filter { resource ->
+            val resourcePath = when {
+                resource is DirectoryResource -> resource.directory.fileSystemPath()
+                else -> null
+            }
+            resourcePath?.let { resourceFactory.isFolderVisible(it) } ?: true
+        }.toMutableList()
+        
+        // Special handling for /live directory and provider folders: flat presentation and sorting
+        val processedChildren = if (directoryPath != null && (directoryPath == "/live" || (directoryPath.startsWith("/live/") && directoryPath.split("/").size == 3))) {
+            // /live directory or provider folder (e.g., /live/provider1)
+            handleLiveDirectoryPresentation(filteredChildren, directoryPath).toMutableList()
+        } else {
+            filteredChildren
+        }
+        
+        // If this is the root directory and STRM is enabled, add STRM folders
         if (directoryPath == "/" && resourceFactory.debridavConfigurationProperties.isStrmEnabled()) {
             val strmMappings = resourceFactory.debridavConfigurationProperties.parseStrmFolderMappings()
             
             strmMappings.forEach { (originalFolder, strmFolder) ->
-                // Check if the original folder exists
+                // Check if the original folder exists and is visible
                 val originalPath = "/$originalFolder"
+                if (!resourceFactory.isFolderVisible(originalPath)) {
+                    return@forEach // Skip STRM folder creation if original folder is hidden
+                }
+                
                 val originalDir = fileService.getFileAtPath(originalPath)
                 
                 if (originalDir is DbDirectory) {
@@ -110,12 +132,100 @@ class DirectoryResource(
                         fileService,
                         resourceFactory.debridavConfigurationProperties
                     )
-                    children.add(strmDirResource)
+                    processedChildren.add(strmDirResource)
                 }
             }
         }
         
-        return children
+        return processedChildren
+    }
+    
+    /**
+     * Handles special presentation logic for /live directory and provider folders:
+     * - Flat categories: Hide category folders, show channels directly under provider folders
+     * - Flat providers: Hide provider folders, show their contents directly under /live
+     * - Sorting: Alphabetical or provider order
+     */
+    private fun handleLiveDirectoryPresentation(children: List<Resource>, directoryPath: String): List<Resource> {
+        // Get IPTV config from resourceFactory (may be null if IPTV not configured)
+        val iptvConfig = resourceFactory.iptvConfig ?: return children
+        
+        val flatCategories = iptvConfig.liveFlatCategories
+        val flatProviders = iptvConfig.liveFlatProviders
+        
+        // Check if we're in /live (root) or a provider folder (e.g., /live/provider1)
+        val isLiveRoot = directoryPath == "/live"
+        val isProviderFolder = directoryPath.startsWith("/live/") && directoryPath.split("/").size == 3
+        
+        // If we're in /live root and flatProviders is enabled, flatten provider folders
+        if (isLiveRoot && flatProviders) {
+            val flatChildren = mutableListOf<Resource>()
+            
+            children.forEach { resource ->
+                if (resource is DirectoryResource) {
+                    // This is a provider folder - get its contents
+                    val providerChildren = resource.getChildren()
+                    
+                    if (flatCategories) {
+                        // Both options enabled: collect all channels from all providers/categories
+                        providerChildren.forEach { categoryResource ->
+                            if (categoryResource is DirectoryResource) {
+                                // This is a category folder - collect its files
+                                val categoryChildren = categoryResource.getChildren()
+                                flatChildren.addAll(categoryChildren)
+                            } else {
+                                // Direct file in provider folder (shouldn't happen normally, but handle it)
+                                flatChildren.add(categoryResource)
+                            }
+                        }
+                    } else {
+                        // Only flatProviders: show category folders directly under /live
+                        flatChildren.addAll(providerChildren)
+                    }
+                } else {
+                    // Direct file in /live (shouldn't happen normally, but handle it)
+                    flatChildren.add(resource)
+                }
+            }
+            
+            // Apply sorting
+            return if (iptvConfig.liveSortAlphabetically) {
+                flatChildren.sortedBy { it.name }
+            } else {
+                flatChildren // Provider order (default)
+            }
+        }
+        // If we're in a provider folder and flatCategories is enabled, flatten category folders
+        else if (isProviderFolder && flatCategories) {
+            val flatChildren = mutableListOf<Resource>()
+            
+            children.forEach { resource ->
+                if (resource is DirectoryResource) {
+                    // This is a category folder - collect its files
+                    val categoryChildren = resource.getChildren()
+                    flatChildren.addAll(categoryChildren)
+                } else {
+                    // Direct file in provider folder (shouldn't happen normally, but handle it)
+                    flatChildren.add(resource)
+                }
+            }
+            
+            // Apply sorting
+            return if (iptvConfig.liveSortAlphabetically) {
+                flatChildren.sortedBy { it.name }
+            } else {
+                flatChildren // Provider order (default)
+            }
+        }
+        // Neither flat option enabled or not applicable - show normal structure
+        else {
+            // Apply sorting to folders and files
+            return if (iptvConfig.liveSortAlphabetically) {
+                children.sortedBy { it.name }
+            } else {
+                children // Provider order (default)
+            }
+        }
     }
 
     override fun createNew(newName: String, inputStream: InputStream, length: Long?, contentType: String?): Resource {

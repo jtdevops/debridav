@@ -46,7 +46,7 @@ class DatabaseFileService(
     private val logger = LoggerFactory.getLogger(DatabaseFileService::class.java)
     private val lock = Mutex()
     private val transactionTemplate = TransactionTemplate(transactionManager)
-    private val defaultDirectories = listOf("/", "/downloads", "/tv", "/movies")
+    private val defaultDirectories = listOf("/", "/downloads", "/tv", "/movies", "/live")
 
     init {
         defaultDirectories.forEach {

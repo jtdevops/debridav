@@ -12,7 +12,22 @@ data class IptvProviderConfiguration(
     val xtreamPassword: String? = null,
     val priority: Int = 1,
     val syncEnabled: Boolean = true,
-    val useLocalResponses: Boolean? = null
+    val useLocalResponses: Boolean? = null,
+    val liveSyncEnabled: Boolean = false, // Per-provider live sync toggle (default: false, opt-in per provider)
+    // Database filtering (exclude only - controls what gets synced to database)
+    val liveDbCategoryExclude: List<String>? = null,
+    val liveDbCategoryExcludeIndex: List<String>? = null,
+    val liveDbChannelExclude: List<String>? = null,
+    val liveDbChannelExcludeIndex: List<String>? = null,
+    // VFS filtering (include/exclude - controls what appears in /live folder from database)
+    val liveCategoryInclude: List<String>? = null,
+    val liveCategoryIncludeIndex: List<String>? = null,
+    val liveCategoryExclude: List<String>? = null,
+    val liveCategoryExcludeIndex: List<String>? = null,
+    val liveChannelInclude: List<String>? = null,
+    val liveChannelIncludeIndex: List<String>? = null,
+    val liveChannelExclude: List<String>? = null,
+    val liveChannelExcludeIndex: List<String>? = null
 ) {
     init {
         when (type) {

@@ -98,6 +98,73 @@ services:
       # Example: IPTV_FFPROBE_PATH=/usr/bin/ffprobe
       - IPTV_FFPROBE_PATH=${IPTV_FFPROBE_PATH:-ffprobe}
       
+      # IPTV Live TV Channels Configuration
+      # Enable /live folder visibility (default: false)
+      # When disabled, /live folder is hidden but persists in database
+      # - IPTV_LIVE_ENABLED=false
+      
+      # Per-provider live sync toggle (opt-in, defaults to false)
+      # Must be explicitly set to true for each provider to sync live content
+      # Even if IPTV_LIVE_ENABLED=true, you need to enable per-provider to sync
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_SYNC_ENABLED=true
+      # - IPTV_PROVIDER_PROVIDER2_LIVE_SYNC_ENABLED=false
+      
+      # Optional: Separate sync interval for live content (more frequent than VOD/Series)
+      # If not set, live content syncs during the main sync interval
+      # Format: PT1H (hourly), PT30M (every 30 minutes), etc.
+      # - IPTV_LIVE_SYNC_INTERVAL=PT1H
+      
+      # Optional: Hide category folders, show channels directly under provider folders
+      # Default: false (shows category folders)
+      # When true: /live/provider1/BBC One.m3u8 (instead of /live/provider1/Sports/BBC One.m3u8)
+      # - IPTV_LIVE_FLAT_CATEGORIES=false
+      
+      # Optional: Hide provider folders, show their contents directly under /live
+      # Default: false (shows provider folders)
+      # When true: /live/Sports/BBC One.m3u8 (or /live/BBC One.m3u8 if categories also flattened)
+      # - IPTV_LIVE_FLAT_PROVIDERS=false
+      
+      # Optional: Sort channels alphabetically instead of provider order
+      # Default: false (uses provider order)
+      # - IPTV_LIVE_SORT_ALPHABETICALLY=false
+      
+      # Database Filtering (Exclude Only - controls what gets synced to database)
+      # Exclude categories from database sync (regex supported)
+      # Excluding a category also excludes all channels within that category
+      # Comma-separated format:
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_DB_CATEGORY_EXCLUDE=Adult,XXX
+      # Indexed format (for better readability with special characters):
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_DB_CATEGORY_EXCLUDE_INDEX_0=Adult
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_DB_CATEGORY_EXCLUDE_INDEX_1=XXX
+      
+      # Exclude channels from database sync (regex supported)
+      # Only applies to channels in non-excluded categories
+      # Comma-separated format:
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_DB_CHANNEL_EXCLUDE=.*Test.*
+      # Indexed format:
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_DB_CHANNEL_EXCLUDE_INDEX_0=.*Test.*
+      
+      # VFS Filtering (Include/Exclude - controls what appears in /live folder from database)
+      # Include categories in /live folder (regex supported)
+      # Including a category includes all channels within that category (unless channel is excluded)
+      # Comma-separated format:
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_INCLUDE=Sports,News,Entertainment
+      # Indexed format:
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_INCLUDE_INDEX_0=Sports
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_INCLUDE_INDEX_1=News
+      
+      # Exclude categories from /live folder (regex supported)
+      # Excluding a category also excludes all channels within that category
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CATEGORY_EXCLUDE=.*HD.*
+      
+      # Include channels in /live folder (regex supported)
+      # Only applies to channels in included categories
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_INCLUDE=.*BBC.*
+      
+      # Exclude channels from /live folder (regex supported)
+      # Only applies to channels in included categories
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_EXCLUDE=.*Test.*
+      
       # FFprobe execution timeout
       # Format: Duration (e.g., PT30S for 30 seconds, PT60S for 60 seconds)
       # Default: PT30S (30 seconds)

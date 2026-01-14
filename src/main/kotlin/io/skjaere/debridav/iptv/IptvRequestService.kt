@@ -1317,6 +1317,7 @@ class IptvRequestService(
         return when (contentType) {
             ContentType.MOVIE -> 2_000_000_000L // ~2GB for movies
             ContentType.SERIES -> 1_000_000_000L // ~1GB for episodes
+            ContentType.LIVE -> 0L // Live streams don't have a fixed size
         }
     }
     
