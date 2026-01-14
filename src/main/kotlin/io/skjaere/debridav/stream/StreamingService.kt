@@ -16,7 +16,7 @@ import io.skjaere.debridav.cache.BytesToCache
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
-import org.apache.commons.io.FileUtils
+import io.skjaere.debridav.util.ByteFormatUtil
 import java.net.InetAddress
 import java.net.URI
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
@@ -926,7 +926,7 @@ class StreamingService(
                             append(HttpHeaders.Range, rangeHeader)
                             logger.debug("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}, isIptv={}, chunkSize={} bytes ({}), timeout={} ms", 
                                 redirectUrl.take(100), rangeHeader, isIptv, chunkSizeBytes, 
-                                org.apache.commons.io.FileUtils.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
+                                ByteFormatUtil.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
                             iptvConfigurationProperties?.userAgent?.let {
                                 append(HttpHeaders.UserAgent, it)
                             }

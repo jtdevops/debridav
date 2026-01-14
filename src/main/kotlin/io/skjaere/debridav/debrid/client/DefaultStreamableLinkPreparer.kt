@@ -16,7 +16,7 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.client.realdebrid.RealDebridClient
 import io.skjaere.debridav.fs.CachedFile
 import kotlinx.coroutines.delay
-import org.apache.commons.io.FileUtils
+import io.skjaere.debridav.util.ByteFormatUtil
 import org.slf4j.LoggerFactory
 
 class DefaultStreamableLinkPreparer(
@@ -124,7 +124,7 @@ class DefaultStreamableLinkPreparer(
                                     logger.debug(
                                         "Applying byteRange $byteRange " +
                                                 "for ${debridLink.link}" +
-                                                " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) " +
+                                                " (${ByteFormatUtil.byteCountToDisplaySize(byteRange.getSize())}) " +
                                                 if (isIptv) "(IPTV - Range header will be re-applied on redirect URLs)" else ""
                                     )
 
@@ -160,7 +160,7 @@ class DefaultStreamableLinkPreparer(
                     val dynamicSocketTimeout = calculateSocketTimeout(chunkSizeBytes)
                     
                     logger.debug("Dynamic socket timeout calculated: chunkSize={} bytes ({}), timeout={} ms", 
-                        chunkSizeBytes, FileUtils.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
+                        chunkSizeBytes, ByteFormatUtil.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
                     
                     timeout {
                         requestTimeoutMillis = 20_000_000

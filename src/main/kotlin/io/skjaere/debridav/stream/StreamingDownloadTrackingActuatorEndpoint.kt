@@ -1,7 +1,6 @@
 package io.skjaere.debridav.stream
 
 import com.fasterxml.jackson.annotation.JsonFormat
-import org.apache.commons.io.FileUtils
 import org.springframework.boot.actuate.endpoint.annotation.DeleteOperation
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation
@@ -11,6 +10,7 @@ import java.time.Instant
 import io.skjaere.debridav.stream.HttpRequestInfo
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.util.ByteFormatUtil
 
 @Component
 @Endpoint(id = "streaming-download-tracking")
@@ -30,13 +30,13 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 fileName = context.fileName,
                 requestedRangeStart = context.requestedRange?.start,
                 requestedRangeFinish = context.requestedRange?.finish,
-                requestedSizeFormatted = FileUtils.byteCountToDisplaySize(context.requestedSize),
+                requestedSizeFormatted = ByteFormatUtil.byteCountToDisplaySize(context.requestedSize),
                 requestedSize = context.requestedSize,
                 downloadStartTime = context.downloadStartTime,
-                bytesDownloadedFormatted = FileUtils.byteCountToDisplaySize(context.bytesDownloaded.get()),
+                bytesDownloadedFormatted = ByteFormatUtil.byteCountToDisplaySize(context.bytesDownloaded.get()),
                 bytesDownloaded = context.bytesDownloaded.get(),
                 actualBytesSent = context.actualBytesSent,
-                actualBytesSentFormatted = context.actualBytesSent?.let { bytes -> FileUtils.byteCountToDisplaySize(bytes) },
+                actualBytesSentFormatted = context.actualBytesSent?.let { bytes -> ByteFormatUtil.byteCountToDisplaySize(bytes) },
                 // Completion metadata
                 downloadEndTime = context.downloadEndTime,
                 completionStatus = context.completionStatus,
@@ -59,7 +59,7 @@ class StreamingDownloadTrackingActuatorEndpoint(
                 ProviderMetrics(
                     provider = provider,
                     totalDownloadedBytes = totalDownloadedBytes,
-                    totalDownloadedBytesFormatted = FileUtils.byteCountToDisplaySize(totalDownloadedBytes),
+                    totalDownloadedBytesFormatted = ByteFormatUtil.byteCountToDisplaySize(totalDownloadedBytes),
                     filePaths = filePaths
                 )
             }
@@ -85,13 +85,13 @@ class StreamingDownloadTrackingActuatorEndpoint(
                     filePath = entries.first().filePath,
                     fileName = entries.first().fileName,
                     fileSize = fileSize,
-                    fileSizeFormatted = fileSize?.let { FileUtils.byteCountToDisplaySize(it) },
+                    fileSizeFormatted = fileSize?.let { ByteFormatUtil.byteCountToDisplaySize(it) },
                     totalRequestedBytes = totalRequestedBytes,
-                    totalRequestedBytesFormatted = FileUtils.byteCountToDisplaySize(totalRequestedBytes),
+                    totalRequestedBytesFormatted = ByteFormatUtil.byteCountToDisplaySize(totalRequestedBytes),
                     totalDownloadedBytes = totalDownloadedBytes,
-                    totalDownloadedBytesFormatted = FileUtils.byteCountToDisplaySize(totalDownloadedBytes),
+                    totalDownloadedBytesFormatted = ByteFormatUtil.byteCountToDisplaySize(totalDownloadedBytes),
                     totalActualBytesSent = totalActualBytesSent,
-                    totalActualBytesSentFormatted = FileUtils.byteCountToDisplaySize(totalActualBytesSent),
+                    totalActualBytesSentFormatted = ByteFormatUtil.byteCountToDisplaySize(totalActualBytesSent),
                     requestCount = requestCount,
                     firstAccessTime = firstAccessTime,
                     lastAccessTime = lastAccessTime,
