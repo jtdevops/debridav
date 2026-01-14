@@ -31,7 +31,7 @@ import io.skjaere.debridav.debrid.client.torbox.model.torrent.IsCachedResponse
 import io.skjaere.debridav.debrid.client.torbox.model.torrent.TorrentListItemFile
 import io.skjaere.debridav.debrid.client.torbox.model.torrent.TorrentListResponse
 import io.skjaere.debridav.fs.CachedFile
-import org.apache.commons.io.FileUtils
+import io.skjaere.debridav.util.ByteFormatUtil
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
@@ -219,7 +219,7 @@ class TorBoxClient(
                         logger.info(
                             "Applying byteRange $byteRange " +
                                     "for ${debridLink.link}" +
-                                    " (${FileUtils.byteCountToDisplaySize(byteRange.getSize())}) "
+                                    " (${ByteFormatUtil.byteCountToDisplaySize(byteRange.getSize())}) "
                         )
                         append(HttpHeaders.Range, "bytes=${byteRange.start}-${byteRange.end}")
                     }

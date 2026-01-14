@@ -14,6 +14,7 @@ private const val DEFAULT_STREAMING_NETWORK_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_CLIENT_ERROR_WAIT_MILLIS = 100L
 private const val DEFAULT_STREAMING_PROVIDER_ERROR_WAIT_MINUTES = 1L
 private const val DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS = 24L
+private const val DEFAULT_STREAMING_DOWNLOAD_TRACKING_ACTIVE_TIMEOUT_MINUTES = 15L
 private const val DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS = 30L
 private const val DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB = 1024L // 1 GB - warn when chunks exceed this size
 private const val DEFAULT_STREAMING_BUFFER_SIZE = 65536L // 64KB - buffer size for direct streaming
@@ -53,6 +54,7 @@ data class DebridavConfigurationProperties(
     val disableByteRangeRequestChunking: Boolean = false,
     val enableStreamingDownloadTracking: Boolean = false,
     val streamingDownloadTrackingCacheExpirationHours: Duration = Duration.ofHours(DEFAULT_STREAMING_DOWNLOAD_TRACKING_CACHE_EXPIRATION_HOURS),
+    val streamingDownloadTrackingActiveTimeoutMinutes: Duration = Duration.ofMinutes(DEFAULT_STREAMING_DOWNLOAD_TRACKING_ACTIVE_TIMEOUT_MINUTES),
     val debridDirectDlResponseCacheExpirationSeconds: Duration = Duration.ofSeconds(DEFAULT_DEBRID_DIRECT_DL_RESPONSE_CACHE_EXPIRATION_SECONDS),
     val streamingMaxChunkSizeWarningMb: Long = DEFAULT_STREAMING_MAX_CHUNK_SIZE_WARNING_MB, // Warn when chunk size exceeds this threshold (in MB)
     val streamingBufferSize: Long = DEFAULT_STREAMING_BUFFER_SIZE, // Buffer size in bytes for direct streaming (default: 64KB)
@@ -83,7 +85,9 @@ data class DebridavConfigurationProperties(
     val strmProxyBaseUrl: String? = null, // Base URL for STRM redirect proxy (e.g., http://debridav:8080). If not set, defaults to http://{detected-hostname}:8080
     val strmProxyStreamMode: Boolean = false, // If true, stream content directly through proxy instead of redirecting. Provides more control over content delivery.
     val strmProviders: String? = "*", // Comma-separated list of provider names for which to create STRM files. Supports ALL/* for all providers and ! prefix for negation. Default: * (all providers)
-    val strmExcludeFilenameRegex: String? = null // Optional regex pattern to match filenames. Files matching this pattern will use original media files instead of STRM files.
+    val strmExcludeFilenameRegex: String? = null, // Optional regex pattern to match filenames. Files matching this pattern will use original media files instead of STRM files.
+    val localEntityAlwaysStoreExtensions: List<String> = emptyList(), // File extensions that should always be stored as LocalEntity (bypass size checks). Default: empty (disabled). Set to enable (e.g., "srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf")
+    val enableLocalEntityConversionStartupScan: Boolean = false // Enable scanning and converting RemotelyCachedEntity items to LocalEntity on startup for files matching localEntityAlwaysStoreExtensions. Default: false (disabled)
 ) {
     init {
         require(debridClients.isNotEmpty()) {
@@ -753,5 +757,21 @@ data class DebridavConfigurationProperties(
         
         // If no configuration is set, default to false (use direct URLs)
         return false
+    }
+
+    /**
+     * Checks if a file should always be stored as LocalEntity (bypassing size checks).
+     * This is used for subtitle files and other small metadata files that should always
+     * be stored in the database regardless of size.
+     * @param fileName The file name to check
+     * @return true if the file extension is in the whitelist, false otherwise
+     */
+    fun shouldAlwaysStoreAsLocalEntity(fileName: String): Boolean {
+        if (localEntityAlwaysStoreExtensions.isEmpty()) {
+            return false
+        }
+        
+        val extension = fileName.substringAfterLast(".", "").lowercase()
+        return localEntityAlwaysStoreExtensions.any { it.lowercase() == extension }
     }
 }

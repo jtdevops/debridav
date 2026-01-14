@@ -16,7 +16,7 @@ import io.skjaere.debridav.cache.BytesToCache
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.cache.StreamPlanningService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
-import org.apache.commons.io.FileUtils
+import io.skjaere.debridav.util.ByteFormatUtil
 import java.net.InetAddress
 import java.net.URI
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
@@ -75,7 +75,10 @@ data class DownloadTrackingContext(
     var completionStatus: String = "in_progress",
     val httpHeaders: Map<String, String> = emptyMap(),
     val sourceIpAddress: String? = null,
-    val provider: DebridProvider? = null
+    val provider: DebridProvider? = null,
+    // Progress tracking for stale download detection
+    var lastProgressCheckTime: Instant = Instant.now(),
+    var lastBytesDownloaded: Long = 0L
 )
 
 data class HttpRequestInfo(
@@ -923,7 +926,7 @@ class StreamingService(
                             append(HttpHeaders.Range, rangeHeader)
                             logger.debug("REDIRECT_REQUEST: Making request to redirect URL with Range header: redirectUrl={}, rangeHeader={}, isIptv={}, chunkSize={} bytes ({}), timeout={} ms", 
                                 redirectUrl.take(100), rangeHeader, isIptv, chunkSizeBytes, 
-                                org.apache.commons.io.FileUtils.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
+                                ByteFormatUtil.byteCountToDisplaySize(chunkSizeBytes), dynamicSocketTimeout)
                             iptvConfigurationProperties?.userAgent?.let {
                                 append(HttpHeaders.UserAgent, it)
                             }
@@ -1250,7 +1253,10 @@ class StreamingService(
             if (e.message?.contains("Channel was consumed, consumer had failed") == true) {
                 logger.debug("Channel cancellation during consumeEach (expected when consumer fails): path={}", 
                     remotelyCachedEntity.name)
-                // Don't rethrow - this is expected behavior when consumer fails
+                // Ensure tracking is completed even on early return
+                trackingId?.let { id -> 
+                    completeDownloadTracking(id, StreamResult.CLIENT_ERROR)
+                }
                 return
             }
             throw e
@@ -1414,6 +1420,100 @@ class StreamingService(
         if (removedCount > 0) {
             logger.debug("Cleaned up $removedCount expired download tracking entries")
         }
+    }
+
+    /**
+     * Scheduled cleanup for stale active downloads.
+     * Removes entries that are:
+     * - Older than configured timeout (default 15 minutes) AND
+     * - Exceeded expected completion time based on chunk size AND
+     * - Not making progress (bytesDownloaded unchanged since last check)
+     * 
+     * Expected completion time is calculated based on chunk size and a conservative
+     * minimum transfer rate (0.5 MB/s = 4 Mbps) to account for large chunks (e.g., 127MB+)
+     * and slower connections.
+     */
+    @Scheduled(fixedRate = 300000, timeUnit = TimeUnit.MILLISECONDS) // Every 5 minutes
+    fun cleanupStaleActiveDownloads() {
+        if (!debridavConfigProperties.enableStreamingDownloadTracking) return
+        
+        val now = Instant.now()
+        val baseTimeoutDuration = debridavConfigProperties.streamingDownloadTrackingActiveTimeoutMinutes
+        
+        // Conservative minimum transfer rate: 0.5 MB/s (4 Mbps)
+        // This accounts for slower connections while still catching truly dead connections
+        // For a 127MB chunk at 0.5 MB/s: 127 / 0.5 = 254 seconds = ~4.2 minutes
+        val minimumTransferRateBytesPerSecond = 0.5 * 1024 * 1024 // 0.5 MB/s in bytes
+        
+        val iterator = activeDownloads.iterator()
+        var removedCount = 0
+        
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            val trackingId = entry.key
+            val context = entry.value
+            
+            val age = Duration.between(context.downloadStartTime, now)
+            val currentBytesDownloaded = context.bytesDownloaded.get()
+            val hasProgress = currentBytesDownloaded > context.lastBytesDownloaded
+            
+            // Calculate expected completion time based on chunk size
+            // Expected time = chunk size / minimum transfer rate
+            val chunkSizeBytes = context.requestedSize
+            val expectedTransferTimeSeconds = chunkSizeBytes.toDouble() / minimumTransferRateBytesPerSecond
+            val expectedTransferDuration = Duration.ofSeconds(expectedTransferTimeSeconds.toLong())
+            
+            // Total allowed time = base timeout + expected transfer time + 50% buffer
+            // This ensures:
+            // - Small chunks: base timeout (15 min) + small expected time = ~15 min
+            // - Large chunks (127MB): base timeout (15 min) + expected time (~4.2 min) + buffer = ~19+ min
+            // The buffer accounts for network variability and slower-than-expected connections
+            val bufferDuration = Duration.ofSeconds((expectedTransferTimeSeconds * 0.5).toLong())
+            val totalAllowedDuration = baseTimeoutDuration.plus(expectedTransferDuration).plus(bufferDuration)
+            
+            // Update progress tracking
+            context.lastBytesDownloaded = currentBytesDownloaded
+            context.lastProgressCheckTime = now
+            
+            // Remove if:
+            // 1. Exceeded total allowed time (base timeout or expected transfer time for large chunks) AND
+            // 2. Not making progress
+            // Note: If making progress, we keep it even if it's slow (might be a large chunk on slow connection)
+            val shouldRemove = age >= totalAllowedDuration && !hasProgress
+            
+            if (shouldRemove) {
+                // Mark as stale and move to completed with error status
+                context.downloadEndTime = now
+                context.completionStatus = "stale_timeout"
+                context.actualBytesSent = currentBytesDownloaded
+                
+                // Move to completed downloads (will be cleaned up later)
+                completedDownloads.add(context)
+                while (completedDownloads.size > MAX_COMPLETED_DOWNLOADS_HISTORY) {
+                    completedDownloads.poll()
+                }
+                
+                iterator.remove()
+                removedCount++
+                
+                val chunkSizeMB = chunkSizeBytes / (1024 * 1024)
+                logger.debug("Cleaned up stale active download: trackingId={}, file={}, age={}, chunkSize={}MB, expectedTime={}, totalAllowedTime={}, bytesDownloaded={}", 
+                    trackingId, context.fileName, age, chunkSizeMB, expectedTransferDuration, totalAllowedDuration, currentBytesDownloaded)
+            }
+        }
+        
+        if (removedCount > 0) {
+            logger.info("Cleaned up $removedCount stale active download tracking entries")
+        }
+    }
+
+    /**
+     * Scheduled cleanup for expired completed downloads.
+     * Runs independently of new download initialization to ensure cleanup happens regularly.
+     */
+    @Scheduled(fixedRate = 3600000, timeUnit = TimeUnit.MILLISECONDS) // Every hour
+    fun cleanupExpiredCompletedDownloads() {
+        cleanupExpiredDownloadTracking()
     }
     
     /**

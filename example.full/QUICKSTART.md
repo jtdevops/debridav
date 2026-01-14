@@ -73,9 +73,9 @@ If you want to use IPTV integration, you can configure IPTV providers in the doc
 
 **FFprobe Metadata Enhancement:**
 
-For enhanced metadata extraction (resolution, codec, and file size) from IPTV media files, you can enable FFprobe metadata enhancement:
+For enhanced metadata extraction (resolution, codec, and file size) from IPTV media files, you can enable FFprobe metadata enhancement via the Prowlarr indexer configuration:
 
-- Set `IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=true` to enable FFprobe-based metadata enhancement
+- Enable the "Enable FFprobe metadata enhancement" checkbox in the Prowlarr indexer settings
 - Set `IPTV_FFPROBE_PATH` to the path of your FFprobe executable (default: "ffprobe" if in system PATH)
 - Set `IPTV_FFPROBE_TIMEOUT` to configure the FFprobe execution timeout (default: PT30S for 30 seconds)
 

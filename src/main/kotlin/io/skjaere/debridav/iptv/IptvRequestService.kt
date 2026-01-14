@@ -24,6 +24,7 @@ import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.metadata.MetadataEnhancer
 import io.skjaere.debridav.iptv.model.ContentType
 import io.skjaere.debridav.iptv.util.IptvResponseFileService
+import io.skjaere.debridav.iptv.util.IptvUrlBuilder
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -648,7 +649,8 @@ class IptvRequestService(
     private fun fetchAndCacheEpisodes(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
         providerName: String,
-        seriesId: String
+        seriesId: String,
+        enhanceMetadata: Boolean = false
     ): Pair<io.skjaere.debridav.iptv.client.XtreamCodesClient.SeriesInfo?, List<XtreamCodesClient.XtreamSeriesEpisode>> {
         // Fetch the raw JSON response first
         val responseJson = runBlocking {
@@ -706,13 +708,15 @@ class IptvRequestService(
             logger.debug("Cached raw JSON response for series $seriesId (${episodes.size} episodes)")
             
             // Enhance metadata if video info is missing from reference episode
-            if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
+            if (enhanceMetadata) {
                 try {
                     runBlocking {
-                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(metadata, episodes, providerConfig)
+                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(metadata, episodes, providerConfig, enhanceMetadata)
                         if (enhanced) {
                             iptvSeriesMetadataRepository.save(metadata)
                             logger.debug("Enhanced series metadata saved for series $seriesId")
+                        } else {
+                            logger.debug("Series metadata enhancement skipped for series $seriesId (enhanceMetadata=true but metadata already exists or enhancement was not needed - see MetadataEnhancer logs for details)")
                         }
                     }
                 } catch (e: Exception) {
@@ -731,7 +735,8 @@ class IptvRequestService(
     private fun fetchAndCacheMovieMetadata(
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
         providerName: String,
-        vodId: String
+        vodId: String,
+        enhanceMetadata: Boolean = false
     ): io.skjaere.debridav.iptv.client.XtreamCodesClient.MovieInfo? {
         // Fetch the raw JSON response first
         val responseJson = runBlocking {
@@ -789,10 +794,10 @@ class IptvRequestService(
             
             // Enhance metadata if video info is missing
             var finalMovieInfo = movieInfo
-            if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
+            if (enhanceMetadata) {
                 try {
                     runBlocking {
-                        val enhanced = metadataEnhancer.enhanceMovieMetadata(metadata, movieInfo, providerConfig)
+                        val enhanced = metadataEnhancer.enhanceMovieMetadata(metadata, movieInfo, providerConfig, enhanceMetadata)
                         if (enhanced) {
                             iptvMovieMetadataRepository.save(metadata)
                             logger.debug("Enhanced movie metadata saved for movie $vodId")
@@ -801,6 +806,8 @@ class IptvRequestService(
                             if (enhancedMovieInfo != null) {
                                 finalMovieInfo = enhancedMovieInfo
                             }
+                        } else {
+                            logger.debug("Movie metadata enhancement skipped for movie $vodId (enhanceMetadata=true but metadata already exists or enhancement was not needed - see MetadataEnhancer logs for details)")
                         }
                     }
                 } catch (e: Exception) {
@@ -1579,35 +1586,6 @@ class IptvRequestService(
         return null
     }
     
-    /**
-     * Builds episode URL for Xtream Codes provider.
-     * Format: {baseUrl}/series/{username}/{password}/{episode_id}.{extension}
-     */
-    private fun buildEpisodeUrl(
-        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
-        episode: io.skjaere.debridav.iptv.client.XtreamCodesClient.XtreamSeriesEpisode
-    ): String? {
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
-        val username = providerConfig.xtreamUsername ?: return null
-        val password = providerConfig.xtreamPassword ?: return null
-        val extension = episode.container_extension ?: "mp4"
-        return "$baseUrl/series/$username/$password/${episode.id}.$extension"
-    }
-    
-    /**
-     * Builds movie URL for Xtream Codes provider.
-     * Format: {baseUrl}/movie/{username}/{password}/{vodId}.{extension}
-     */
-    private fun buildMovieUrl(
-        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
-        vodId: String,
-        extension: String = "mp4"
-    ): String? {
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
-        val username = providerConfig.xtreamUsername ?: return null
-        val password = providerConfig.xtreamPassword ?: return null
-        return "$baseUrl/movie/$username/$password/$vodId.$extension"
-    }
     
     /**
      * Maps video codec name to magnet title codec format.
@@ -1840,7 +1818,8 @@ class IptvRequestService(
         entityMovieYears: ConcurrentHashMap<String, Int>,
         entityMovieResolutions: ConcurrentHashMap<String, String>,
         entityMovieCodecs: ConcurrentHashMap<String, String>,
-        entityMovieFileSizes: ConcurrentHashMap<String, Long>
+        entityMovieFileSizes: ConcurrentHashMap<String, Long>,
+        enhanceMetadata: Boolean = false
     ) {
         val providerConfig = iptvConfigurationService.getProviderConfigurations()
             .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
@@ -1854,9 +1833,9 @@ class IptvRequestService(
                 var parsedMovieInfo = parseMovieInfoFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
                 
                 // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
-                if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled && parsedMovieInfo != null) {
+                if (enhanceMetadata && parsedMovieInfo != null) {
                     try {
-                        val enhanced = metadataEnhancer.enhanceMovieMetadata(cachedMetadata, parsedMovieInfo, providerConfig)
+                        val enhanced = metadataEnhancer.enhanceMovieMetadata(cachedMetadata, parsedMovieInfo, providerConfig, enhanceMetadata)
                         if (enhanced) {
                             iptvMovieMetadataRepository.save(cachedMetadata)
                             logger.debug("Enhanced cached movie metadata saved for movie ${entity.contentId}")
@@ -1869,18 +1848,22 @@ class IptvRequestService(
                                     logger.debug("Found NUMBER_OF_BYTES in tags after re-parse for movie ${entity.contentId}: $fileSizeStr")
                                 } ?: logger.debug("NUMBER_OF_BYTES not found in tags after re-parse for movie ${entity.contentId}")
                             } ?: logger.debug("No video tags found after re-parse for movie ${entity.contentId}")
+                        } else {
+                            logger.debug("Cached movie metadata enhancement skipped for movie ${entity.contentId} (enhanceMetadata=true but metadata already exists or enhancement was not needed - see MetadataEnhancer logs for details)")
                         }
                     } catch (e: Exception) {
                         logger.warn("Failed to enhance cached movie metadata for movie ${entity.contentId}: ${e.message}", e)
                         // Continue with original metadata - enhancement failure is non-blocking
                     }
+                } else if (enhanceMetadata && parsedMovieInfo == null) {
+                    logger.debug("Cached movie metadata enhancement skipped for movie ${entity.contentId} (enhanceMetadata=true but could not parse movie info from cached JSON)")
                 }
                 
                 parsedMovieInfo
             } else {
                 // No cache, fetch and store
                 logger.debug("No cache found for movie ${entity.contentId}, fetching from API")
-                fetchAndCacheMovieMetadata(providerConfig, entity.providerName, entity.contentId)
+                fetchAndCacheMovieMetadata(providerConfig, entity.providerName, entity.contentId, enhanceMetadata)
             }
             
             // Extract year from movie info
@@ -1978,7 +1961,8 @@ class IptvRequestService(
         entity: IptvContentEntity,
         entitySeriesYears: ConcurrentHashMap<String, Int>,
         entityResolutions: ConcurrentHashMap<String, String>,
-        entityCodecs: ConcurrentHashMap<String, String>
+        entityCodecs: ConcurrentHashMap<String, String>,
+        enhanceMetadata: Boolean = false
     ) {
         val providerConfig = iptvConfigurationService.getProviderConfigurations()
             .find { it.name == entity.providerName && it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES }
@@ -1992,26 +1976,30 @@ class IptvRequestService(
                 var parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
                 
                 // Enhance cached metadata if video info is missing (same as for newly fetched metadata)
-                if (iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled && parsedResult.second.isNotEmpty()) {
+                if (enhanceMetadata && parsedResult.second.isNotEmpty()) {
                     try {
-                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(cachedMetadata, parsedResult.second, providerConfig)
+                        val enhanced = metadataEnhancer.enhanceSeriesMetadata(cachedMetadata, parsedResult.second, providerConfig, enhanceMetadata)
                         if (enhanced) {
                             iptvSeriesMetadataRepository.save(cachedMetadata)
                             logger.debug("Enhanced cached series metadata saved for series ${entity.contentId}")
                             // Re-parse the enhanced JSON to get updated series info and episodes
                             parsedResult = parseSeriesEpisodesFromJson(providerConfig, entity.contentId, cachedMetadata.responseJson)
+                        } else {
+                            logger.debug("Cached series metadata enhancement skipped for series ${entity.contentId} (enhanceMetadata=true but metadata already exists or enhancement was not needed - see MetadataEnhancer logs for details)")
                         }
                     } catch (e: Exception) {
                         logger.warn("Failed to enhance cached series metadata for series ${entity.contentId}: ${e.message}", e)
                         // Continue with original metadata - enhancement failure is non-blocking
                     }
+                } else if (enhanceMetadata && parsedResult.second.isEmpty()) {
+                    logger.debug("Cached series metadata enhancement skipped for series ${entity.contentId} (enhanceMetadata=true but no episodes found in cached JSON)")
                 }
                 
                 parsedResult
             } else {
                 // No cache, fetch and store
                 logger.debug("No cache found for series ${entity.contentId}, fetching from API")
-                fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId)
+                fetchAndCacheEpisodes(providerConfig, entity.providerName, entity.contentId, enhanceMetadata)
             }
             
             // Extract year from series info
@@ -2052,8 +2040,8 @@ class IptvRequestService(
         }
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null): List<IptvSearchResult> {
-        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}, limit={}", title, contentType, isTestRequest, fetchFileSize, limit)
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null, enhanceMetadata: Boolean = false): List<IptvSearchResult> {
+        logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}, limit={}, enhanceMetadata={}", title, contentType, isTestRequest, fetchFileSize, limit, enhanceMetadata)
         var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
         // For test requests (connectivity tests), limit to first result early to avoid unnecessary processing
@@ -2133,7 +2121,8 @@ class IptvRequestService(
                         entity = entity,
                         entitySeriesYears = entitySeriesYears,
                         entityResolutions = entityResolutions,
-                        entityCodecs = entityCodecs
+                        entityCodecs = entityCodecs,
+                        enhanceMetadata = enhanceMetadata
                     )
                 }
             }
@@ -2280,7 +2269,7 @@ class IptvRequestService(
                         
                         // If still not found, try to fetch from episode URL (skip for test requests)
                         if (referenceFileSize == null && !isTestRequest) {
-                            val episodeUrl = buildEpisodeUrl(providerConfig, referenceEpisode)
+                            val episodeUrl = IptvUrlBuilder.buildEpisodeUrl(providerConfig, referenceEpisode)
                             if (episodeUrl != null) {
                                 try {
                                     logger.debug("File size not found in video tags or duration/bitrate for $episodeLabel, fetching from episode URL: ${episodeUrl.take(100)}")
@@ -2394,7 +2383,7 @@ class IptvRequestService(
                             
                             // If still not found, try to fetch from episode URL (skip for test requests)
                             if (requestedFileSize == null && !isTestRequest) {
-                                val episodeUrl = buildEpisodeUrl(providerConfig, requestedEpisode)
+                                val episodeUrl: String? = IptvUrlBuilder.buildEpisodeUrl(providerConfig, requestedEpisode)
                                 if (episodeUrl != null) {
                                     try {
                                         logger.debug("File size not found in video tags or duration/bitrate for $requestedEpisodeLabel, fetching from episode URL: ${episodeUrl.take(100)}")
@@ -2618,7 +2607,7 @@ class IptvRequestService(
                         // Try to fetch actual file size from URL (same method used in /api/v2/torrent/add)
                         // Skip for test requests to keep them fast
                         // File size fetching is controlled by Prowlarr config (fetchFileSize parameter)
-                        // This is separate from ffprobeMetadataEnhancementEnabled which controls FFprobe-based enhancement
+                        // This is separate from enhanceMetadata parameter which controls FFprobe-based enhancement
                         if (!isTestRequest && fetchFileSize) {
                             try {
                                 val resolvedUrl = iptvContentService.resolveIptvUrl(entity.url, entity.providerName)

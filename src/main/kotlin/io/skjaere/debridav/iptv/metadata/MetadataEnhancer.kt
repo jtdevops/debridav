@@ -16,12 +16,17 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import io.skjaere.debridav.iptv.util.IptvUrlBuilder
+import io.skjaere.debridav.iptv.IptvContentRepository
+import io.skjaere.debridav.iptv.IptvContentService
 import java.time.Duration
 import java.time.Instant
 
 @Service
 class MetadataEnhancer(
-    private val videoMetadataExtractor: VideoMetadataExtractor
+    private val videoMetadataExtractor: VideoMetadataExtractor,
+    private val iptvContentRepository: IptvContentRepository,
+    private val iptvContentService: IptvContentService
 ) {
     private val logger = LoggerFactory.getLogger(MetadataEnhancer::class.java)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -71,16 +76,36 @@ class MetadataEnhancer(
     suspend fun enhanceMovieMetadata(
         metadata: IptvMovieMetadataEntity,
         movieInfo: XtreamCodesClient.MovieInfo,
-        providerConfig: IptvProviderConfiguration
+        providerConfig: IptvProviderConfiguration,
+        enhanceMetadata: Boolean = false
     ): Boolean {
+        if (!enhanceMetadata) {
+            return false
+        }
+        
         // Check if video info is missing or empty
         val videoInfo = movieInfo.info?.video
+        val existingWidth = videoInfo?.width
+        val existingHeight = videoInfo?.height
+        val existingCodec = videoInfo?.codec_name
+        val existingFileSize = videoInfo?.tags?.let { tags ->
+            val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
+            sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
+                tags[key]?.toLongOrNull()
+            }
+        }
+        
         val needsEnhancement = videoInfo == null || 
-            (videoInfo.width == null && videoInfo.height == null) ||
-            videoInfo.width == 0 || videoInfo.height == 0
+            (existingWidth == null && existingHeight == null) ||
+            existingWidth == 0 || existingHeight == 0
         
         if (!needsEnhancement) {
-            logger.debug("Movie metadata already has video info, skipping enhancement")
+            val metadataDetails = buildString {
+                append("width=${existingWidth ?: "null"}, height=${existingHeight ?: "null"}")
+                existingCodec?.let { codec -> append(", codec=$codec") }
+                existingFileSize?.let { size -> append(", fileSize=${size / 1_000_000}MB") }
+            }
+            logger.debug("Movie metadata for ${metadata.movieId} already has complete video info ($metadataDetails), skipping FFprobe extraction (enhanceMetadata=true but metadata already exists)")
             return false
         }
         
@@ -96,25 +121,39 @@ class MetadataEnhancer(
         }
         
         // Check if file size already exists in cached metadata to avoid unnecessary external fetch
-        val existingFileSize = videoInfo?.tags?.let { tags ->
+        // (Note: existingFileSize was already extracted above, but we need to check it again here for the file size check)
+        val fileSizeFromTags = videoInfo?.tags?.let { tags ->
             val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
             sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
                 tags[key]?.toLongOrNull()
             }
         }
         
-        if (existingFileSize != null && existingFileSize > 0) {
+        if (fileSizeFromTags != null && fileSizeFromTags > 0) {
             // Check if it's not the default estimated size (2GB for movies)
-            val isDefaultSize = existingFileSize == 2_000_000_000L
+            val isDefaultSize = fileSizeFromTags == 2_000_000_000L
             if (!isDefaultSize) {
-                logger.debug("File size already exists in cached metadata for movie ${metadata.movieId}: ${existingFileSize / 1_000_000}MB, will reuse and skip external fetch")
+                logger.debug("File size already exists in cached metadata for movie ${metadata.movieId}: ${fileSizeFromTags / 1_000_000}MB, will reuse and skip external fetch during FFprobe extraction")
             } else {
-                logger.debug("File size in cached metadata for movie ${metadata.movieId} is default estimate (${existingFileSize / 1_000_000}MB), will fetch actual size externally")
+                logger.debug("File size in cached metadata for movie ${metadata.movieId} is default estimate (${fileSizeFromTags / 1_000_000}MB), will fetch actual size externally during FFprobe extraction")
             }
         }
         
-        // Build movie URL
-        val movieUrl = buildMovieUrl(providerConfig, metadata.movieId, movieInfo)
+        // Try to extract extension from content entity URL if available
+        val movieExtension = iptvContentRepository.findByProviderNameAndContentId(metadata.providerName, metadata.movieId)
+            ?.let { contentEntity ->
+                try {
+                    // Resolve the tokenized URL to get the actual URL with extension
+                    val resolvedUrl = iptvContentService.resolveIptvUrl(contentEntity.url, metadata.providerName)
+                    IptvUrlBuilder.extractMediaExtensionFromUrl(resolvedUrl)
+                } catch (e: Exception) {
+                    logger.debug("Could not resolve URL to extract extension for movie ${metadata.movieId}: ${e.message}")
+                    null
+                }
+            }
+        
+        // Build movie URL with extracted extension or default to mp4
+        val movieUrl = IptvUrlBuilder.buildMovieUrl(providerConfig, metadata.movieId, movieExtension)
         if (movieUrl == null) {
             logger.debug("Could not build movie URL for enhancement")
             // Mark as processed even if URL build fails to prevent repeated attempts
@@ -131,7 +170,8 @@ class MetadataEnhancer(
             movieUrl, 
             ContentType.MOVIE, 
             providerConfig.name,
-            existingFileSize = if (existingFileSize != null && existingFileSize > 0 && existingFileSize != 2_000_000_000L) existingFileSize else null
+            existingFileSize = if (fileSizeFromTags != null && fileSizeFromTags > 0 && fileSizeFromTags != 2_000_000_000L) fileSizeFromTags else null,
+            enhanceMetadata = enhanceMetadata
         )
         
         // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
@@ -183,23 +223,43 @@ class MetadataEnhancer(
     suspend fun enhanceSeriesMetadata(
         metadata: IptvSeriesMetadataEntity,
         episodes: List<XtreamCodesClient.XtreamSeriesEpisode>,
-        providerConfig: IptvProviderConfiguration
+        providerConfig: IptvProviderConfiguration,
+        enhanceMetadata: Boolean = false
     ): Boolean {
+        if (!enhanceMetadata) {
+            return false
+        }
+        
         // Find reference episode (S01E01)
         val referenceEpisode = episodes.find { it.season == 1 && it.episode == 1 }
         if (referenceEpisode == null) {
-            logger.debug("Reference episode S01E01 not found, skipping enhancement")
+            logger.debug("Reference episode S01E01 not found, skipping FFprobe extraction for series ${metadata.seriesId}")
             return false
         }
         
         // Check if video info is missing or empty
         val videoInfo = referenceEpisode.info?.video
+        val existingWidth = videoInfo?.width
+        val existingHeight = videoInfo?.height
+        val existingCodec = videoInfo?.codec_name
+        val existingFileSize = videoInfo?.tags?.let { tags ->
+            val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
+            sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
+                tags[key]?.toLongOrNull()
+            }
+        }
+        
         val needsEnhancement = videoInfo == null || 
-            (videoInfo.width == null && videoInfo.height == null) ||
-            videoInfo.width == 0 || videoInfo.height == 0
+            (existingWidth == null && existingHeight == null) ||
+            existingWidth == 0 || existingHeight == 0
         
         if (!needsEnhancement) {
-            logger.debug("Reference episode already has video info, skipping enhancement")
+            val metadataDetails = buildString {
+                append("width=${existingWidth ?: "null"}, height=${existingHeight ?: "null"}")
+                existingCodec?.let { codec -> append(", codec=$codec") }
+                existingFileSize?.let { size -> append(", fileSize=${size / 1_000_000}MB") }
+            }
+            logger.debug("Series metadata for ${metadata.seriesId} reference episode (S01E01) already has complete video info ($metadataDetails), skipping FFprobe extraction (enhanceMetadata=true but metadata already exists)")
             return false
         }
         
@@ -215,25 +275,26 @@ class MetadataEnhancer(
         }
         
         // Check if file size already exists in cached metadata to avoid unnecessary external fetch
-        val existingFileSize = videoInfo?.tags?.let { tags ->
+        // (Note: existingFileSize was already extracted above, but we need to check it again here for the file size check)
+        val fileSizeFromTags = videoInfo?.tags?.let { tags ->
             val sizeKeys = listOf("NUMBER_OF_BYTES-eng", "NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG")
             sizeKeys.firstOrNull { tags.containsKey(it) }?.let { key ->
                 tags[key]?.toLongOrNull()
             }
         }
         
-        if (existingFileSize != null && existingFileSize > 0) {
+        if (fileSizeFromTags != null && fileSizeFromTags > 0) {
             // Check if it's not the default estimated size (1GB for episodes)
-            val isDefaultSize = existingFileSize == 1_000_000_000L
+            val isDefaultSize = fileSizeFromTags == 1_000_000_000L
             if (!isDefaultSize) {
-                logger.debug("File size already exists in cached metadata for series ${metadata.seriesId} reference episode: ${existingFileSize / 1_000_000}MB, will reuse and skip external fetch")
+                logger.debug("File size already exists in cached metadata for series ${metadata.seriesId} reference episode: ${fileSizeFromTags / 1_000_000}MB, will reuse and skip external fetch during FFprobe extraction")
             } else {
-                logger.debug("File size in cached metadata for series ${metadata.seriesId} reference episode is default estimate (${existingFileSize / 1_000_000}MB), will fetch actual size externally")
+                logger.debug("File size in cached metadata for series ${metadata.seriesId} reference episode is default estimate (${fileSizeFromTags / 1_000_000}MB), will fetch actual size externally during FFprobe extraction")
             }
         }
         
         // Build episode URL
-        val episodeUrl = buildEpisodeUrl(providerConfig, referenceEpisode)
+        val episodeUrl = IptvUrlBuilder.buildEpisodeUrl(providerConfig, referenceEpisode)
         if (episodeUrl == null) {
             logger.debug("Could not build episode URL for enhancement")
             // Mark as processed even if URL build fails to prevent repeated attempts
@@ -250,7 +311,8 @@ class MetadataEnhancer(
             episodeUrl, 
             ContentType.SERIES, 
             providerConfig.name,
-            existingFileSize = if (existingFileSize != null && existingFileSize > 0 && existingFileSize != 1_000_000_000L) existingFileSize else null
+            existingFileSize = if (fileSizeFromTags != null && fileSizeFromTags > 0 && fileSizeFromTags != 1_000_000_000L) fileSizeFromTags else null,
+            enhanceMetadata = enhanceMetadata
         )
         
         // Always update ffprobe_last_processed timestamp in JSON, even if extraction failed
@@ -293,41 +355,6 @@ class MetadataEnhancer(
         }
         
         return false
-    }
-    
-    /**
-     * Builds movie URL for Xtream Codes provider.
-     * Format: {baseUrl}/movie/{username}/{password}/{vodId}.{extension}
-     */
-    private fun buildMovieUrl(
-        providerConfig: IptvProviderConfiguration,
-        vodId: String,
-        movieInfo: XtreamCodesClient.MovieInfo
-    ): String? {
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
-        val username = providerConfig.xtreamUsername ?: return null
-        val password = providerConfig.xtreamPassword ?: return null
-        
-        // Try to determine extension from container_extension or default to mp4
-        // Note: MovieInfo doesn't have container_extension, so we default to mp4
-        val extension = "mp4"
-        
-        return "$baseUrl/movie/$username/$password/$vodId.$extension"
-    }
-    
-    /**
-     * Builds episode URL for Xtream Codes provider.
-     * Format: {baseUrl}/series/{username}/{password}/{episode_id}.{extension}
-     */
-    private fun buildEpisodeUrl(
-        providerConfig: IptvProviderConfiguration,
-        episode: XtreamCodesClient.XtreamSeriesEpisode
-    ): String? {
-        val baseUrl = providerConfig.xtreamBaseUrl ?: return null
-        val username = providerConfig.xtreamUsername ?: return null
-        val password = providerConfig.xtreamPassword ?: return null
-        val extension = episode.container_extension ?: "mp4"
-        return "$baseUrl/series/$username/$password/${episode.id}.$extension"
     }
     
     /**

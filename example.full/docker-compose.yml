@@ -4,6 +4,7 @@
     # - docker-compose.plex.yml
     # - docker-compose.jellyfin.yml
     # - docker-compose.emby.yml
+    # - docker-compose.bazarr.yml
     # - docker-compose.jellyseerr.yml
 
 x-rclone-base: &rclone-base
@@ -90,13 +91,6 @@ services:
       - IPTV_INCLUDE_PROVIDER_IN_MAGNET_TITLE=true
       # IPTV Metadata Fetch Batch Size - Number of concurrent metadata fetch requests per batch (default: 5)
       - IPTV_METADATA_FETCH_BATCH_SIZE=${IPTV_METADATA_FETCH_BATCH_SIZE:-5}
-      
-      # IPTV FFprobe Metadata Enhancement Configuration
-      # Enable FFprobe-based metadata enhancement (extracts resolution, codec, and file size from media files using FFprobe)
-      # When disabled, FFprobe will not be used for metadata extraction
-      # Note: File size fetching in search results is controlled by Prowlarr indexer setting (fetchFileSize)
-      # Default: false
-      - IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED=${IPTV_FFPROBE_METADATA_ENHANCEMENT_ENABLED:-false}
       
       # Path to FFprobe executable
       # Default: "ffprobe" (assumes ffprobe is in system PATH)
@@ -222,6 +216,19 @@ services:
       - DEBRIDAV_LINK_LIVENESS_CACHE_DURATION=15m
       - DEBRIDAV_CACHED_FILE_CACHE_DURATION=30m
 
+      # Local entity storage configuration
+      # File extensions that should always be stored as LocalEntity (bypass size checks)
+      # Default: empty (disabled) - feature is opt-in
+      # To enable, set to comma-separated list of extensions (e.g., "srt,vtt,ass,ssa,sub,idx,sup,ttml,dfxp,usf")
+      # These files (typically subtitle files) will be stored in the database regardless of size
+      - DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS=${DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS:-}
+      # Enable scanning and converting RemotelyCachedEntity items to LocalEntity on startup
+      # Default: false (disabled) - feature is opt-in
+      # When enabled, scans all RemotelyCachedEntity items on application startup and converts matching files
+      # (based on DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS) to LocalEntity by downloading and storing their contents
+      # Requires DEBRIDAV_LOCAL_ENTITY_ALWAYS_STORE_EXTENSIONS to be configured with at least one extension
+      - DEBRIDAV_ENABLE_LOCAL_ENTITY_CONVERSION_STARTUP_SCAN=${DEBRIDAV_ENABLE_LOCAL_ENTITY_CONVERSION_STARTUP_SCAN:-false}
+
       # Downloads cleanup configuration
       # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)
       # When true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes
@@ -310,7 +317,7 @@ services:
       start_period: 2s
       retries: 1000
     depends_on:
-      postgres-debridav:
+      postgres:
         condition: service_healthy
 
   # --- First service with ports ---
@@ -377,7 +384,7 @@ services:
       - rclone_arrs
     restart: unless-stopped
 
-  prowlarr-debridav:
+  prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
     container_name: prowlarr-debridav
     environment:
@@ -390,7 +397,7 @@ services:
       - "9696:9696"
     restart: unless-stopped
 
-  postgres-debridav:
+  postgres:
     image: postgres:17
     container_name: postgres-debridav
     environment:

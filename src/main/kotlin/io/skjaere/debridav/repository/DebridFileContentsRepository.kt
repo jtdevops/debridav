@@ -71,6 +71,9 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
     @Query("select rce from RemotelyCachedEntity rce where lower(rce.hash) = lower(:hash)")
     fun getByHash(hash: String): List<DbEntity>
     
+    @Query("SELECT rce FROM RemotelyCachedEntity rce")
+    fun findAllRemotelyCachedEntities(): List<RemotelyCachedEntity>
+    
     @Query("""
         select rce from RemotelyCachedEntity rce 
         where rce.contents.id in (

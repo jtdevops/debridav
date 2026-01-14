@@ -1,0 +1,17 @@
+---
+services:
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr-debridav
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ./bazarr-config:/config
+      - ${DEBRIDAV_MOUNT_PATH_HOST_FS}:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+    depends_on:
+      - rclone
+    ports:
+      - 6767:6767

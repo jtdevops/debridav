@@ -15,7 +15,12 @@ import io.skjaere.debridav.fs.LocalContentsService
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import org.slf4j.LoggerFactory
+import org.springframework.web.context.request.RequestContextHolder
+import org.springframework.web.context.request.ServletRequestAttributes
+import jakarta.servlet.http.HttpServletRequest
 import java.io.InputStream
+import java.net.InetAddress
 import java.time.Instant
 import java.util.*
 
@@ -24,9 +29,12 @@ class DirectoryResource(
     //private val directoryChildren: List<Resource>,
     val resourceFactory: StreamableResourceFactory,
     private val localContentsService: LocalContentsService,
-    fileService: DatabaseFileService
+    fileService: DatabaseFileService,
+    private val arrRequestDetector: ArrRequestDetector
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
     DeletableResource {
+    
+    private val logger = LoggerFactory.getLogger(DirectoryResource::class.java)
 
     var directoryChildren: MutableList<Resource>? = null
 
@@ -111,20 +119,48 @@ class DirectoryResource(
     }
 
     override fun createNew(newName: String, inputStream: InputStream, length: Long?, contentType: String?): Resource {
-        /*fileService.getFileAtPath("${directory.fileSystemPath()}/$newName")
-            ?.let {
-                when(it) {
-                    is RemotelyCachedEntity -> error("Cannot overwrite RemotelyCachedEntity")
-                    is DbDirectory -> error("Cannot overwrite Directory")
-                    is LocalEntity -> {
-                        it.localContents = inputStream.readBytes()
-                        fileService.writeDebridFileContentsToFile(it,)
+        // Extract HTTP request information for logging
+        var sourceIpAddress: String? = null
+        var sourceHostname: String? = null
+        var sourceInfo: String? = null
+        
+        try {
+            val requestAttributes = RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
+            val httpRequest = requestAttributes?.request
+            
+            if (httpRequest != null) {
+                sourceIpAddress = httpRequest.remoteAddr
+                    ?: httpRequest.getHeader("X-Forwarded-For")?.split(",")?.firstOrNull()?.trim()
+                    ?: httpRequest.getHeader("X-Real-IP")
+                
+                if (sourceIpAddress != null && sourceIpAddress != "unknown") {
+                    try {
+                        sourceHostname = InetAddress.getByName(sourceIpAddress).hostName
+                    } catch (e: Exception) {
+                        // If hostname resolution fails, leave it null
                     }
                 }
-                if(it ) {
-
-                } else if()
-            }*/
+                
+                sourceInfo = if (sourceHostname != null && sourceHostname != sourceIpAddress) {
+                    "$sourceIpAddress/$sourceHostname"
+                } else {
+                    sourceIpAddress
+                }
+            }
+        } catch (e: Exception) {
+            logger.debug("Could not extract request information for file write logging", e)
+        }
+        
+        // Log all PUT attempts at WARN level for auditing purposes
+        logger.warn(
+            "VFS_FILE_WRITE_ATTEMPT: filename='{}', source_ip={}, source_hostname={}, source_info={}, size={}",
+            newName,
+            sourceIpAddress ?: "unknown",
+            sourceHostname ?: "unknown",
+            sourceInfo ?: "unknown",
+            length ?: "unknown"
+        )
+        
         val createdFile = fileService.createLocalFile(
             "${directory.fileSystemPath()}/$newName",
             inputStream,
@@ -139,7 +175,8 @@ class DirectoryResource(
             fileService.createDirectory("${directory.fileSystemPath()}/$newName/"),
             resourceFactory,
             localContentsService,
-            fileService
+            fileService,
+            arrRequestDetector
         )
     }
 
@@ -155,7 +192,7 @@ class DirectoryResource(
 
     private fun toResource(file: DbEntity): Resource? {
         return if (file is DbDirectory)
-            DirectoryResource(file, resourceFactory, localContentsService, fileService)
+            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector)
         else resourceFactory.toFileResource(file)
     }
 }

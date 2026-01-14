@@ -6,7 +6,7 @@ import io.milton.http.Request
 import io.milton.resource.DeletableResource
 import io.milton.resource.GetableResource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
-import org.apache.commons.io.FileUtils
+import io.skjaere.debridav.util.ByteFormatUtil
 import java.net.InetAddress
 import io.skjaere.debridav.debrid.DebridClient
 import io.skjaere.debridav.debrid.DebridLinkService
@@ -398,7 +398,7 @@ class DebridFileResource(
         }
 
         logger.debug("INCOMING_RANGE_REQUEST: file={}, range={}-{}, size={} ({}), source_ip={}, headers_count={}",
-            file.name ?: "unknown", range?.start, range?.finish, FileUtils.byteCountToDisplaySize(requestedSize), requestedSize, sourceInfo, httpHeaders.size)
+            file.name ?: "unknown", range?.start, range?.finish, ByteFormatUtil.byteCountToDisplaySize(requestedSize), requestedSize, sourceInfo, httpHeaders.size)
 
         return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)
     }
