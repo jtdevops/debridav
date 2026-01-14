@@ -10,7 +10,7 @@ import io.skjaere.debridav.repository.BlobRepository
 import jakarta.persistence.EntityManager
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
-import org.apache.commons.io.FileUtils
+import io.skjaere.debridav.util.ByteFormatUtil
 import org.hibernate.Session
 import org.postgresql.largeobject.BlobInputStream
 import org.slf4j.LoggerFactory
@@ -89,7 +89,7 @@ class FileChunkCachingService(
         }
         logger.info(
             "Saved ${
-                FileUtils.byteCountToDisplaySize(toBeSaved.sumOf { it.bytes.size }.toLong())
+                ByteFormatUtil.byteCountToDisplaySize(toBeSaved.sumOf { it.bytes.size }.toLong())
             } to cache"
         )
     }

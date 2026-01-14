@@ -11,7 +11,7 @@ import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.torrent.Status
 import io.skjaere.debridav.torrent.Torrent
 import io.skjaere.debridav.torrent.TorrentRepository
-import jakarta.transaction.Transactional
+import org.springframework.transaction.annotation.Transactional
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Duration
@@ -339,18 +339,35 @@ class DownloadsCleanupService(
         }
     }
     
-    @Transactional
     private fun cleanupOrphanedTorrentsAndFilesInternal(
         dryRun: Boolean = false
     ): CleanupResult {
         logger.debug("=== Starting orphaned torrents/files cleanup (dryRun={}) ===", dryRun)
         
+        // Read phase: Use read-only transaction to find orphaned content
+        val (orphanedFiles, orphanedTorrents, emptyDirectories) = findOrphanedContent()
+        
+        if (orphanedFiles.isEmpty() && orphanedTorrents.isEmpty() && emptyDirectories.isEmpty()) {
+            logger.debug("No orphaned content found, skipping cleanup")
+            return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, dryRun = dryRun)
+        }
+        
+        // Write phase: Use separate transactions for deletions
+        return deleteOrphanedContent(orphanedFiles, orphanedTorrents, emptyDirectories, dryRun)
+    }
+    
+    /**
+     * Finds orphaned content using read-only transaction to minimize connection hold time.
+     * This method performs all database queries in a single read-only transaction.
+     */
+    @Transactional(readOnly = true)
+    private fun findOrphanedContent(): Triple<List<RemotelyCachedEntity>, List<Torrent>, List<DbDirectory>> {
         val arrCategories = getArrCategories()
         logger.trace("ARR categories found: {}", arrCategories.joinToString(", "))
         
         if (arrCategories.isEmpty()) {
             logger.debug("No ARR categories found, skipping orphaned cleanup")
-            return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, dryRun = dryRun)
+            return Triple(emptyList(), emptyList(), emptyList())
         }
 
         val useTimeBased = debridavConfigurationProperties.enableDownloadsCleanupTimeBased
@@ -399,9 +416,14 @@ class DownloadsCleanupService(
         }.joinToString(", "))
         
         // Find torrents not linked to any active category
-        logger.trace("Querying database for all LIVE torrents...")
-        val allTorrents = torrentRepository.findAll().filter { it.status == Status.LIVE }
-        logger.trace("Found {} LIVE torrent(s) total", allTorrents.size)
+        // Use optimized query that filters in database and loads category with JOIN FETCH
+        logger.trace("Querying database for LIVE torrents in downloads folder...")
+        val downloadPath = debridavConfigurationProperties.downloadPath
+        val allTorrents = torrentRepository.findAllByStatusAndSavePathPrefixWithCategory(
+            status = Status.LIVE,
+            savePathPrefix = downloadPath
+        )
+        logger.trace("Found {} LIVE torrent(s) in downloads folder", allTorrents.size)
         
         val orphanedTorrents = allTorrents.filter { torrent ->
             val categoryName = torrent.category?.name
@@ -410,8 +432,7 @@ class DownloadsCleanupService(
                 torrent.name, torrent.id, categoryName ?: "null", torrent.savePath, isOrphaned)
             isOrphaned
         }.filter { torrent ->
-            // Only include torrents in downloads folder
-            val inDownloadsFolder = torrent.savePath?.startsWith(debridavConfigurationProperties.downloadPath) == true
+            // Age check (already filtered by savePath in database query)
             val ageCheck = if (useTimeBased) {
                 val created = torrent.created?.toEpochMilli() ?: Long.MAX_VALUE
                 val passesAgeCheck = created < cutoffTime
@@ -422,16 +443,29 @@ class DownloadsCleanupService(
             } else {
                 true
             }
-            val shouldInclude = inDownloadsFolder && ageCheck
-            logger.trace("Torrent '{}' filter: inDownloadsFolder={}, ageCheck={}, shouldInclude={}", 
-                torrent.name, inDownloadsFolder, ageCheck, shouldInclude)
-            shouldInclude
+            logger.trace("Torrent '{}' filter: ageCheck={}, shouldInclude={}", 
+                torrent.name, ageCheck, ageCheck)
+            ageCheck
         }
         logger.debug("Found {} orphaned torrent(s) not linked to ARR categories", orphanedTorrents.size)
         logger.trace("Orphaned torrents: {}", orphanedTorrents.map { 
             "${it.name} (id=${it.id}, category=${it.category?.name ?: "null"}, files=${it.files.size}, created=${it.created})"
         }.joinToString(", "))
         
+        return Triple(orphanedFiles, orphanedTorrents, emptyDirectories)
+    }
+    
+    /**
+     * Deletes orphaned content using separate write transactions.
+     * Each deletion operation uses its own transaction to minimize connection hold time.
+     */
+    @Transactional
+    private fun deleteOrphanedContent(
+        orphanedFiles: List<RemotelyCachedEntity>,
+        orphanedTorrents: List<Torrent>,
+        emptyDirectories: List<DbDirectory>,
+        dryRun: Boolean
+    ): CleanupResult {
         var deletedCount = 0
         var totalSizeBytes = 0L
         val errors = mutableListOf<String>()
@@ -615,6 +649,7 @@ class DownloadsCleanupService(
             
             // Re-query for empty directories (parent directories may have become empty)
             if (!dryRun) {
+                val downloadPathPrefix = convertPathToLtree(debridavConfigurationProperties.downloadPath)
                 currentEmptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
                 if (currentEmptyDirectories.isNotEmpty()) {
                     logger.debug("Found {} additional empty directory(ies) after deletion, continuing cleanup", currentEmptyDirectories.size)
@@ -638,6 +673,8 @@ class DownloadsCleanupService(
             dryRun = dryRun
         )
         
+        val useTimeBased = debridavConfigurationProperties.enableDownloadsCleanupTimeBased
+        val thresholdMinutes = debridavConfigurationProperties.downloadsCleanupTimeBasedThresholdMinutes
         val cleanupMode = if (useTimeBased) {
             "time-based (${thresholdMinutes} minutes)"
         } else {

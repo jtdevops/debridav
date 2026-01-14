@@ -39,6 +39,36 @@ class ArrRequestDetector(
     }
     
     /**
+     * Checks if the current HTTP request is authorized to write files to the VFS.
+     * Returns true only if rcloneArrsHostnamePattern is configured AND the request hostname contains the pattern.
+     * Returns false (unauthorized) if pattern is not configured (secure by default).
+     * This method works independently of enableRcloneArrsLocalVideo setting.
+     */
+    fun isAuthorizedForFileWrite(): Boolean {
+        val hostnamePattern = debridavConfigProperties.rcloneArrsHostnamePattern
+        if (hostnamePattern.isNullOrBlank()) {
+            return false // Secure by default: block if no pattern configured
+        }
+        
+        try {
+            val requestAttributes = RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
+            val httpRequest = requestAttributes?.request ?: return false
+            
+            val httpRequestInfo = extractHttpRequestInfo(httpRequest)
+            val sourceInfo = httpRequestInfo.sourceInfo
+            
+            if (sourceInfo != null) {
+                return sourceInfo.contains(hostnamePattern)
+            }
+            
+            return false
+        } catch (e: Exception) {
+            // If we can't extract request info, deny access
+            return false
+        }
+    }
+    
+    /**
      * Extracts HTTP request information from the current request context.
      */
     private fun extractHttpRequestInfo(httpRequest: HttpServletRequest): HttpRequestInfo {

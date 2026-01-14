@@ -43,11 +43,8 @@ class VideoMetadataExtractor(
     
     @PostConstruct
     fun checkFfprobeAvailability() {
-        if (!iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
-            logger.info("FFprobe metadata enhancement is disabled in configuration")
-            ffprobeAvailable = false
-            return
-        }
+        // Always check FFprobe availability at startup
+        // The enhanceMetadata parameter controls whether it's used, not whether it's available
         
         try {
             val process = ProcessBuilder(
@@ -95,13 +92,13 @@ class VideoMetadataExtractor(
         url: String, 
         contentType: ContentType? = null, 
         providerName: String? = null,
-        existingFileSize: Long? = null
+        existingFileSize: Long? = null,
+        enhanceMetadata: Boolean = false
     ): VideoMetadata? {
-        // If FFprobe metadata enhancement is disabled, don't extract anything
+        // If metadata enhancement is disabled, don't extract anything
         // File size extraction for search results is controlled by Prowlarr's fetchFileSize setting
-        // This prevents the enhancement process from extracting file size when FFprobe is disabled
-        if (!iptvConfigurationProperties.ffprobeMetadataEnhancementEnabled) {
-            logger.debug("FFprobe metadata enhancement is disabled, skipping metadata extraction (file size for search is controlled by Prowlarr)")
+        // This prevents the enhancement process from extracting file size when enhancement is disabled
+        if (!enhanceMetadata) {
             return null
         }
         

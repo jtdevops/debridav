@@ -61,6 +61,10 @@ class IptvApiController(
         // Accept as String to handle Prowlarr's format
         // If not specified, empty string, or "0", process all results (default behavior)
         @RequestParam(required = false) limit: String?,
+        // Metadata enhancement toggle (from Prowlarr config)
+        // Accept as String to handle Prowlarr's format (e.g., ".True", ".False")
+        // Note: When Prowlarr disables this option, it sends an empty string, which should be treated as false
+        @RequestParam(required = false) enhanceMetadata: String?,
         request: HttpServletRequest
     ): ResponseEntity<List<IptvRequestService.IptvSearchResult>> {
         logger.debug("IPTV search request received - query='{}', type='{}', category='{}', fullQueryString='{}'", 
@@ -70,6 +74,11 @@ class IptvApiController(
         // When parameter is missing (null), default to true. When empty string, treat as false (disabled).
         val fetchFileSizeBool = parseBooleanParameter(fetchFileSize, defaultValue = true)
         logger.debug("Parsed fetchFileSize parameter: '{}' -> {}", fetchFileSize, fetchFileSizeBool)
+        
+        // Parse enhanceMetadata string to boolean, handling Prowlarr's format (e.g., ".True", ".False")
+        // When parameter is missing (null), default to false. When empty string, treat as false (disabled).
+        val enhanceMetadataBool = parseBooleanParameter(enhanceMetadata, defaultValue = false)
+        logger.debug("Parsed enhanceMetadata parameter: '{}' -> {}", enhanceMetadata, enhanceMetadataBool)
         
         // Resolve hostname from IP address
         val remoteAddr = request.remoteAddr
@@ -150,7 +159,7 @@ class IptvApiController(
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
         // Parse limit parameter: if not specified, empty string, or "0", process all results (default behavior)
         val resultLimit = parseLimitParameter(limit)
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool, resultLimit)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool, resultLimit, enhanceMetadataBool)
         
         // For test requests (connectivity tests), only return the first valid result and skip detailed logging
         // This is a connectivity test - we just need to verify IPTV content can be queried.
