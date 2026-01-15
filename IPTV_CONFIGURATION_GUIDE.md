@@ -371,6 +371,15 @@ IPTV_LIVE_FLAT_PROVIDERS=false
 # Optional: Sort channels alphabetically instead of provider order
 # Default: false (uses provider order)
 IPTV_LIVE_SORT_ALPHABETICALLY=false
+
+# Optional: Create VFS entries under /live during sync
+# Default: true (creates VFS entries)
+# Set to false to skip VFS creation (useful for cleaning up categories/channels before they appear in VFS)
+IPTV_LIVE_CREATE_VFS_ENTRIES=true
+
+# Optional: File extension for live channels (per-provider)
+# Default: "ts" (can be "m3u8", "ts", etc.)
+# Example: IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_EXTENSION=ts
 ```
 
 #### Database Filtering (Exclude Only)
@@ -437,23 +446,23 @@ Live channels are **always stored** as `/live/{provider}/{category}/{channel}.{e
 - `{provider}` is the sanitized provider name (prevents collisions between providers)
 - `{category}` is the sanitized category name
 - `{channel}` is the sanitized channel name
-- `{extension}` is the actual media extension from the provider (e.g., `.m3u8`, `.ts`)
+- `{extension}` is the configured extension (defaults to `.ts`, configurable per provider via `IPTV_PROVIDER_{PROVIDER}_LIVE_CHANNEL_EXTENSION`)
 
 **Example paths:**
-- `/live/provider1/Sports/BBC One.m3u8`
-- `/live/provider1/News/CNN.m3u8`
-- `/live/provider2/Sports/ESPN.m3u8`
+- `/live/provider1/Sports/BBC One.ts`
+- `/live/provider1/News/CNN.ts`
+- `/live/provider2/Sports/ESPN.ts`
 
 Two separate options control folder flattening:
 
-- **`IPTV_LIVE_FLAT_CATEGORIES`**: When `true`, hides category folders in provider directories, showing channels directly under provider folders (e.g., `/live/provider1/BBC One.m3u8`)
-- **`IPTV_LIVE_FLAT_PROVIDERS`**: When `true`, hides provider folders in `/live`, showing their contents directly under `/live` (e.g., `/live/Sports/BBC One.m3u8` or `/live/BBC One.m3u8` if categories are also flattened)
+- **`IPTV_LIVE_FLAT_CATEGORIES`**: When `true`, hides category folders in provider directories, showing channels directly under provider folders (e.g., `/live/provider1/BBC One.ts`)
+- **`IPTV_LIVE_FLAT_PROVIDERS`**: When `true`, hides provider folders in `/live`, showing their contents directly under `/live` (e.g., `/live/Sports/BBC One.ts` or `/live/BBC One.ts` if categories are also flattened)
 
 **Presentation Examples:**
-- Both `false`: `/live/provider1/Sports/BBC One.m3u8` (full structure)
-- Only `FLAT_CATEGORIES=true`: `/live/provider1/BBC One.m3u8` (channels directly under provider, categories hidden)
-- Only `FLAT_PROVIDERS=true`: `/live/Sports/BBC One.m3u8` (categories directly under /live, providers hidden)
-- Both `true`: `/live/BBC One.m3u8` (all channels directly under /live, both providers and categories hidden)
+- Both `false`: `/live/provider1/Sports/BBC One.ts` (full structure)
+- Only `FLAT_CATEGORIES=true`: `/live/provider1/BBC One.ts` (channels directly under provider, categories hidden)
+- Only `FLAT_PROVIDERS=true`: `/live/Sports/BBC One.ts` (categories directly under /live, providers hidden)
+- Both `true`: `/live/BBC One.ts` (all channels directly under /live, both providers and categories hidden)
 
 Files are always stored with the full path structure (`/live/{provider}/{category}/{channel}.{extension}`) internally, regardless of presentation options.
 

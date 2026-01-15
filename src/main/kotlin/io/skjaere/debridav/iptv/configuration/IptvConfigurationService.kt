@@ -26,6 +26,7 @@ class IptvConfigurationService(
             val syncEnabled = environment.getProperty("iptv.provider.$providerName.sync-enabled", Boolean::class.java, true)
             val useLocalResponses = environment.getProperty("iptv.provider.$providerName.use-local-responses", Boolean::class.java)
             val liveSyncEnabled = environment.getProperty("iptv.provider.$providerName.live.sync-enabled", Boolean::class.java, false)
+            val liveChannelExtension = environment.getProperty("iptv.provider.$providerName.live.channel-extension", "ts")
 
             // Load live filtering configuration
             val liveDbCategoryExclude = combineIndexedAndCommaSeparated(environment, "iptv.provider.$providerName.live.db.category.exclude")
@@ -58,6 +59,7 @@ class IptvConfigurationService(
                         syncEnabled = syncEnabled,
                         useLocalResponses = useLocalResponses,
                         liveSyncEnabled = liveSyncEnabled,
+                        liveChannelExtension = liveChannelExtension,
                         liveDbCategoryExclude = liveDbCategoryExclude,
                         liveDbCategoryExcludeIndex = liveDbCategoryExcludeIndex,
                         liveDbChannelExclude = liveDbChannelExclude,
@@ -89,6 +91,7 @@ class IptvConfigurationService(
                         syncEnabled = syncEnabled,
                         useLocalResponses = useLocalResponses,
                         liveSyncEnabled = liveSyncEnabled,
+                        liveChannelExtension = liveChannelExtension,
                         liveDbCategoryExclude = liveDbCategoryExclude,
                         liveDbCategoryExcludeIndex = liveDbCategoryExcludeIndex,
                         liveDbChannelExclude = liveDbChannelExclude,

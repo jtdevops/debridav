@@ -311,14 +311,16 @@ class IptvSyncService(
                     // Don't fail the sync if cleanup fails
                 }
                 
-                // Sync live channels to VFS if live is enabled for this provider
-                if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
+                // Sync live channels to VFS if live is enabled for this provider and VFS creation is enabled
+                if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && iptvConfigurationProperties.liveCreateVfsEntries) {
                     try {
                         liveChannelSyncService.syncLiveChannelsToVfs(providerConfig.name)
                     } catch (e: Exception) {
                         logger.error("Error syncing live channels to VFS for provider ${providerConfig.name}", e)
                         // Don't fail the sync if VFS sync fails
                     }
+                } else if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && !iptvConfigurationProperties.liveCreateVfsEntries) {
+                    logger.debug("Skipping VFS sync for provider ${providerConfig.name} - VFS entry creation is disabled")
                 }
             } else {
                 logger.warn("Skipping cleanup for provider ${providerConfig.name} - sync did not complete successfully")
@@ -818,14 +820,31 @@ class IptvSyncService(
                 // Parse categories from in-memory body (reuse cached body even if unchanged)
                 val liveCategories = if (liveCategoriesBody != null) {
                     val categoriesList = xtreamCodesClient.parseLiveCategoriesFromBody(liveCategoriesBody)
-                    // Only sync categories if they changed (hash is not null)
-                    if (liveCategoriesHash != null) {
-                        syncCategories(providerConfig.name, "live", categoriesList.map { it.category_id.toString() to it.category_name })
+                    // Apply database filtering to categories - only sync categories that are not excluded
+                    val filteredCategories = categoriesList.filter { category ->
+                        liveChannelDatabaseFilterService.shouldIncludeCategoryForDatabase(
+                            categoryName = category.category_name,
+                            categoryId = category.category_id.toString(),
+                            config = providerConfig
+                        )
                     }
-                    categoriesList
+                    // Only sync categories if they changed (hash is not null) and after filtering
+                    if (liveCategoriesHash != null) {
+                        syncCategories(providerConfig.name, "live", filteredCategories.map { it.category_id.toString() to it.category_name })
+                    }
+                    // Return filtered categories for stream processing
+                    filteredCategories
                 } else {
                     // Fallback: if body is null (shouldn't happen), fetch them normally
-                    xtreamCodesClient.getLiveCategoriesAsObjects(providerConfig)
+                    val categoriesList = xtreamCodesClient.getLiveCategoriesAsObjects(providerConfig)
+                    // Apply filtering to fallback categories too
+                    categoriesList.filter { category ->
+                        liveChannelDatabaseFilterService.shouldIncludeCategoryForDatabase(
+                            categoryName = category.category_name,
+                            categoryId = category.category_id.toString(),
+                            config = providerConfig
+                        )
+                    }
                 }
                 
                 // Process streams using in-memory body if available
@@ -972,14 +991,31 @@ class IptvSyncService(
                 // Parse categories from in-memory body (body is returned even if hash unchanged, for reuse)
                 val liveCategories = if (liveCategoriesBody != null) {
                     val categoriesList = xtreamCodesClient.parseLiveCategoriesFromBody(liveCategoriesBody)
-                    // Sync categories if they changed (hash is not null) or if forceSync
-                    if (liveCategoriesHash != null || forceSync) {
-                        syncCategories(providerConfig.name, "live", categoriesList.map { it.category_id.toString() to it.category_name })
+                    // Apply database filtering to categories - only sync categories that are not excluded
+                    val filteredCategories = categoriesList.filter { category ->
+                        liveChannelDatabaseFilterService.shouldIncludeCategoryForDatabase(
+                            categoryName = category.category_name,
+                            categoryId = category.category_id.toString(),
+                            config = providerConfig
+                        )
                     }
-                    categoriesList
+                    // Sync categories if they changed (hash is not null) or if forceSync, and after filtering
+                    if (liveCategoriesHash != null || forceSync) {
+                        syncCategories(providerConfig.name, "live", filteredCategories.map { it.category_id.toString() to it.category_name })
+                    }
+                    // Return filtered categories for stream processing
+                    filteredCategories
                 } else {
                     // Fallback: fetch if body is null (shouldn't happen normally)
-                    xtreamCodesClient.getLiveCategoriesAsObjects(providerConfig)
+                    val categoriesList = xtreamCodesClient.getLiveCategoriesAsObjects(providerConfig)
+                    // Apply filtering to fallback categories too
+                    categoriesList.filter { category ->
+                        liveChannelDatabaseFilterService.shouldIncludeCategoryForDatabase(
+                            categoryName = category.category_name,
+                            categoryId = category.category_id.toString(),
+                            config = providerConfig
+                        )
+                    }
                 }
                 
                 // Process streams with database filtering
@@ -1004,15 +1040,17 @@ class IptvSyncService(
                 logger.info("Live content hash unchanged for provider ${providerConfig.name}, skipping database sync")
             }
             
-            // Always sync to VFS if live sync is enabled for this provider (even if database sync was skipped)
+            // Always sync to VFS if live sync is enabled for this provider and VFS creation is enabled
             // This ensures VFS is up to date with current database content
-            if (isLiveSyncEnabled(providerConfig)) {
+            if (isLiveSyncEnabled(providerConfig) && iptvConfigurationProperties.liveCreateVfsEntries) {
                 try {
                     liveChannelSyncService.syncLiveChannelsToVfs(providerConfig.name)
                 } catch (e: Exception) {
                     logger.error("Error syncing live channels to VFS for provider ${providerConfig.name}", e)
                     // Don't fail the sync if VFS sync fails
                 }
+            } else if (isLiveSyncEnabled(providerConfig) && !iptvConfigurationProperties.liveCreateVfsEntries) {
+                logger.debug("Skipping VFS sync for provider ${providerConfig.name} - VFS entry creation is disabled")
             }
             
             // Mark live sync as completed
@@ -1123,13 +1161,17 @@ class IptvSyncService(
             ?: throw IllegalArgumentException("Cannot sync empty content list")
         
         // Query all content for this provider (including inactive) to avoid duplicate key violations
+        // Note: We need ALL content (not filtered by type) because the unique constraint is on (provider_name, content_id)
+        // The same content_id cannot exist twice for the same provider, regardless of content_type
         val allExistingContent = iptvContentRepository.findByProviderName(providerName)
         
-        // Filter to only existing content of the same type being synced
-        // This prevents marking other content types (e.g., MOVIES/SERIES) as inactive when syncing LIVE
-        val existingContent = allExistingContent.filter { it.contentType == contentTypeBeingSynced }
+        // Create a map of ALL existing content by contentId (across all types) to check for duplicates
+        val allExistingMap = allExistingContent.associateBy { it.contentId }.toMutableMap()
         
-        val existingMap = existingContent.associateBy { it.contentId }.toMutableMap()
+        // Filter to only existing content of the same type being synced (for inactive marking)
+        // This prevents marking other content types (e.g., MOVIES/SERIES) as inactive when syncing LIVE
+        val existingContentOfType = allExistingContent.filter { it.contentType == contentTypeBeingSynced }
+        val existingMapOfType = existingContentOfType.associateBy { it.contentId }.toMutableMap()
         
         // Deduplicate contentItems by id to avoid processing the same item twice
         val uniqueContentItems = contentItems.distinctBy { it.id }
@@ -1139,7 +1181,7 @@ class IptvSyncService(
         // Only mark items of the same content type being synced (e.g., only LIVE items when syncing LIVE)
         // This only affects providers that are currently being synced (in iptv.providers list)
         // Providers removed from the config are not synced, so their content remains unchanged
-        val inactiveEntities = existingMap.values.filter { !incomingIds.contains(it.contentId) }
+        val inactiveEntities = existingMapOfType.values.filter { !incomingIds.contains(it.contentId) }
         if (inactiveEntities.isNotEmpty()) {
             inactiveEntities.forEach { existing ->
                 existing.isActive = false
@@ -1159,8 +1201,10 @@ class IptvSyncService(
         // Prepare all entities for batch save
         val entitiesToSave = mutableListOf<IptvContentEntity>()
         uniqueContentItems.forEach { item ->
-            // Check if entity already exists in database or was already processed in this batch
-            val entity = existingMap[item.id] ?: IptvContentEntity().apply {
+            // Check if entity already exists in database (across ALL types, not just current type)
+            // This is necessary because the unique constraint is on (provider_name, content_id) without content_type
+            // If the same content_id exists with a different type, we need to update it, not create a new one
+            val entity = allExistingMap[item.id] ?: IptvContentEntity().apply {
                 this.providerName = providerName
                 this.contentId = item.id
             }
@@ -1194,9 +1238,10 @@ class IptvSyncService(
         // Batch save all entities at once
         if (entitiesToSave.isNotEmpty()) {
             val savedEntities = iptvContentRepository.saveAll(entitiesToSave)
-            // Update the map with saved entities
+            // Update both maps with saved entities
             savedEntities.forEach { saved ->
-                existingMap[saved.contentId] = saved
+                allExistingMap[saved.contentId] = saved
+                existingMapOfType[saved.contentId] = saved
             }
             logger.info("Synced ${entitiesToSave.size} items for provider $providerName")
         }

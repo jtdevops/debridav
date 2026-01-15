@@ -109,6 +109,11 @@ services:
       # - IPTV_PROVIDER_PROVIDER1_LIVE_SYNC_ENABLED=true
       # - IPTV_PROVIDER_PROVIDER2_LIVE_SYNC_ENABLED=false
       
+      # Optional: File extension for live channels (per-provider, defaults to "ts")
+      # Can be "ts", "m3u8", or other extensions depending on provider
+      # - IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_EXTENSION=ts
+      # - IPTV_PROVIDER_PROVIDER2_LIVE_CHANNEL_EXTENSION=m3u8
+      
       # Optional: Separate sync interval for live content (more frequent than VOD/Series)
       # If not set, live content syncs during the main sync interval
       # Format: PT1H (hourly), PT30M (every 30 minutes), etc.
@@ -127,6 +132,11 @@ services:
       # Optional: Sort channels alphabetically instead of provider order
       # Default: false (uses provider order)
       # - IPTV_LIVE_SORT_ALPHABETICALLY=false
+      
+      # Optional: Create VFS entries under /live during sync
+      # Default: true (creates VFS entries)
+      # Set to false to skip VFS creation (useful for cleaning up categories/channels before they appear in VFS)
+      # - IPTV_LIVE_CREATE_VFS_ENTRIES=true
       
       # Database Filtering (Exclude Only - controls what gets synced to database)
       # Exclude categories from database sync (regex supported)

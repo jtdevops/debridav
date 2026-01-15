@@ -50,6 +50,98 @@ class IptvContentService(
             logger.debug("No IPTV language prefixes configured")
         }
     }
+    
+    @PostConstruct
+    fun logLiveFilteringConfiguration() {
+        if (!iptvConfigurationProperties.enabled) {
+            return
+        }
+        
+        val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+            .filter { it.liveSyncEnabled }
+        
+        if (providerConfigs.isEmpty()) {
+            logger.debug("No IPTV providers with live sync enabled - skipping live filtering configuration log")
+            return
+        }
+        
+        providerConfigs.forEach { providerConfig ->
+            val hasDbCategoryExclude = providerConfig.liveDbCategoryExclude?.isNotEmpty() == true || providerConfig.liveDbCategoryExcludeIndex?.isNotEmpty() == true
+            val hasDbChannelExclude = providerConfig.liveDbChannelExclude?.isNotEmpty() == true || providerConfig.liveDbChannelExcludeIndex?.isNotEmpty() == true
+            val hasCategoryInclude = providerConfig.liveCategoryInclude?.isNotEmpty() == true || providerConfig.liveCategoryIncludeIndex?.isNotEmpty() == true
+            val hasCategoryExclude = providerConfig.liveCategoryExclude?.isNotEmpty() == true || providerConfig.liveCategoryExcludeIndex?.isNotEmpty() == true
+            val hasChannelInclude = providerConfig.liveChannelInclude?.isNotEmpty() == true || providerConfig.liveChannelIncludeIndex?.isNotEmpty() == true
+            val hasChannelExclude = providerConfig.liveChannelExclude?.isNotEmpty() == true || providerConfig.liveChannelExcludeIndex?.isNotEmpty() == true
+            
+            if (hasDbCategoryExclude || hasDbChannelExclude || hasCategoryInclude || hasCategoryExclude || hasChannelInclude || hasChannelExclude) {
+                logger.info("IPTV Live filtering configuration for provider '${providerConfig.name}':")
+                
+                // Database filtering (exclude only)
+                if (hasDbCategoryExclude) {
+                    val combined = mutableListOf<String>()
+                    providerConfig.liveDbCategoryExcludeIndex?.let { combined.addAll(it) }
+                    providerConfig.liveDbCategoryExclude?.let { combined.addAll(it) }
+                    logger.info("  Database category exclude patterns: $combined (count: ${combined.size})")
+                    combined.forEachIndexed { index, pattern ->
+                        logger.info("    [$index] '$pattern'")
+                    }
+                }
+                
+                if (hasDbChannelExclude) {
+                    val combined = mutableListOf<String>()
+                    providerConfig.liveDbChannelExcludeIndex?.let { combined.addAll(it) }
+                    providerConfig.liveDbChannelExclude?.let { combined.addAll(it) }
+                    logger.info("  Database channel exclude patterns: $combined (count: ${combined.size})")
+                    combined.forEachIndexed { index, pattern ->
+                        logger.info("    [$index] '$pattern'")
+                    }
+                }
+                
+                // VFS filtering (include/exclude)
+                if (hasCategoryInclude) {
+                    val combined = mutableListOf<String>()
+                    providerConfig.liveCategoryIncludeIndex?.let { combined.addAll(it) }
+                    providerConfig.liveCategoryInclude?.let { combined.addAll(it) }
+                    logger.info("  VFS category include patterns: $combined (count: ${combined.size})")
+                    combined.forEachIndexed { index, pattern ->
+                        logger.info("    [$index] '$pattern'")
+                    }
+                }
+                
+                if (hasCategoryExclude) {
+                    val combined = mutableListOf<String>()
+                    providerConfig.liveCategoryExcludeIndex?.let { combined.addAll(it) }
+                    providerConfig.liveCategoryExclude?.let { combined.addAll(it) }
+                    logger.info("  VFS category exclude patterns: $combined (count: ${combined.size})")
+                    combined.forEachIndexed { index, pattern ->
+                        logger.info("    [$index] '$pattern'")
+                    }
+                }
+                
+                if (hasChannelInclude) {
+                    val combined = mutableListOf<String>()
+                    providerConfig.liveChannelIncludeIndex?.let { combined.addAll(it) }
+                    providerConfig.liveChannelInclude?.let { combined.addAll(it) }
+                    logger.info("  VFS channel include patterns: $combined (count: ${combined.size})")
+                    combined.forEachIndexed { index, pattern ->
+                        logger.info("    [$index] '$pattern'")
+                    }
+                }
+                
+                if (hasChannelExclude) {
+                    val combined = mutableListOf<String>()
+                    providerConfig.liveChannelExcludeIndex?.let { combined.addAll(it) }
+                    providerConfig.liveChannelExclude?.let { combined.addAll(it) }
+                    logger.info("  VFS channel exclude patterns: $combined (count: ${combined.size})")
+                    combined.forEachIndexed { index, pattern ->
+                        logger.info("    [$index] '$pattern'")
+                    }
+                }
+            } else {
+                logger.debug("No IPTV Live filtering configured for provider '${providerConfig.name}'")
+            }
+        }
+    }
 
     fun searchContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true): List<IptvContentEntity> {
         val normalizedTitle = normalizeTitle(title)

@@ -14,6 +14,7 @@ data class IptvProviderConfiguration(
     val syncEnabled: Boolean = true,
     val useLocalResponses: Boolean? = null,
     val liveSyncEnabled: Boolean = false, // Per-provider live sync toggle (default: false, opt-in per provider)
+    val liveChannelExtension: String = "ts", // File extension for live channels (default: "ts", can be "m3u8", "ts", etc.)
     // Database filtering (exclude only - controls what gets synced to database)
     val liveDbCategoryExclude: List<String>? = null,
     val liveDbCategoryExcludeIndex: List<String>? = null,

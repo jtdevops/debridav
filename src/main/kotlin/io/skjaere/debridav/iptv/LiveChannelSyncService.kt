@@ -128,8 +128,8 @@ class LiveChannelSyncService(
                     val sanitizedChannelName = sanitizeFileName(channel.title)
                     val sanitizedProviderName = sanitizeFileName(providerName)
 
-                    // Extract extension from URL or use default
-                    val extension = extractExtensionFromUrl(channel.url) ?: "m3u8"
+                    // Use configured extension (defaults to "ts") or extract from URL if available
+                    val extension = extractExtensionFromUrl(channel.url) ?: providerConfig.liveChannelExtension
 
                     // Construct file path: /live/{provider}/{category}/{channel}.{extension}
                     val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.$extension"
@@ -183,8 +183,8 @@ class LiveChannelSyncService(
         hash: String,
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
     ) {
-        // Extract extension from tokenized URL (before resolution)
-        val extension = extractExtensionFromUrl(channel.url) ?: "m3u8"
+        // Use configured extension (defaults to "ts") or extract from URL if available
+        val extension = extractExtensionFromUrl(channel.url) ?: providerConfig.liveChannelExtension
 
         // Create DebridIptvContent
         val debridIptvContent = DebridIptvContent().apply {
@@ -210,15 +210,13 @@ class LiveChannelSyncService(
 
         debridIptvContent.debridLinks.add(iptvFile)
 
-        // Create virtual file
-        runBlocking {
-            try {
-                databaseFileService.createDebridFile(filePath, hash, debridIptvContent)
-                logger.debug("Created live channel file: $filePath")
-            } catch (e: Exception) {
-                logger.error("Failed to create live channel file: $filePath", e)
-                throw e
-            }
+        // Create virtual file (createDebridFile already uses runBlocking internally, so no need to wrap)
+        try {
+            databaseFileService.createDebridFile(filePath, hash, debridIptvContent)
+            logger.debug("Created live channel file: $filePath")
+        } catch (e: Exception) {
+            logger.error("Failed to create live channel file: $filePath", e)
+            throw e
         }
     }
 
@@ -271,7 +269,11 @@ class LiveChannelSyncService(
                 val sanitizedProviderName = sanitizeFileName(providerName)
                 val sanitizedCategoryName = sanitizeFileName(category.categoryName)
                 val sanitizedChannelName = sanitizeFileName(channel.title)
-                val extension = extractExtensionFromUrl(channel.url) ?: "m3u8"
+                
+                // Get provider config for extension
+                val providerConfig = iptvConfigurationService.getProviderConfigurations()
+                    .find { it.name == providerName }
+                val extension = extractExtensionFromUrl(channel.url) ?: (providerConfig?.liveChannelExtension ?: "ts")
                 val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.$extension"
 
                 val existingFile = databaseFileService.getFileAtPath(filePath)
