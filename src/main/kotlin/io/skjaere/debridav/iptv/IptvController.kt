@@ -32,8 +32,8 @@ class IptvController(
             return ResponseEntity.badRequest().body(mapOf("status" to "error", "message" to "IPTV Live is disabled"))
         }
         logger.info("Manual IPTV live sync triggered")
-        // Trigger live-only sync for all providers
-        iptvSyncService.syncLiveContentOnly()
+        // Trigger live-only sync for all providers (force sync to bypass interval check)
+        iptvSyncService.syncLiveContentOnly(forceSync = true)
         return ResponseEntity.ok(mapOf("status" to "live sync triggered"))
     }
 

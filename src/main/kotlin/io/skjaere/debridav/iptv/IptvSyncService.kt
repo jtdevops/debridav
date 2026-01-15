@@ -68,6 +68,14 @@ class IptvSyncService(
         fixedDelayString = "\${iptv.live.sync-interval:PT8760H}"
     )
     fun syncLiveContentOnly() {
+        syncLiveContentOnly(forceSync = false)
+    }
+    
+    /**
+     * Syncs live content only (can be called manually via API or scheduled)
+     * @param forceSync If true, bypasses sync interval check and forces sync regardless of last sync time
+     */
+    fun syncLiveContentOnly(forceSync: Boolean = false) {
         // Check if /live folder is enabled (for visibility)
         // But actual sync is controlled by per-provider live.sync-enabled
         if (!iptvConfigurationProperties.liveEnabled) {
@@ -75,13 +83,14 @@ class IptvSyncService(
         }
         
         val liveSyncInterval = iptvConfigurationProperties.liveSyncInterval
-        if (liveSyncInterval == null) {
+        if (liveSyncInterval == null && !forceSync) {
             // If no separate interval configured, live syncs during main sync
             // This scheduled method will still run but returns early
+            // Unless forceSync is true (manual trigger)
             return
         }
         
-        logger.info("Starting IPTV live content sync (independent sync)")
+        logger.info("Starting IPTV live content sync${if (forceSync) " (forced)" else " (independent sync)"}")
         
         // Only sync providers that have live sync explicitly enabled (opt-in)
         val providerConfigs = iptvConfigurationService.getProviderConfigurations()
@@ -95,7 +104,7 @@ class IptvSyncService(
         runBlocking {
             providerConfigs.forEach { providerConfig ->
                 try {
-                    syncLiveContentOnly(providerConfig)
+                    syncLiveContentOnly(providerConfig, forceSync)
                 } catch (e: Exception) {
                     logger.error("Error syncing live content for IPTV provider ${providerConfig.name}", e)
                 }
@@ -613,6 +622,8 @@ class IptvSyncService(
             "vod_streams" -> "get_vod_streams"
             "series_categories" -> "get_series_categories"
             "series_streams" -> "get_series"
+            "live_categories" -> "get_live_categories"
+            "live_streams" -> "get_live_streams"
             else -> {
                 logger.warn("Unknown endpoint type: $endpointType")
                 return null to null
@@ -889,19 +900,21 @@ class IptvSyncService(
 
     /**
      * Syncs live content only (independent sync, not part of main sync)
+     * @param forceSync If true, bypasses sync interval check and forces sync regardless of last sync time
      */
     private suspend fun syncLiveContentOnly(
-        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration,
+        forceSync: Boolean = false
     ) {
-        logger.info("Syncing live content only for provider: ${providerConfig.name}")
+        logger.info("Syncing live content only for provider: ${providerConfig.name}${if (forceSync) " (forced)" else ""}")
         
         // Check for interrupted syncs for live endpoints
         val interruptedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusInProgress(providerConfig.name)
             .filter { it.endpointType in listOf("live_categories", "live_streams") }
         if (interruptedSyncs.isNotEmpty()) {
             logger.info("Provider ${providerConfig.name} has ${interruptedSyncs.size} interrupted live sync(s), will resync immediately")
-        } else {
-            // Check per-provider timing for live sync
+        } else if (!forceSync) {
+            // Check per-provider timing for live sync (skip if forceSync is true)
             val liveSyncInterval = iptvConfigurationProperties.liveSyncInterval
             if (liveSyncInterval != null) {
                 val mostRecentLiveSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
@@ -923,6 +936,8 @@ class IptvSyncService(
                     }
                 }
             }
+        } else {
+            logger.info("Provider ${providerConfig.name} live sync forced via API, bypassing time interval check")
         }
         
         // Mark live sync as in progress
@@ -948,19 +963,22 @@ class IptvSyncService(
             // Fetch and check live streams hash
             val (liveStreamsBody, liveStreamsHash) = checkSingleEndpointHash(providerConfig, "live_streams")
             
-            // Process live group if either changed
-            if (liveCategoriesBody != null || liveStreamsBody != null) {
-                logger.debug("Syncing live content for provider ${providerConfig.name}")
+            // Process live group if either changed, or if forceSync is true (force sync even if hash unchanged)
+            val shouldSync = liveCategoriesBody != null || liveStreamsBody != null || forceSync
+            
+            if (shouldSync) {
+                logger.debug("Syncing live content for provider ${providerConfig.name}${if (forceSync && liveCategoriesHash == null && liveStreamsHash == null) " (forced, hash unchanged)" else ""}")
                 
-                // Parse categories from in-memory body
+                // Parse categories from in-memory body (body is returned even if hash unchanged, for reuse)
                 val liveCategories = if (liveCategoriesBody != null) {
                     val categoriesList = xtreamCodesClient.parseLiveCategoriesFromBody(liveCategoriesBody)
-                    // Only sync categories if they changed
-                    if (liveCategoriesHash != null) {
+                    // Sync categories if they changed (hash is not null) or if forceSync
+                    if (liveCategoriesHash != null || forceSync) {
                         syncCategories(providerConfig.name, "live", categoriesList.map { it.category_id.toString() to it.category_name })
                     }
                     categoriesList
                 } else {
+                    // Fallback: fetch if body is null (shouldn't happen normally)
                     xtreamCodesClient.getLiveCategoriesAsObjects(providerConfig)
                 }
                 
@@ -971,7 +989,7 @@ class IptvSyncService(
                     syncContentToDatabase(providerConfig.name, liveContent)
                 }
                 
-                // Update hashes after successful processing
+                // Update hashes after successful processing (only if hash changed)
                 if (liveCategoriesHash != null) {
                     val categoriesSize = liveCategoriesBody?.length?.toLong()
                     updateSyncHash(providerConfig.name, "live_categories", liveCategoriesHash, categoriesSize)
@@ -983,7 +1001,18 @@ class IptvSyncService(
                 
                 logger.info("Successfully synced live content for provider ${providerConfig.name} (${liveContent.size} items)")
             } else {
-                logger.info("Live content hash unchanged for provider ${providerConfig.name}, skipping sync")
+                logger.info("Live content hash unchanged for provider ${providerConfig.name}, skipping database sync")
+            }
+            
+            // Always sync to VFS if live sync is enabled for this provider (even if database sync was skipped)
+            // This ensures VFS is up to date with current database content
+            if (isLiveSyncEnabled(providerConfig)) {
+                try {
+                    liveChannelSyncService.syncLiveChannelsToVfs(providerConfig.name)
+                } catch (e: Exception) {
+                    logger.error("Error syncing live channels to VFS for provider ${providerConfig.name}", e)
+                    // Don't fail the sync if VFS sync fails
+                }
             }
             
             // Mark live sync as completed
@@ -1088,8 +1117,17 @@ class IptvSyncService(
         contentItems: List<io.skjaere.debridav.iptv.model.IptvContentItem>
     ) {
         val now = Instant.now()
+        
+        // Determine the content type being synced (all items should be the same type)
+        val contentTypeBeingSynced = contentItems.firstOrNull()?.type
+            ?: throw IllegalArgumentException("Cannot sync empty content list")
+        
         // Query all content for this provider (including inactive) to avoid duplicate key violations
-        val existingContent = iptvContentRepository.findByProviderName(providerName)
+        val allExistingContent = iptvContentRepository.findByProviderName(providerName)
+        
+        // Filter to only existing content of the same type being synced
+        // This prevents marking other content types (e.g., MOVIES/SERIES) as inactive when syncing LIVE
+        val existingContent = allExistingContent.filter { it.contentType == contentTypeBeingSynced }
         
         val existingMap = existingContent.associateBy { it.contentId }.toMutableMap()
         
@@ -1098,6 +1136,7 @@ class IptvSyncService(
         val incomingIds = uniqueContentItems.map { it.id }.toSet()
         
         // Mark content as inactive if it's no longer available in the provider's source
+        // Only mark items of the same content type being synced (e.g., only LIVE items when syncing LIVE)
         // This only affects providers that are currently being synced (in iptv.providers list)
         // Providers removed from the config are not synced, so their content remains unchanged
         val inactiveEntities = existingMap.values.filter { !incomingIds.contains(it.contentId) }
