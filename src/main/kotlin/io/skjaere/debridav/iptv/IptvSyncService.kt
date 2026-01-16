@@ -23,6 +23,9 @@ import java.io.File
 import java.text.Normalizer
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 
 @Service
 class IptvSyncService(
@@ -41,6 +44,16 @@ class IptvSyncService(
     private val logger = LoggerFactory.getLogger(IptvSyncService::class.java)
     private val m3uParser = M3uParser()
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
+    
+    // Track if initial sequential sync has completed (VOS/SERIES then LIVE)
+    private val initialSequentialSyncCompleted = AtomicBoolean(false)
+    
+    // Lock to ensure only one IPTV sync runs at a time (prevents collisions between VOD/SERIES and LIVE syncs)
+    private val syncLock = ReentrantLock()
+    
+    // Track pending syncs that were skipped due to another sync in progress
+    // Values: null (no pending), "vod_series", "live", or "both"
+    private val pendingSync = AtomicReference<String?>(null)
 
     /**
      * Checks if live sync is enabled for a provider.
@@ -55,7 +68,19 @@ class IptvSyncService(
         fixedDelayString = "\${iptv.sync-interval}"
     )
     fun syncIptvContent() {
-        syncIptvContent(forceSync = false)
+        // Try to acquire lock - if another sync is running, mark as pending and skip
+        if (!syncLock.tryLock()) {
+            logger.info("Skipping scheduled IPTV content sync - another sync is already in progress. Will trigger when current sync completes.")
+            markPendingSync("vod_series")
+            return
+        }
+        try {
+            syncIptvContent(forceSync = false, skipLockCheck = true)
+        } finally {
+            syncLock.unlock()
+            // Check and trigger any pending syncs after releasing the lock
+            triggerPendingSyncs()
+        }
     }
 
     /**
@@ -63,20 +88,41 @@ class IptvSyncService(
      * This allows live content to sync more frequently than VOD/Series content
      * Note: This scheduled method will run, but returns early if liveSyncInterval is not configured
      * Uses a very long default interval (1 year) so it effectively doesn't run unless configured
+     * 
+     * On startup, this is skipped to allow sequential execution (VOS/SERIES first, then LIVE).
+     * After initial sequential sync completes, this runs on its own schedule.
      */
     @Scheduled(
-        initialDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('iptv.initial-sync-delay', 'PT30S')).plusSeconds(60).toMillis()}",
+        initialDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('iptv.initial-sync-delay', 'PT30S')).toMillis()}",
         fixedDelayString = "\${iptv.live.sync-interval:PT8760H}"
     )
     fun syncLiveContentOnly() {
-        syncLiveContentOnly(forceSync = false)
+        // Skip scheduled execution on first run - it will be triggered sequentially after VOS/SERIES sync
+        if (!initialSequentialSyncCompleted.get()) {
+            logger.debug("Skipping scheduled live sync - waiting for initial sequential sync to complete")
+            return
+        }
+        // Try to acquire lock - if another sync is running, mark as pending and skip
+        if (!syncLock.tryLock()) {
+            logger.info("Skipping scheduled IPTV live content sync - another sync is already in progress. Will trigger when current sync completes.")
+            markPendingSync("live")
+            return
+        }
+        try {
+            syncLiveContentOnly(forceSync = false, skipLockCheck = true)
+        } finally {
+            syncLock.unlock()
+            // Check and trigger any pending syncs after releasing the lock
+            triggerPendingSyncs()
+        }
     }
     
     /**
      * Syncs live content only (can be called manually via API or scheduled)
      * @param forceSync If true, bypasses sync interval check and forces sync regardless of last sync time
+     * @param skipLockCheck If true, skips the lock check (used when called from within syncIptvContent to avoid double-locking)
      */
-    fun syncLiveContentOnly(forceSync: Boolean = false) {
+    fun syncLiveContentOnly(forceSync: Boolean = false, skipLockCheck: Boolean = false) {
         // Check if /live folder is enabled (for visibility)
         // But actual sync is controlled by per-provider live.sync-enabled
         if (!iptvConfigurationProperties.liveEnabled) {
@@ -91,98 +137,235 @@ class IptvSyncService(
             return
         }
         
-        logger.info("Starting IPTV live content sync${if (forceSync) " (forced)" else " (independent sync)"}")
+        // Acquire lock if not already held (skip if called from within syncIptvContent)
+        val lockAcquired = if (skipLockCheck || syncLock.isHeldByCurrentThread) {
+            true
+        } else {
+            syncLock.tryLock()
+        }
         
-        // Only sync providers that have live sync explicitly enabled (opt-in)
-        val providerConfigs = iptvConfigurationService.getProviderConfigurations()
-            .filter { it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && it.syncEnabled && isLiveSyncEnabled(it) }
-        
-        if (providerConfigs.isEmpty()) {
-            logger.debug("No Xtream Codes providers configured for live sync")
+        if (!lockAcquired) {
+            logger.info("Skipping IPTV live content sync - another sync is already in progress. Will trigger when current sync completes.")
+            markPendingSync("live")
             return
         }
         
-        runBlocking {
-            providerConfigs.forEach { providerConfig ->
-                try {
-                    syncLiveContentOnly(providerConfig, forceSync)
-                } catch (e: Exception) {
-                    logger.error("Error syncing live content for IPTV provider ${providerConfig.name}", e)
+        try {
+            logger.info("Starting IPTV live content sync${if (forceSync) " (forced)" else " (independent sync)"}")
+            
+            // Only sync providers that have live sync explicitly enabled (opt-in)
+            val providerConfigs = iptvConfigurationService.getProviderConfigurations()
+                .filter { it.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && it.syncEnabled && isLiveSyncEnabled(it) }
+            
+            if (providerConfigs.isEmpty()) {
+                logger.debug("No Xtream Codes providers configured for live sync")
+                return
+            }
+            
+            // Sync providers sequentially (one at a time) to prevent concurrent provider syncs
+            // The syncLock ensures only one sync type (VOD/SERIES or LIVE) runs at a time,
+            // and this forEach ensures providers within a sync type don't run concurrently
+            runBlocking {
+                providerConfigs.forEach { providerConfig ->
+                    try {
+                        syncLiveContentOnly(providerConfig, forceSync)
+                    } catch (e: Exception) {
+                        logger.error("Error syncing live content for IPTV provider ${providerConfig.name}", e)
+                    }
                 }
             }
+            
+            logger.info("IPTV live content sync completed")
+        } finally {
+            // Only release lock if we acquired it (not if it was already held)
+            if (!skipLockCheck) {
+                syncLock.unlock()
+                // Check and trigger any pending syncs after releasing the lock
+                triggerPendingSyncs()
+            }
         }
-        
-        logger.info("IPTV live content sync completed")
     }
 
-    fun syncIptvContent(forceSync: Boolean = false) {
+    fun syncIptvContent(forceSync: Boolean = false, skipLockCheck: Boolean = false) {
         if (!iptvConfigurationProperties.enabled) {
             logger.debug("IPTV sync skipped - IPTV is disabled")
             return
         }
 
-        logger.info("Starting IPTV content sync${if (forceSync) " (forced)" else ""}")
+        // Acquire lock if not already held (skip if called from scheduled method which already holds it)
+        val lockAcquired = if (skipLockCheck || syncLock.isHeldByCurrentThread) {
+            true
+        } else {
+            syncLock.tryLock()
+        }
         
-        // Check for interrupted syncs from previous run
-        checkAndResumeInterruptedSyncs()
-        
-        val providerConfigs = iptvConfigurationService.getProviderConfigurations()
-
-        if (providerConfigs.isEmpty()) {
-            logger.warn("No IPTV providers configured")
+        if (!lockAcquired) {
+            logger.info("Skipping IPTV content sync - another sync is already in progress. Will trigger when current sync completes.")
+            markPendingSync("vod_series")
             return
         }
+        
+        try {
+            logger.info("Starting IPTV content sync${if (forceSync) " (forced)" else ""}")
+            
+            // Check for interrupted syncs from previous run
+            checkAndResumeInterruptedSyncs()
+            
+            val providerConfigs = iptvConfigurationService.getProviderConfigurations()
 
-        val syncInterval = iptvConfigurationProperties.syncInterval
+            if (providerConfigs.isEmpty()) {
+                logger.warn("No IPTV providers configured")
+                return
+            }
 
-        runBlocking {
-            providerConfigs.forEach { providerConfig ->
-                if (!providerConfig.syncEnabled) {
-                    logger.debug("Skipping sync for provider ${providerConfig.name} (sync disabled)")
-                    return@forEach
-                }
-                
-                // Check for interrupted syncs for this provider - if found, resync immediately
-                val interruptedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusInProgress(providerConfig.name)
-                if (interruptedSyncs.isNotEmpty()) {
-                    logger.info("Provider ${providerConfig.name} has ${interruptedSyncs.size} interrupted sync(s), will resync immediately")
-                } else {
-                    // Check for failed syncs - if found, resync immediately (bypass timer)
-                    val failedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusFailed(providerConfig.name)
-                    if (failedSyncs.isNotEmpty()) {
-                        logger.info("Provider ${providerConfig.name} has ${failedSyncs.size} failed sync(s), will resync immediately")
+            val syncInterval = iptvConfigurationProperties.syncInterval
+
+            // Sync providers sequentially (one at a time) to prevent concurrent provider syncs
+            // The syncLock ensures only one sync type (VOD/SERIES or LIVE) runs at a time,
+            // and this forEach ensures providers within a sync type don't run concurrently
+            runBlocking {
+                providerConfigs.forEach { providerConfig ->
+                    if (!providerConfig.syncEnabled) {
+                        logger.debug("Skipping sync for provider ${providerConfig.name} (sync disabled)")
+                        return@forEach
+                    }
+                    
+                    // Check for interrupted syncs for this provider - if found, resync immediately
+                    val interruptedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusInProgress(providerConfig.name)
+                    if (interruptedSyncs.isNotEmpty()) {
+                        logger.info("Provider ${providerConfig.name} has ${interruptedSyncs.size} interrupted sync(s), will resync immediately")
                     } else {
-                        // Skip time interval check if forceSync is true
-                        if (!forceSync) {
-                            // Check per-provider timing instead of global timing
-                            // This allows new providers to sync immediately even if other providers were synced recently
-                            val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
-                            if (mostRecentSync != null) {
-                                val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
-                                
-                                if (timeSinceLastSync < syncInterval) {
-                                    val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
-                                    logger.info("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
-                                    return@forEach
+                        // Check for failed syncs - if found, resync immediately (bypass timer)
+                        val failedSyncs = iptvSyncHashRepository.findByProviderNameAndSyncStatusFailed(providerConfig.name)
+                        if (failedSyncs.isNotEmpty()) {
+                            logger.info("Provider ${providerConfig.name} has ${failedSyncs.size} failed sync(s), will resync immediately")
+                        } else {
+                            // Skip time interval check if forceSync is true
+                            if (!forceSync) {
+                                // Check per-provider timing instead of global timing
+                                // This allows new providers to sync immediately even if other providers were synced recently
+                                val mostRecentSync = iptvSyncHashRepository.findMostRecentLastCheckedByProvider(providerConfig.name)
+                                if (mostRecentSync != null) {
+                                    val timeSinceLastSync = Duration.between(mostRecentSync, Instant.now())
+                                    
+                                    if (timeSinceLastSync < syncInterval) {
+                                        val timeUntilNextSync = syncInterval.minus(timeSinceLastSync)
+                                        logger.info("Skipping sync for provider ${providerConfig.name} - only ${formatDuration(timeSinceLastSync)} since last sync. Next sync in ${formatDuration(timeUntilNextSync)}")
+                                        return@forEach
+                                    }
+                                } else {
+                                    logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
                                 }
                             } else {
-                                logger.info("Provider ${providerConfig.name} has no sync history, will sync immediately")
+                                logger.info("Provider ${providerConfig.name} sync forced via API, bypassing time interval check")
                             }
-                        } else {
-                            logger.info("Provider ${providerConfig.name} sync forced via API, bypassing time interval check")
                         }
                     }
-                }
-                
-                try {
-                    syncProvider(providerConfig)
-                } catch (e: Exception) {
-                    logger.error("Error syncing IPTV provider ${providerConfig.name}", e)
+                    
+                    try {
+                        syncProvider(providerConfig)
+                    } catch (e: Exception) {
+                        logger.error("Error syncing IPTV provider ${providerConfig.name}", e)
+                    }
                 }
             }
-        }
 
-        logger.info("IPTV content sync completed")
+            logger.info("IPTV content sync completed")
+            
+            // On first run, trigger live sync sequentially after VOS/SERIES sync completes
+            // Pass skipLockCheck=true since we already hold the lock
+            if (!initialSequentialSyncCompleted.get()) {
+                val liveSyncInterval = iptvConfigurationProperties.liveSyncInterval
+                if (liveSyncInterval != null && iptvConfigurationProperties.liveEnabled) {
+                    logger.info("Initial sequential sync: triggering live content sync after VOS/SERIES sync completion")
+                    try {
+                        syncLiveContentOnly(forceSync = false, skipLockCheck = true)
+                    } catch (e: Exception) {
+                        logger.error("Error during initial sequential live sync", e)
+                    }
+                }
+                // Mark initial sequential sync as completed - from now on, both syncs run on their own schedules
+                initialSequentialSyncCompleted.set(true)
+                logger.info("Initial sequential sync completed - syncs will now run on their own schedules")
+            }
+        } finally {
+            // Only release lock if we acquired it (not if it was already held)
+            if (!skipLockCheck) {
+                syncLock.unlock()
+                // Check and trigger any pending syncs after releasing the lock
+                triggerPendingSyncs()
+            }
+        }
+    }
+    
+    /**
+     * Marks a sync type as pending (will be triggered when current sync completes)
+     */
+    private fun markPendingSync(syncType: String) {
+        pendingSync.updateAndGet { current ->
+            when (current) {
+                null -> syncType
+                syncType -> current // Already marked, keep it
+                else -> "both" // Both types are pending
+            }
+        }
+    }
+    
+    /**
+     * Triggers any pending syncs that were skipped due to another sync in progress.
+     * This ensures we don't miss syncs when schedules collide.
+     * 
+     * Note: This method should only be called when the lock is NOT held (after a sync completes).
+     */
+    private fun triggerPendingSyncs() {
+        val pending = pendingSync.getAndSet(null)
+        if (pending == null) {
+            return
+        }
+        
+        // Try to acquire lock to run pending syncs
+        if (!syncLock.tryLock()) {
+            // Lock is held (shouldn't happen since we just released it, but handle gracefully)
+            logger.debug("Could not acquire lock for pending syncs, will retry on next completion")
+            pendingSync.set(pending) // Restore pending state
+            return
+        }
+        
+        try {
+            when (pending) {
+                "vod_series" -> {
+                    logger.info("Triggering pending VOD/SERIES sync that was skipped earlier")
+                    syncIptvContent(forceSync = false, skipLockCheck = true)
+                }
+                "live" -> {
+                    logger.info("Triggering pending LIVE sync that was skipped earlier")
+                    syncLiveContentOnly(forceSync = false, skipLockCheck = true)
+                }
+                "both" -> {
+                    // Both are pending - run VOD/SERIES first, then LIVE
+                    logger.info("Triggering pending VOD/SERIES sync that was skipped earlier")
+                    syncIptvContent(forceSync = false, skipLockCheck = true)
+                    // After VOD/SERIES completes, check if LIVE is still needed
+                    // (it might have been cleared if it was the initial sequential sync)
+                    val stillPending = pendingSync.get()
+                    if (stillPending == "live" || stillPending == "both") {
+                        logger.info("Triggering pending LIVE sync that was skipped earlier")
+                        syncLiveContentOnly(forceSync = false, skipLockCheck = true)
+                        pendingSync.set(null) // Clear after both are done
+                    }
+                }
+            }
+        } finally {
+            syncLock.unlock()
+            // Check for any new pending syncs that might have been queued while we were running
+            // (e.g., if a scheduled sync fired while we were running pending syncs)
+            // Only check once to avoid infinite recursion
+            val newPending = pendingSync.get()
+            if (newPending != null) {
+                logger.debug("New pending sync detected after completing previous pending sync, will trigger")
+                triggerPendingSyncs()
+            }
+        }
     }
 
     /**
