@@ -311,6 +311,17 @@ class IptvSyncService(
                     // Don't fail the sync if cleanup fails
                 }
                 
+                // Cleanup inactive Movies and Series categories and content
+                try {
+                    val (deletedCategories, deletedContent) = iptvContentService.deleteInactiveMoviesAndSeriesCategoriesAndContentForProvider(providerConfig.name)
+                    if (deletedCategories > 0 || deletedContent > 0) {
+                        logger.info("Cleaned up $deletedCategories inactive Movies/Series categories and $deletedContent content items for provider ${providerConfig.name} after successful sync")
+                    }
+                } catch (e: Exception) {
+                    logger.error("Error during cleanup of inactive Movies/Series categories and content for provider ${providerConfig.name}", e)
+                    // Don't fail the sync if cleanup fails
+                }
+                
                 // Sync live channels to VFS if live is enabled for this provider and VFS creation is enabled
                 if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && iptvConfigurationProperties.liveCreateVfsEntries) {
                     try {
@@ -1023,6 +1034,9 @@ class IptvSyncService(
                 
                 if (liveContent.isNotEmpty()) {
                     syncContentToDatabase(providerConfig.name, liveContent)
+                    
+                    // Update existing live content URLs to use the correct extension
+                    updateExistingLiveContentUrls(providerConfig.name, providerConfig.liveChannelExtension)
                 }
                 
                 // Update hashes after successful processing (only if hash changed)
@@ -1038,6 +1052,17 @@ class IptvSyncService(
                 logger.info("Successfully synced live content for provider ${providerConfig.name} (${liveContent.size} items)")
             } else {
                 logger.info("Live content hash unchanged for provider ${providerConfig.name}, skipping database sync")
+            }
+            
+            // Cleanup inactive live categories and their associated streams after sync
+            try {
+                val (deletedCategories, deletedStreams) = iptvContentService.deleteInactiveLiveCategoriesAndStreamsForProvider(providerConfig.name)
+                if (deletedCategories > 0 || deletedStreams > 0) {
+                    logger.info("Cleaned up $deletedCategories inactive live categories and $deletedStreams associated live streams for provider ${providerConfig.name} after sync")
+                }
+            } catch (e: Exception) {
+                logger.error("Error during cleanup of inactive live categories and streams for provider ${providerConfig.name}", e)
+                // Don't fail the sync if cleanup fails
             }
             
             // Always sync to VFS if live sync is enabled for this provider and VFS creation is enabled
@@ -1160,6 +1185,10 @@ class IptvSyncService(
         val contentTypeBeingSynced = contentItems.firstOrNull()?.type
             ?: throw IllegalArgumentException("Cannot sync empty content list")
         
+        // Get provider config for URL extension updates (for live content)
+        val providerConfig = iptvConfigurationService.getProviderConfigurations()
+            .find { it.name == providerName }
+        
         // Query all content for this provider (including inactive) to avoid duplicate key violations
         // Note: We need ALL content (not filtered by type) because the unique constraint is on (provider_name, content_id)
         // The same content_id cannot exist twice for the same provider, regardless of content_type
@@ -1219,7 +1248,15 @@ class IptvSyncService(
             // Update entity properties
             entity.title = item.title
             entity.normalizedTitle = iptvContentService.normalizeTitle(item.title)
-            entity.url = item.url
+            
+            // For live content, ensure URL uses the configured extension
+            val urlToStore = if (item.type == ContentType.LIVE && providerConfig != null) {
+                updateLiveUrlExtension(item.url, providerConfig.liveChannelExtension)
+            } else {
+                item.url
+            }
+            entity.url = urlToStore
+            
             entity.contentType = item.type
             entity.category = category
             entity.seriesInfo = item.episodeInfo?.let {
@@ -1244,6 +1281,61 @@ class IptvSyncService(
                 existingMapOfType[saved.contentId] = saved
             }
             logger.info("Synced ${entitiesToSave.size} items for provider $providerName")
+        }
+    }
+    
+    /**
+     * Updates the extension in a live content URL to match the configured extension.
+     * URLs are in format: {BASE_URL}/live/{USERNAME}/{PASSWORD}/{stream_id}.{extension}
+     * This replaces the extension part with the configured extension.
+     * Handles both tokenized URLs (with {BASE_URL}, {USERNAME}, {PASSWORD}) and resolved URLs.
+     */
+    private fun updateLiveUrlExtension(tokenizedUrl: String, configuredExtension: String): String {
+        // Pattern to match: /live/{anything}/{anything}/{stream_id}.{old_extension}
+        // This handles both tokenized URLs ({BASE_URL}/live/{USERNAME}/...) and resolved URLs
+        // The pattern matches: /live/ followed by two path segments, then stream_id, then extension
+        val pattern = Regex("""(/live/[^/]+/[^/]+/\d+)\.([a-zA-Z0-9]+)(\?.*)?$""")
+        
+        return if (pattern.containsMatchIn(tokenizedUrl)) {
+            pattern.replace(tokenizedUrl) { matchResult ->
+                val beforeExtension = matchResult.groupValues[1]
+                val queryParams = matchResult.groupValues.getOrNull(3) ?: ""
+                "$beforeExtension.$configuredExtension$queryParams"
+            }
+        } else {
+            // If pattern doesn't match, return URL as-is (shouldn't happen for valid live URLs)
+            logger.warn("Could not update extension in live URL (pattern didn't match): $tokenizedUrl")
+            tokenizedUrl
+        }
+    }
+    
+    /**
+     * Updates existing live content URLs in the database to use the configured extension.
+     * This ensures that URLs that were previously synced with a different extension are updated.
+     */
+    private fun updateExistingLiveContentUrls(providerName: String, configuredExtension: String) {
+        val existingLiveContent = iptvContentRepository.findByProviderName(providerName)
+            .filter { it.contentType == ContentType.LIVE && it.isActive }
+        
+        if (existingLiveContent.isEmpty()) {
+            return
+        }
+        
+        var updatedCount = 0
+        val contentToUpdate = mutableListOf<IptvContentEntity>()
+        
+        existingLiveContent.forEach { content ->
+            val updatedUrl = updateLiveUrlExtension(content.url, configuredExtension)
+            if (updatedUrl != content.url) {
+                content.url = updatedUrl
+                contentToUpdate.add(content)
+                updatedCount++
+            }
+        }
+        
+        if (contentToUpdate.isNotEmpty()) {
+            iptvContentRepository.saveAll(contentToUpdate)
+            logger.debug("Updated $updatedCount existing live content URLs to use extension '$configuredExtension' for provider $providerName")
         }
     }
     

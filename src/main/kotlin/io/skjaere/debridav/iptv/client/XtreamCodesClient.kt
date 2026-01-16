@@ -779,7 +779,8 @@ class XtreamCodesClient(
                 
                 // Construct stream URL from available fields
                 // Xtream Codes format: {baseUrl}/live/{username}/{password}/{stream_id}.{extension}
-                val extension = stream.container_extension ?: "m3u8"
+                // Use configured extension (defaults to "ts") instead of container_extension from API
+                val extension = providerConfig.liveChannelExtension
                 val streamUrl = "$baseUrl/live/$username/$password/${stream.stream_id}.$extension"
                 
                 // Tokenize URL

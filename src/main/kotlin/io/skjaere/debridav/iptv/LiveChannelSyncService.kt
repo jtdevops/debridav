@@ -4,6 +4,7 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.IptvFile
+import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.model.ContentType
@@ -23,7 +24,7 @@ class LiveChannelSyncService(
     private val databaseFileService: DatabaseFileService,
     private val liveChannelFilterService: LiveChannelFilterService,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
-    private val debridFileRepository: DebridFileContentsRepository
+    private val debridFileContentsRepository: DebridFileContentsRepository
 ) {
     private val logger = LoggerFactory.getLogger(LiveChannelSyncService::class.java)
 
@@ -168,7 +169,12 @@ class LiveChannelSyncService(
         }
 
         // Remove stale channels (channels that are no longer in the filtered list)
-        removeStaleLiveChannels(providerName, activeChannelIds)
+        // This includes channels excluded by VFS filtering, even if they're active in database
+        removeStaleLiveChannels(providerName, activeChannelIds, providerConfig)
+        
+        // Clean up empty category directories after removing stale channels
+        // Use active categories from filtered channels
+        cleanupEmptyLiveCategoryDirectories(providerName, channelsByCategory.keys, providerConfig)
 
         logger.info("Live channel VFS sync completed for provider $providerName: created=$createdCount, updated=$updatedCount, errors=$errorCount")
     }
@@ -243,23 +249,68 @@ class LiveChannelSyncService(
     }
 
     /**
-     * Removes stale live channels from VFS (channels no longer in the active list)
+     * Removes stale live channels from VFS.
+     * This includes:
+     * 1. Channels that are no longer in the active filtered list (excluded by VFS filtering)
+     * 2. Channels that are inactive in the database
+     * 
+     * @param providerName Provider name
+     * @param activeChannelIds Set of channel IDs that passed VFS filtering and should remain in VFS
+     * @param providerConfig Provider configuration for VFS filtering rules
      */
-    private fun removeStaleLiveChannels(providerName: String, activeChannelIds: Set<String>) {
-        // Get all live channels from database for this provider
+    private fun removeStaleLiveChannels(
+        providerName: String, 
+        activeChannelIds: Set<String>,
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
+    ) {
+        // Get all live channels from database for this provider (including inactive)
         val allLiveChannels = iptvContentRepository.findByProviderName(providerName)
             .filter { it.contentType == ContentType.LIVE }
 
-        // Find channels that are no longer active
-        val staleChannels = allLiveChannels.filter { it.contentId !in activeChannelIds }
+        // Find channels that should be removed from VFS:
+        // 1. Channels not in activeChannelIds (excluded by VFS filtering or inactive)
+        // 2. Also check all channels against VFS filtering to catch any edge cases
+        val channelsToRemove = allLiveChannels.filter { channel ->
+            // Remove if not in active list
+            if (channel.contentId !in activeChannelIds) {
+                return@filter true
+            }
+            
+            // Double-check VFS filtering for channels in active list (in case filtering rules changed)
+            val category = channel.category
+            if (category == null) {
+                return@filter true // No category = exclude
+            }
+            
+            // Check category filtering
+            val includeCategory = liveChannelFilterService.shouldIncludeCategory(
+                categoryName = category.categoryName,
+                categoryId = category.categoryId,
+                config = providerConfig
+            )
+            
+            if (!includeCategory) {
+                return@filter true // Category excluded
+            }
+            
+            // Check channel filtering
+            val includeChannel = liveChannelFilterService.shouldIncludeChannel(
+                channelName = channel.title,
+                categoryName = category.categoryName,
+                categoryId = category.categoryId,
+                config = providerConfig
+            )
+            
+            !includeChannel // Remove if channel is excluded
+        }
 
-        if (staleChannels.isEmpty()) {
+        if (channelsToRemove.isEmpty()) {
             return
         }
 
-        logger.info("Removing ${staleChannels.size} stale live channels from VFS for provider: $providerName")
+        logger.info("Removing ${channelsToRemove.size} live channels from VFS for provider: $providerName (excluded by VFS filtering or inactive)")
 
-        staleChannels.forEach { channel ->
+        channelsToRemove.forEach { channel ->
             try {
                 val category = channel.category
                 if (category == null) {
@@ -270,10 +321,7 @@ class LiveChannelSyncService(
                 val sanitizedCategoryName = sanitizeFileName(category.categoryName)
                 val sanitizedChannelName = sanitizeFileName(channel.title)
                 
-                // Get provider config for extension
-                val providerConfig = iptvConfigurationService.getProviderConfigurations()
-                    .find { it.name == providerName }
-                val extension = extractExtensionFromUrl(channel.url) ?: (providerConfig?.liveChannelExtension ?: "ts")
+                val extension = extractExtensionFromUrl(channel.url) ?: providerConfig.liveChannelExtension
                 val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.$extension"
 
                 val existingFile = databaseFileService.getFileAtPath(filePath)
@@ -282,15 +330,108 @@ class LiveChannelSyncService(
                     try {
                         val hash = "${providerName}_${channel.contentId}".hashCode().toString()
                         // Use repository to delete by hash
-                        debridFileRepository.deleteDbEntityByHash(hash)
-                        logger.debug("Removed stale live channel file: $filePath")
+                        debridFileContentsRepository.deleteDbEntityByHash(hash)
+                        logger.debug("Removed live channel file from VFS (excluded by filtering): $filePath")
                     } catch (e: Exception) {
-                        logger.warn("Failed to remove stale live channel file: $filePath", e)
+                        logger.warn("Failed to remove live channel file: $filePath", e)
                     }
                 }
             } catch (e: Exception) {
-                logger.warn("Error removing stale live channel: ${channel.title}", e)
+                logger.warn("Error removing live channel: ${channel.title}", e)
             }
+        }
+    }
+    
+    /**
+     * Cleans up empty category directories under /live/{provider}/{category} structure.
+     * Only keeps directories for active categories that have channels and pass VFS filtering.
+     * 
+     * @param providerName Provider name
+     * @param activeCategoryNames Set of category names that have channels passing VFS filtering
+     * @param providerConfig Provider configuration for VFS filtering rules
+     */
+    private fun cleanupEmptyLiveCategoryDirectories(
+        providerName: String, 
+        activeCategoryNames: Set<String>,
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
+    ) {
+        try {
+            val sanitizedProviderName = sanitizeFileName(providerName)
+            val liveBasePath = "/live/$sanitizedProviderName"
+            
+            // Get provider directory
+            val providerDir = debridFileContentsRepository.getDirectoryByPath(liveBasePath)
+            if (providerDir == null) {
+                return
+            }
+            
+            // Get all category directories under this provider
+            val categoryDirectories = debridFileContentsRepository.getChildrenByDirectory(providerDir)
+            
+            // Get all live categories from database to check VFS filtering
+            val allLiveCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, "live")
+            
+            categoryDirectories.forEach { categoryDir ->
+                try {
+                    val categoryName = categoryDir.name
+                    if (categoryName == null) {
+                        logger.warn("Category directory has null name: ${categoryDir.path}, skipping")
+                        return@forEach
+                    }
+                    
+                    val sanitizedCategoryName = sanitizeFileName(categoryName)
+                    
+                    // Find matching category from database
+                    val dbCategory = allLiveCategories.find { 
+                        sanitizeFileName(it.categoryName) == sanitizedCategoryName 
+                    }
+                    
+                    // Check if this category should be included in VFS
+                    val shouldIncludeInVfs = if (dbCategory != null) {
+                        liveChannelFilterService.shouldIncludeCategory(
+                            categoryName = dbCategory.categoryName,
+                            categoryId = dbCategory.categoryId,
+                            config = providerConfig
+                        )
+                    } else {
+                        // Category not in database, check if it's in active list
+                        activeCategoryNames.contains(categoryName) || 
+                        activeCategoryNames.any { sanitizeFileName(it) == sanitizedCategoryName }
+                    }
+                    
+                    // Check if category is in active list (has channels passing VFS filtering)
+                    val isInActiveList = activeCategoryNames.contains(categoryName) || 
+                                        activeCategoryNames.any { sanitizeFileName(it) == sanitizedCategoryName }
+                    
+                    if (!shouldIncludeInVfs || !isInActiveList) {
+                        // Category excluded by VFS filtering or not in active list, check if directory is empty
+                        val children = debridFileContentsRepository.getByDirectory(categoryDir)
+                        if (children.isEmpty()) {
+                            logger.info("Deleting empty category directory (excluded by VFS filtering): ${categoryDir.path}")
+                            databaseFileService.deleteFile(categoryDir)
+                        } else {
+                            logger.debug("Category directory ${categoryDir.path} is not empty (${children.size} items), keeping it")
+                        }
+                    } else {
+                        // Category should be included, but check if directory is empty (shouldn't happen, but be safe)
+                        val children = debridFileContentsRepository.getByDirectory(categoryDir)
+                        if (children.isEmpty()) {
+                            logger.warn("Category directory ${categoryDir.path} should have channels but is empty, this shouldn't happen")
+                        }
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Error checking category directory ${categoryDir.path}", e)
+                }
+            }
+            
+            // Check if provider directory is empty after cleanup
+            val remainingChildren = debridFileContentsRepository.getByDirectory(providerDir)
+            if (remainingChildren.isEmpty()) {
+                logger.info("Deleting empty live provider directory: $liveBasePath")
+                databaseFileService.deleteFile(providerDir)
+            }
+        } catch (e: Exception) {
+            logger.warn("Error cleaning up empty live category directories for provider $providerName", e)
         }
     }
 }

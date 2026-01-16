@@ -2,6 +2,8 @@ package io.skjaere.debridav.iptv
 
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.iptv.model.ContentType
@@ -21,7 +23,8 @@ class IptvContentService(
     private val iptvMovieMetadataRepository: IptvMovieMetadataRepository,
     private val iptvConfigurationService: IptvConfigurationService,
     private val iptvConfigurationProperties: IptvConfigurationProperties,
-    private val debridFileContentsRepository: DebridFileContentsRepository
+    private val debridFileContentsRepository: DebridFileContentsRepository,
+    private val databaseFileService: DatabaseFileService
 ) {
     private val logger = LoggerFactory.getLogger(IptvContentService::class.java)
 
@@ -787,6 +790,264 @@ class IptvContentService(
         }
         
         return contentToDelete.size
+    }
+    
+    /**
+     * Deletes inactive live categories and their associated live streams for a specific provider.
+     * This is called after live sync to clean up categories that were excluded via configuration.
+     * 
+     * Note: Live streams are deleted even if they have linked files, since live streams are ephemeral
+     * and can change at any time (unlike Movies/Series which are stable media files).
+     * VFS files linked to live streams are also deleted.
+     * 
+     * Returns the number of deleted categories and streams.
+     */
+    @Transactional
+    fun deleteInactiveLiveCategoriesAndStreamsForProvider(providerName: String): Pair<Int, Int> {
+        // Find inactive live categories for this provider
+        val inactiveLiveCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, "live")
+            .filter { !it.isActive }
+        
+        if (inactiveLiveCategories.isEmpty()) {
+            logger.debug("No inactive live categories to delete for provider $providerName")
+            return Pair(0, 0)
+        }
+        
+        logger.info("Found ${inactiveLiveCategories.size} inactive live categories for provider $providerName, deleting categories and their associated streams")
+        
+        // Find all live streams linked to these inactive categories
+        val categoryIds = inactiveLiveCategories.map { it.id!! }.toSet()
+        val liveStreamsToDelete = iptvContentRepository.findByProviderName(providerName)
+            .filter { it.contentType == ContentType.LIVE && it.category?.id in categoryIds }
+        
+        if (liveStreamsToDelete.isEmpty()) {
+            logger.info("No live streams found for inactive categories, deleting ${inactiveLiveCategories.size} categories only")
+            iptvCategoryRepository.deleteAll(inactiveLiveCategories)
+            cleanupEmptyLiveDirectories(providerName, inactiveLiveCategories)
+            return Pair(inactiveLiveCategories.size, 0)
+        }
+        
+        logger.info("Found ${liveStreamsToDelete.size} live streams linked to inactive categories for provider $providerName")
+        
+        // Batch fetch all VFS files linked to these streams to avoid N+1 queries
+        val streamIds = liveStreamsToDelete.mapNotNull { it.id }.toSet()
+        
+        // Fetch files in batches to avoid loading everything into memory at once
+        val allLinkedFiles = mutableListOf<RemotelyCachedEntity>()
+        streamIds.chunked(1000).forEachIndexed { batchIndex, batch ->
+            val batchFiles = batch.flatMap { streamId ->
+                try {
+                    debridFileContentsRepository.findByIptvContentRefId(streamId)
+                } catch (e: Exception) {
+                    logger.warn("Error fetching files for stream ID $streamId", e)
+                    emptyList()
+                }
+            }
+            allLinkedFiles.addAll(batchFiles.filterIsInstance<RemotelyCachedEntity>())
+            
+            if ((batchIndex + 1) % 10 == 0) {
+                logger.info("Fetched files for ${(batchIndex + 1) * 1000} streams (found ${allLinkedFiles.size} files so far)...")
+            }
+        }
+        
+        val totalFilesToDelete = allLinkedFiles.size
+        logger.info("Found $totalFilesToDelete VFS files linked to ${liveStreamsToDelete.size} streams, deleting them")
+        
+        // Delete VFS files using bulk deleteAll instead of individual hash deletes
+        // This is much more efficient and reduces CPU usage
+        if (allLinkedFiles.isNotEmpty()) {
+            // Delete in batches to avoid huge transactions
+            allLinkedFiles.chunked(500).forEachIndexed { batchIndex, fileBatch ->
+                try {
+                    // Use deleteAll for bulk deletion - much more efficient than individual deletes
+                    debridFileContentsRepository.deleteAll(fileBatch)
+                    logger.info("Deleted batch ${batchIndex + 1}: ${fileBatch.size} VFS files (total: ${(batchIndex + 1) * 500} out of $totalFilesToDelete)")
+                } catch (e: Exception) {
+                    logger.error("Error deleting batch ${batchIndex + 1} of VFS files", e)
+                    // Fallback to individual deletes for this batch if bulk delete fails
+                    fileBatch.forEach { file ->
+                        try {
+                            val hash = file.hash
+                            if (hash != null) {
+                                debridFileContentsRepository.deleteDbEntityByHash(hash)
+                            }
+                        } catch (e2: Exception) {
+                            logger.warn("Failed to delete VFS file with hash ${file.hash}", e2)
+                        }
+                    }
+                }
+            }
+            logger.info("Deleted $totalFilesToDelete VFS files linked to inactive live streams")
+        }
+        
+        // Delete all live streams linked to inactive categories
+        logger.info("Deleting ${liveStreamsToDelete.size} live streams linked to inactive categories for provider $providerName")
+        iptvContentRepository.deleteAll(liveStreamsToDelete)
+        
+        // Delete the inactive categories
+        iptvCategoryRepository.deleteAll(inactiveLiveCategories)
+        logger.info("Deleted ${inactiveLiveCategories.size} inactive live categories and ${liveStreamsToDelete.size} associated live streams for provider $providerName")
+        
+        // Clean up empty VFS directories for deleted categories
+        cleanupEmptyLiveDirectories(providerName, inactiveLiveCategories)
+        
+        return Pair(inactiveLiveCategories.size, liveStreamsToDelete.size)
+    }
+    
+    /**
+     * Cleans up empty VFS directories for inactive live categories.
+     * Removes empty category directories under /live/{provider}/{category} structure.
+     */
+    private fun cleanupEmptyLiveDirectories(providerName: String, deletedCategories: List<IptvCategoryEntity>) {
+        if (deletedCategories.isEmpty()) {
+            return
+        }
+        
+        val sanitizedProviderName = sanitizeFileName(providerName)
+        val liveBasePath = "/live/$sanitizedProviderName"
+        
+        deletedCategories.forEach { category ->
+            try {
+                val sanitizedCategoryName = sanitizeFileName(category.categoryName)
+                val categoryPath = "$liveBasePath/$sanitizedCategoryName"
+                
+                // Get the category directory
+                val categoryDir = debridFileContentsRepository.getDirectoryByPath(categoryPath)
+                if (categoryDir != null) {
+                    // Check if directory is empty (no files or subdirectories)
+                    val children = debridFileContentsRepository.getByDirectory(categoryDir)
+                    if (children.isEmpty()) {
+                        logger.info("Deleting empty live category directory: $categoryPath")
+                        databaseFileService.deleteFile(categoryDir)
+                    } else {
+                        logger.debug("Category directory $categoryPath is not empty (${children.size} items), keeping it")
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("Error cleaning up empty directory for category ${category.categoryName}", e)
+            }
+        }
+        
+        // Also check if provider directory is empty after cleanup
+        try {
+            val providerDir = debridFileContentsRepository.getDirectoryByPath(liveBasePath)
+            if (providerDir != null) {
+                val children = debridFileContentsRepository.getByDirectory(providerDir)
+                if (children.isEmpty()) {
+                    logger.info("Deleting empty live provider directory: $liveBasePath")
+                    databaseFileService.deleteFile(providerDir)
+                }
+            }
+        } catch (e: Exception) {
+            logger.warn("Error checking if provider directory is empty: $liveBasePath", e)
+        }
+    }
+    
+    /**
+     * Sanitizes a file name by removing invalid file system characters
+     */
+    private fun sanitizeFileName(fileName: String): String {
+        return fileName
+            .replace(Regex("[<>:\"/\\|?*]"), "_")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+    
+    /**
+     * Deletes inactive Movies and Series categories and their associated content for a specific provider.
+     * Only deletes categories/content that are not linked to VFS files (those with linked files remain as inactive).
+     * 
+     * Returns the number of deleted categories and content items.
+     */
+    @Transactional
+    fun deleteInactiveMoviesAndSeriesCategoriesAndContentForProvider(providerName: String): Pair<Int, Int> {
+        // Find inactive VOD and Series categories for this provider
+        val inactiveVodCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, "vod")
+            .filter { !it.isActive }
+        val inactiveSeriesCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, "series")
+            .filter { !it.isActive }
+        
+        val allInactiveCategories = inactiveVodCategories + inactiveSeriesCategories
+        
+        if (allInactiveCategories.isEmpty()) {
+            logger.debug("No inactive Movies/Series categories to delete for provider $providerName")
+            return Pair(0, 0)
+        }
+        
+        logger.info("Found ${allInactiveCategories.size} inactive Movies/Series categories for provider $providerName, checking for deletion")
+        
+        // Find all Movies and Series content linked to these inactive categories
+        val categoryIds = allInactiveCategories.map { it.id!! }.toSet()
+        val contentToCheck = iptvContentRepository.findByProviderName(providerName)
+            .filter { 
+                (it.contentType == ContentType.MOVIE || it.contentType == ContentType.SERIES) && 
+                it.category?.id in categoryIds
+            }
+        
+        // Separate content with and without linked files
+        val contentToDelete = mutableListOf<IptvContentEntity>()
+        val contentToKeep = mutableListOf<IptvContentEntity>()
+        
+        contentToCheck.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isEmpty()) {
+                contentToDelete.add(content)
+            } else {
+                contentToKeep.add(content)
+                logger.debug("Keeping inactive content ${content.title} (id: ${content.id}) for provider $providerName - has ${files.size} linked files")
+            }
+        }
+        
+        // Delete content without linked files
+        if (contentToDelete.isNotEmpty()) {
+            logger.info("Deleting ${contentToDelete.size} Movies/Series content items linked to inactive categories for provider $providerName")
+            
+            // Separate movies and series for metadata deletion
+            val movieIds = contentToDelete.filter { it.contentType == ContentType.MOVIE }.map { it.contentId }
+            val seriesIds = contentToDelete.filter { it.contentType == ContentType.SERIES }.map { it.contentId }
+            
+            // Delete movie metadata
+            if (movieIds.isNotEmpty()) {
+                val deletedMovieMetadata = iptvMovieMetadataRepository.deleteByProviderNameAndMovieIds(providerName, movieIds)
+                logger.debug("Deleted $deletedMovieMetadata movie metadata entries for provider $providerName")
+            }
+            
+            // Delete series metadata
+            if (seriesIds.isNotEmpty()) {
+                val deletedSeriesMetadata = iptvSeriesMetadataRepository.deleteByProviderNameAndSeriesIds(providerName, seriesIds)
+                logger.debug("Deleted $deletedSeriesMetadata series metadata entries for provider $providerName")
+            }
+            
+            iptvContentRepository.deleteAll(contentToDelete)
+        }
+        
+        if (contentToKeep.isNotEmpty()) {
+            logger.info("Keeping ${contentToKeep.size} inactive Movies/Series content items (they have linked files) for provider $providerName")
+        }
+        
+        // Only delete categories that have no content left (all content was deleted or category has no content)
+        val categoriesToDelete = allInactiveCategories.filter { category ->
+            val remainingContent = iptvContentRepository.findByProviderName(providerName)
+                .any { 
+                    (it.contentType == ContentType.MOVIE || it.contentType == ContentType.SERIES) && 
+                    it.category?.id == category.id
+                }
+            !remainingContent
+        }
+        
+        if (categoriesToDelete.isNotEmpty()) {
+            iptvCategoryRepository.deleteAll(categoriesToDelete)
+            logger.info("Deleted ${categoriesToDelete.size} inactive Movies/Series categories for provider $providerName")
+        }
+        
+        val totalDeletedCategories = categoriesToDelete.size
+        val totalDeletedContent = contentToDelete.size
+        
+        if (totalDeletedCategories > 0 || totalDeletedContent > 0) {
+            logger.info("Deleted $totalDeletedCategories inactive Movies/Series categories and $totalDeletedContent associated content items for provider $providerName")
+        }
+        
+        return Pair(totalDeletedCategories, totalDeletedContent)
     }
 }
 
