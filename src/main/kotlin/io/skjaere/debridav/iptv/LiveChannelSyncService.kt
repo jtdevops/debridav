@@ -106,13 +106,24 @@ class LiveChannelSyncService(
         logger.info("Filtered ${channelsToSync.size} live channels from ${allLiveChannels.size} total for VFS sync")
 
         // Group channels by category for processing
-        // Note: Path structure is /live/{provider}/{category}/{channel}.{extension}
+        // Note: Path structure is always /live/{provider}/{category}/{channel}.ts
+        // channelsToSync has already been filtered using VFS filtering rules:
+        // - IPTV_PROVIDER_{NAME}_LIVE_CATEGORY_INCLUDE/EXCLUDE
+        // - IPTV_PROVIDER_{NAME}_LIVE_CHANNEL_INCLUDE/EXCLUDE
         val channelsByCategory = channelsToSync.groupBy { it.category?.categoryName ?: "Unknown" }
 
         val activeChannelIds = mutableSetOf<String>()
         var createdCount = 0
         var updatedCount = 0
         var errorCount = 0
+        
+        // Collect paths for logging if enabled
+        // Only paths that pass VFS filtering will be logged (channelsToSync is already filtered)
+        val pathsToLog = if (iptvConfigurationProperties.liveLogVfsPaths) {
+            mutableListOf<String>()
+        } else {
+            null
+        }
 
         // Process each category
         channelsByCategory.forEach { (categoryName, channels) ->
@@ -129,11 +140,17 @@ class LiveChannelSyncService(
                     val sanitizedChannelName = sanitizeFileName(channel.title)
                     val sanitizedProviderName = sanitizeFileName(providerName)
 
-                    // Use configured extension (defaults to "ts") or extract from URL if available
-                    val extension = extractExtensionFromUrl(channel.url) ?: providerConfig.liveChannelExtension
+                    // Always use .ts extension for VFS paths (regardless of configured extension or URL)
+                    // The configured extension is used when resolving the URL for streaming, not for VFS paths
+                    val extension = "ts"
 
-                    // Construct file path: /live/{provider}/{category}/{channel}.{extension}
+                    // Construct file path: /live/{provider}/{category}/{channel}.ts
                     val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.$extension"
+                    
+                    // Log path if logging is enabled
+                    if (pathsToLog != null) {
+                        pathsToLog.add(filePath)
+                    }
 
                     // Check if file already exists and if name has changed
                     val existingFile = databaseFileService.getFileAtPath(filePath)
@@ -176,6 +193,16 @@ class LiveChannelSyncService(
         // Use active categories from filtered channels
         cleanupEmptyLiveCategoryDirectories(providerName, channelsByCategory.keys, providerConfig)
 
+        // Log paths if logging is enabled
+        // These paths have already been filtered using VFS filtering rules (category/channel include/exclude)
+        // Path structure: /live/{provider}/{category}/{channel}.ts (always .ts extension)
+        if (pathsToLog != null && pathsToLog.isNotEmpty()) {
+            logger.info("Live channel VFS paths that would be created for provider $providerName (${pathsToLog.size} paths, after VFS filtering):")
+            pathsToLog.sorted().forEach { path ->
+                logger.info("  $path")
+            }
+        }
+
         logger.info("Live channel VFS sync completed for provider $providerName: created=$createdCount, updated=$updatedCount, errors=$errorCount")
     }
 
@@ -189,8 +216,9 @@ class LiveChannelSyncService(
         hash: String,
         providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration
     ) {
-        // Use configured extension (defaults to "ts") or extract from URL if available
-        val extension = extractExtensionFromUrl(channel.url) ?: providerConfig.liveChannelExtension
+        // Always use .ts extension for VFS paths (regardless of configured extension or URL)
+        // The configured extension is used when resolving the URL for streaming, not for VFS paths
+        val extension = "ts"
 
         // Create DebridIptvContent
         val debridIptvContent = DebridIptvContent().apply {
@@ -321,7 +349,8 @@ class LiveChannelSyncService(
                 val sanitizedCategoryName = sanitizeFileName(category.categoryName)
                 val sanitizedChannelName = sanitizeFileName(channel.title)
                 
-                val extension = extractExtensionFromUrl(channel.url) ?: providerConfig.liveChannelExtension
+                // Always use .ts extension for VFS paths
+                val extension = "ts"
                 val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.$extension"
 
                 val existingFile = databaseFileService.getFileAtPath(filePath)

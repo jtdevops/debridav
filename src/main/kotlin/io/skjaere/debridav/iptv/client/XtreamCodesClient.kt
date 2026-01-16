@@ -1365,6 +1365,17 @@ class XtreamCodesClient(
         tokenized = tokenized.replace(Regex("[?&]username=([^&]+)"), "?username={USERNAME}")
         tokenized = tokenized.replace(Regex("[?&]password=([^&]+)"), "&password={PASSWORD}")
         
+        // For live URLs, replace extension with {ext} token
+        // Pattern: /live/{anything}/{anything}/{stream_id}.{extension}
+        val liveUrlPattern = Regex("""(/live/[^/]+/[^/]+/\d+)\.([a-zA-Z0-9]+)(\?.*)?$""")
+        if (liveUrlPattern.containsMatchIn(tokenized)) {
+            tokenized = liveUrlPattern.replace(tokenized) { matchResult ->
+                val beforeExtension = matchResult.groupValues[1]
+                val queryParams = matchResult.groupValues.getOrNull(3) ?: ""
+                "$beforeExtension.{ext}$queryParams"
+            }
+        }
+        
         return tokenized
     }
     

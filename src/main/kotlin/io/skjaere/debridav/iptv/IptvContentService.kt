@@ -661,6 +661,10 @@ class IptvContentService(
         resolved = resolved.replace("%7BUSERNAME%7D", providerConfig.xtreamUsername ?: "")
         resolved = resolved.replace("%7BPASSWORD%7D", providerConfig.xtreamPassword ?: "")
         
+        // Replace {ext} token with configured extension (for live content)
+        // This allows the extension to be configurable per provider
+        resolved = resolved.replace("{ext}", providerConfig.liveChannelExtension)
+        
         return resolved
     }
     

@@ -377,6 +377,11 @@ IPTV_LIVE_SORT_ALPHABETICALLY=false
 # Set to false to skip VFS creation (useful for cleaning up categories/channels before they appear in VFS)
 IPTV_LIVE_CREATE_VFS_ENTRIES=true
 
+# Optional: Log /live paths that would be created when IPTV_LIVE_CREATE_VFS_ENTRIES=true
+# Default: false (no logging)
+# When enabled, logs all /live paths that would be created during sync (useful for debugging and verification)
+IPTV_LIVE_LOG_VFS_PATHS=false
+
 # Optional: File extension for live channels (per-provider)
 # Default: "ts" (can be "m3u8", "ts", etc.)
 # Example: IPTV_PROVIDER_PROVIDER1_LIVE_CHANNEL_EXTENSION=ts

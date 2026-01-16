@@ -1285,9 +1285,9 @@ class IptvSyncService(
     }
     
     /**
-     * Updates the extension in a live content URL to match the configured extension.
+     * Updates the extension in a live content URL to use the {ext} token.
      * URLs are in format: {BASE_URL}/live/{USERNAME}/{PASSWORD}/{stream_id}.{extension}
-     * This replaces the extension part with the configured extension.
+     * This replaces the extension part with {ext} token, which will be resolved at runtime.
      * Handles both tokenized URLs (with {BASE_URL}, {USERNAME}, {PASSWORD}) and resolved URLs.
      */
     private fun updateLiveUrlExtension(tokenizedUrl: String, configuredExtension: String): String {
@@ -1300,7 +1300,8 @@ class IptvSyncService(
             pattern.replace(tokenizedUrl) { matchResult ->
                 val beforeExtension = matchResult.groupValues[1]
                 val queryParams = matchResult.groupValues.getOrNull(3) ?: ""
-                "$beforeExtension.$configuredExtension$queryParams"
+                // Replace extension with {ext} token instead of configured extension
+                "$beforeExtension.{ext}$queryParams"
             }
         } else {
             // If pattern doesn't match, return URL as-is (shouldn't happen for valid live URLs)
