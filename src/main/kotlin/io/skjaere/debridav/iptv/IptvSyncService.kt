@@ -1631,6 +1631,11 @@ class IptvSyncService(
         channelTitle: String? = null,
         categoryName: String? = null
     ): String {
+        // Check if URL already has {ext} token - if so, it's already processed correctly
+        if (tokenizedUrl.contains(".{ext}") || tokenizedUrl.contains(".{ext}?")) {
+            return tokenizedUrl
+        }
+        
         // First, check if this is a file path (not an Xtream Codes URL)
         // File paths have format: /live/{provider}/{category}/{channel}.{ext}
         // where channel is NOT purely numeric (unlike Xtream Codes stream IDs)

@@ -1,5 +1,6 @@
 package io.skjaere.debridav.iptv
 
+import io.ipfs.multibase.Base58
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.fs.DatabaseFileService
@@ -878,8 +879,11 @@ class IptvContentService(
                 val sanitizedCategoryName = sanitizeFileName(category.categoryName)
                 val categoryPath = "$liveBasePath/$sanitizedCategoryName"
                 
+                // Convert file system path to ltree format for database query
+                val categoryPathLtree = convertPathToLtree(categoryPath)
+                
                 // Get the category directory
-                val categoryDir = debridFileContentsRepository.getDirectoryByPath(categoryPath)
+                val categoryDir = debridFileContentsRepository.getDirectoryByPath(categoryPathLtree)
                 if (categoryDir != null) {
                     // Check if directory is empty (no files or subdirectories)
                     val children = debridFileContentsRepository.getByDirectory(categoryDir)
@@ -897,7 +901,9 @@ class IptvContentService(
         
         // Also check if provider directory is empty after cleanup
         try {
-            val providerDir = debridFileContentsRepository.getDirectoryByPath(liveBasePath)
+            // Convert file system path to ltree format for database query
+            val liveBasePathLtree = convertPathToLtree(liveBasePath)
+            val providerDir = debridFileContentsRepository.getDirectoryByPath(liveBasePathLtree)
             if (providerDir != null) {
                 val children = debridFileContentsRepository.getByDirectory(providerDir)
                 if (children.isEmpty()) {
@@ -907,6 +913,18 @@ class IptvContentService(
             }
         } catch (e: Exception) {
             logger.warn("Error checking if provider directory is empty: $liveBasePath", e)
+        }
+    }
+    
+    /**
+     * Converts a file system path to ltree format using Base58 encoding.
+     * This is required for database queries that use the ltree type.
+     */
+    private fun convertPathToLtree(path: String): String {
+        return if (path == "/") "ROOT" else {
+            path.split("/").filter { it.isNotBlank() }
+                .joinToString(separator = ".") { Base58.encode(it.encodeToByteArray()) }
+                .let { "ROOT.$it" }
         }
     }
     
