@@ -832,74 +832,10 @@ class IptvContentService(
         }
         
         logger.info("Found ${liveStreamsToDelete.size} live streams linked to inactive categories for provider $providerName")
-        
-        // Only check for VFS files if VFS creation is enabled
-        // If VFS is disabled, skip file operations entirely to avoid unnecessary database queries
-        val vfsEnabled = iptvConfigurationProperties.liveCreateVfsEntries
-        logger.debug("VFS entry creation enabled: $vfsEnabled for provider $providerName")
-        
-        if (vfsEnabled) {
-            val streamIds = liveStreamsToDelete.mapNotNull { it.id }.toSet()
-            
-            if (streamIds.isEmpty()) {
-                logger.debug("No stream IDs found, skipping VFS file cleanup")
-            } else {
-                logger.info("Checking for VFS files linked to ${streamIds.size} streams using bulk query")
-                
-                // Use bulk query to fetch all files in a single database query (or a few queries if needed)
-                // This avoids N+1 query problems - instead of 26,892+ queries, we do 1-2 queries
-                val allLinkedFiles = try {
-                    // Some databases have limits on IN clause size, so chunk if needed
-                    // PostgreSQL typically handles 1000s of values, but we'll be safe with 5000
-                    streamIds.chunked(5000).flatMap { chunk ->
-                        try {
-                            debridFileContentsRepository.findByIptvContentRefIds(chunk)
-                        } catch (e: Exception) {
-                            logger.warn("Error fetching VFS files for chunk of ${chunk.size} stream IDs", e)
-                            emptyList()
-                        }
-                    }
-                } catch (e: Exception) {
-                    logger.error("Error fetching VFS files for streams", e)
-                    emptyList()
-                }
-                
-                val totalFilesToDelete = allLinkedFiles.size
-                
-                if (totalFilesToDelete > 0) {
-                    logger.info("Found $totalFilesToDelete VFS files linked to ${liveStreamsToDelete.size} streams, deleting them")
-                    
-                    // Delete VFS files using bulk deleteAll instead of individual hash deletes
-                    // This is much more efficient and reduces CPU usage
-                    // Delete in batches to avoid huge transactions
-                    allLinkedFiles.chunked(500).forEachIndexed { batchIndex, fileBatch ->
-                        try {
-                            // Use deleteAll for bulk deletion - much more efficient than individual deletes
-                            debridFileContentsRepository.deleteAll(fileBatch)
-                            logger.info("Deleted batch ${batchIndex + 1}: ${fileBatch.size} VFS files (total: ${(batchIndex + 1) * 500} out of $totalFilesToDelete)")
-                        } catch (e: Exception) {
-                            logger.error("Error deleting batch ${batchIndex + 1} of VFS files", e)
-                            // Fallback to individual deletes for this batch if bulk delete fails
-                            fileBatch.forEach { file ->
-                                try {
-                                    val hash = file.hash
-                                    if (hash != null) {
-                                        debridFileContentsRepository.deleteDbEntityByHash(hash)
-                                    }
-                                } catch (e2: Exception) {
-                                    logger.warn("Failed to delete VFS file with hash ${file.hash}", e2)
-                                }
-                            }
-                        }
-                    }
-                    logger.info("Deleted $totalFilesToDelete VFS files linked to inactive live streams")
-                } else {
-                    logger.info("No VFS files found for inactive live streams, skipping file deletion")
-                }
-            }
-        } else {
-            logger.info("Skipping VFS file cleanup - VFS entry creation is disabled (IPTV_LIVE_CREATE_VFS_ENTRIES=false)")
-        }
+
+        // File entries are now generated at runtime, so no VFS file cleanup is needed
+        // Files are not persisted to the database, so there's nothing to clean up
+        logger.debug("Skipping VFS file cleanup for provider $providerName - file entries are generated at runtime")
         
         // Delete all live streams linked to inactive categories in batches to avoid CPU spikes
         logger.info("Deleting ${liveStreamsToDelete.size} live streams linked to inactive categories for provider $providerName")

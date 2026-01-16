@@ -17,7 +17,9 @@ import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.LocalContentsService
 import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.iptv.LiveChannelFileService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.stream.StreamingService
 import org.springframework.boot.autoconfigure.web.ServerProperties
 import org.springframework.core.env.Environment
@@ -34,7 +36,9 @@ class StreamableResourceFactory(
     internal val serverProperties: ServerProperties,
     internal val environment: Environment,
     internal val hostnameDetectionService: HostnameDetectionService,
-    private val iptvConfigurationProperties: IptvConfigurationProperties?
+    private val iptvConfigurationProperties: IptvConfigurationProperties?,
+    private val liveChannelFileService: LiveChannelFileService? = null,
+    private val iptvConfigurationService: IptvConfigurationService? = null
 ) : ResourceFactory {
     
     // Expose iptvConfigurationProperties for DirectoryResource
@@ -120,6 +124,18 @@ class StreamableResourceFactory(
                 }
             }
             
+            // Check if this is a live channel file path that should use runtime generation
+            if (path.startsWith("/live/") && path.endsWith(".ts") && liveChannelFileService != null) {
+                val parts = path.removePrefix("/live/").removeSuffix(".ts").split("/")
+                if (parts.size == 3) {
+                    val (provider, category, channel) = parts
+                    val virtualFile = liveChannelFileService.getLiveChannelFile(provider, category, channel)
+                    if (virtualFile != null) {
+                        return toFileResource(virtualFile)
+                    }
+                }
+            }
+            
             // Not a STRM path, handle normally
             // Check folder visibility before returning
             val entity = fileService.getFileAtPath(path)
@@ -165,7 +181,7 @@ class StreamableResourceFactory(
         if (dbItem !is DbDirectory) {
             error("Not a directory")
         }
-        return DirectoryResource(dbItem, this, localContentsService, fileService, arrRequestDetector)
+        return DirectoryResource(dbItem, this, localContentsService, fileService, arrRequestDetector, liveChannelFileService, iptvConfigurationService)
     }
 
     fun toFileResource(dbItem: DbEntity): Resource? {

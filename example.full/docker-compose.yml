@@ -133,10 +133,10 @@ services:
       # Default: false (uses provider order)
       # - IPTV_LIVE_SORT_ALPHABETICALLY=false
       
-      # Optional: Create VFS entries under /live during sync
-      # Default: true (creates VFS entries)
-      # Set to false to skip VFS creation (useful for cleaning up categories/channels before they appear in VFS)
-      # - IPTV_LIVE_CREATE_VFS_ENTRIES=true
+      # Optional: Log /live paths that would be generated at runtime (for debugging)
+      # Default: false (no logging)
+      # When enabled, logs all paths that would be generated for live channels after filtering
+      # - IPTV_LIVE_LOG_FILE_PATHS=false
       
       # Database Filtering (Exclude Only - controls what gets synced to database)
       # Exclude categories from database sync (regex supported)

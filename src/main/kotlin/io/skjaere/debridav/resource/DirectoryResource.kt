@@ -8,10 +8,14 @@ import io.milton.resource.MakeCollectionableResource
 import io.milton.resource.MoveableResource
 import io.milton.resource.PutableResource
 import io.milton.resource.Resource
+import io.ipfs.multibase.Base58
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalContentsService
+import io.skjaere.debridav.iptv.LiveChannelFileService
+import io.skjaere.debridav.iptv.VirtualLiveFile
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
@@ -30,7 +34,9 @@ class DirectoryResource(
     val resourceFactory: StreamableResourceFactory,
     private val localContentsService: LocalContentsService,
     fileService: DatabaseFileService,
-    private val arrRequestDetector: ArrRequestDetector
+    private val arrRequestDetector: ArrRequestDetector,
+    private val liveChannelFileService: LiveChannelFileService? = null,
+    private val iptvConfigurationService: IptvConfigurationService? = null
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
     DeletableResource {
     
@@ -87,9 +93,15 @@ class DirectoryResource(
     }
 
     override fun getChildren(): List<Resource> {
-        val children = directoryChildren ?: getChildren(directory).toMutableList()
-        
         val directoryPath = directory.fileSystemPath()
+        
+        // Check if this is a /live path that should use runtime generation
+        if (directoryPath != null && directoryPath.startsWith("/live") && liveChannelFileService != null) {
+            return getLiveChildren(directoryPath)
+        }
+        
+        // Normal directory listing from database
+        val children = directoryChildren ?: getChildren(directory).toMutableList()
         
         // Filter out hidden folders (e.g., /live when IPTV Live is disabled)
         val filteredChildren = children.filter { resource ->
@@ -286,7 +298,9 @@ class DirectoryResource(
             resourceFactory,
             localContentsService,
             fileService,
-            arrRequestDetector
+            arrRequestDetector,
+            liveChannelFileService,
+            iptvConfigurationService
         )
     }
 
@@ -300,9 +314,128 @@ class DirectoryResource(
 
     }
 
+    /**
+     * Gets children for /live paths using runtime generation
+     */
+    private fun getLiveChildren(directoryPath: String): List<Resource> {
+        val pathParts = directoryPath.split("/").filter { it.isNotEmpty() }
+        
+        return when {
+            directoryPath == "/live" -> {
+                // Root /live directory - list providers
+                val providers = liveChannelFileService!!.getLiveProviders()
+                providers.map { providerName ->
+                    val providerPath = "/live/$providerName"
+                    DirectoryResource(
+                        createVirtualDbDirectory(providerPath, providerName),
+                        resourceFactory,
+                        localContentsService,
+                        fileService,
+                        arrRequestDetector,
+                        liveChannelFileService,
+                        iptvConfigurationService
+                    )
+                }
+            }
+            pathParts.size == 2 && pathParts[0] == "live" -> {
+                // /live/{provider} - list categories or channels (depending on flatCategories)
+                val providerName = pathParts[1]
+                val iptvConfig = resourceFactory.iptvConfig
+                val flatCategories = iptvConfig?.liveFlatCategories == true
+                
+                if (flatCategories) {
+                    // Show channels directly (no category folders)
+                    val channels = liveChannelFileService!!.getLiveChannels(providerName)
+                    channels.map { channel ->
+                        val category = channel.category ?: return@map null
+                        val sanitizedProviderName = sanitizeFileName(providerName)
+                        val sanitizedCategoryName = sanitizeFileName(category.categoryName)
+                        val sanitizedChannelName = sanitizeFileName(channel.title)
+                        val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.ts"
+                        val fileName = "$sanitizedChannelName.ts"
+                        
+                        val virtualFile = VirtualLiveFile(filePath, fileName) {
+                            liveChannelFileService!!.createVirtualRemotelyCachedEntity(
+                                channel,
+                                filePath
+                            )
+                        }
+                        resourceFactory.toFileResource(virtualFile.getEntity())
+                    }.filterNotNull()
+                } else {
+                    // Show category folders
+                    val categories = liveChannelFileService!!.getLiveCategories(providerName)
+                    categories.map { categoryName ->
+                        val categoryPath = "/live/$providerName/$categoryName"
+                        DirectoryResource(
+                            createVirtualDbDirectory(categoryPath, categoryName),
+                            resourceFactory,
+                            localContentsService,
+                            fileService,
+                            arrRequestDetector,
+                            liveChannelFileService,
+                            iptvConfigurationService
+                        )
+                    }
+                }
+            }
+            pathParts.size == 3 && pathParts[0] == "live" -> {
+                // /live/{provider}/{category} - list channels
+                val providerName = pathParts[1]
+                val categoryName = pathParts[2]
+                val channels = liveChannelFileService!!.getLiveChannels(providerName, categoryName)
+                
+                channels.map { channel ->
+                    val sanitizedProviderName = sanitizeFileName(providerName)
+                    val sanitizedCategoryName = sanitizeFileName(categoryName)
+                    val sanitizedChannelName = sanitizeFileName(channel.title)
+                    val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.ts"
+                    val fileName = "$sanitizedChannelName.ts"
+                    
+                    val virtualFile = VirtualLiveFile(filePath, fileName) {
+                        liveChannelFileService!!.createVirtualRemotelyCachedEntity(
+                            channel,
+                            filePath
+                        )
+                    }
+                    resourceFactory.toFileResource(virtualFile.getEntity())
+                }.filterNotNull()
+            }
+            else -> {
+                emptyList()
+            }
+        }
+    }
+    
+    /**
+     * Creates a virtual DbDirectory for runtime-generated live directories
+     */
+    private fun createVirtualDbDirectory(path: String, name: String): DbDirectory {
+        val virtualDir = DbDirectory()
+        virtualDir.name = name
+        virtualDir.lastModified = Instant.now().toEpochMilli()
+        // Convert path to ltree format using Base58 encoding
+        virtualDir.path = if (path == "/") "ROOT" else {
+            path.split("/").filter { it.isNotBlank() }
+                .joinToString(separator = ".") { Base58.encode(it.encodeToByteArray()) }
+                .let { "ROOT.$it" }
+        }
+        return virtualDir
+    }
+    
+    /**
+     * Sanitizes a file name by removing invalid file system characters
+     */
+    private fun sanitizeFileName(fileName: String): String {
+        return fileName
+            .replace(Regex("[<>:\"/\\|?*]"), "_")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+    
     private fun toResource(file: DbEntity): Resource? {
         return if (file is DbDirectory)
-            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector)
+            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector, liveChannelFileService, iptvConfigurationService)
         else resourceFactory.toFileResource(file)
     }
 }

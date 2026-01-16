@@ -6,7 +6,9 @@ import io.skjaere.debridav.configuration.HostnameDetectionService
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.LocalContentsService
+import io.skjaere.debridav.iptv.LiveChannelFileService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
+import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.resource.ArrRequestDetector
 import io.skjaere.debridav.resource.StreamableResourceFactory
 import io.skjaere.debridav.stream.StreamingService
@@ -38,7 +40,9 @@ class MiltonConfiguration {
         serverProperties: ServerProperties,
         environment: Environment,
         hostnameDetectionService: HostnameDetectionService,
-        iptvConfigurationProperties: IptvConfigurationProperties?
+        iptvConfigurationProperties: IptvConfigurationProperties?,
+        liveChannelFileService: LiveChannelFileService?,
+        iptvConfigurationService: IptvConfigurationService?
     ): StreamableResourceFactory = StreamableResourceFactory(
         fileService,
         debridService,
@@ -49,6 +53,8 @@ class MiltonConfiguration {
         serverProperties,
         environment,
         hostnameDetectionService,
-        iptvConfigurationProperties
+        iptvConfigurationProperties,
+        liveChannelFileService,
+        iptvConfigurationService
     )
 }

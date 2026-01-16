@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import java.io.File
+import java.text.Normalizer
 import java.time.Duration
 import java.time.Instant
 
@@ -322,16 +323,13 @@ class IptvSyncService(
                     // Don't fail the sync if cleanup fails
                 }
                 
-                // Sync live channels to VFS if live is enabled for this provider and VFS creation is enabled
-                if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && iptvConfigurationProperties.liveCreateVfsEntries) {
+                // Sync live channels (now just logs paths if logging is enabled)
+                if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES) {
                     try {
                         liveChannelSyncService.syncLiveChannelsToVfs(providerConfig.name)
                     } catch (e: Exception) {
-                        logger.error("Error syncing live channels to VFS for provider ${providerConfig.name}", e)
-                        // Don't fail the sync if VFS sync fails
+                        logger.error("Error logging live channel paths for provider ${providerConfig.name}", e)
                     }
-                } else if (isLiveSyncEnabled(providerConfig) && providerConfig.type == io.skjaere.debridav.iptv.IptvProvider.XTREAM_CODES && !iptvConfigurationProperties.liveCreateVfsEntries) {
-                    logger.debug("Skipping VFS sync for provider ${providerConfig.name} - VFS entry creation is disabled")
                 }
             } else {
                 logger.warn("Skipping cleanup for provider ${providerConfig.name} - sync did not complete successfully")
@@ -1065,17 +1063,13 @@ class IptvSyncService(
                 // Don't fail the sync if cleanup fails
             }
             
-            // Always sync to VFS if live sync is enabled for this provider and VFS creation is enabled
-            // This ensures VFS is up to date with current database content
-            if (isLiveSyncEnabled(providerConfig) && iptvConfigurationProperties.liveCreateVfsEntries) {
+            // Sync live channels (now just logs paths if logging is enabled)
+            if (isLiveSyncEnabled(providerConfig)) {
                 try {
                     liveChannelSyncService.syncLiveChannelsToVfs(providerConfig.name)
                 } catch (e: Exception) {
-                    logger.error("Error syncing live channels to VFS for provider ${providerConfig.name}", e)
-                    // Don't fail the sync if VFS sync fails
+                    logger.error("Error logging live channel paths for provider ${providerConfig.name}", e)
                 }
-            } else if (isLiveSyncEnabled(providerConfig) && !iptvConfigurationProperties.liveCreateVfsEntries) {
-                logger.debug("Skipping VFS sync for provider ${providerConfig.name} - VFS entry creation is disabled")
             }
             
             // Mark live sync as completed
@@ -1251,7 +1245,13 @@ class IptvSyncService(
             
             // For live content, ensure URL uses the configured extension
             val urlToStore = if (item.type == ContentType.LIVE && providerConfig != null) {
-                updateLiveUrlExtension(item.url, providerConfig.liveChannelExtension)
+                updateLiveUrlExtension(
+                    tokenizedUrl = item.url,
+                    configuredExtension = providerConfig.liveChannelExtension,
+                    providerName = providerName,
+                    channelTitle = item.title,
+                    categoryName = category?.categoryName
+                )
             } else {
                 item.url
             }
@@ -1285,12 +1285,39 @@ class IptvSyncService(
     }
     
     /**
+     * Sanitizes a file name by removing invalid file system characters and converting to ASCII-only.
+     * Handles Unicode characters including subscripts/superscripts by normalizing and replacing non-ASCII with underscores.
+     */
+    private fun sanitizeFileName(fileName: String): String {
+        return fileName
+            // Normalize Unicode characters (decompose, then remove combining marks)
+            .let { Normalizer.normalize(it, Normalizer.Form.NFD) }
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+            // Replace non-ASCII characters with underscores
+            .replace(Regex("[^\\x00-\\x7F]"), "_")
+            // Replace invalid file system characters with underscores
+            .replace(Regex("[<>:\"/\\|?*]"), "_")
+            // Replace spaces with underscores
+            .replace(Regex("\\s+"), "_")
+            // Consolidate multiple consecutive underscores into a single underscore
+            .replace(Regex("_+"), "_")
+            // Trim leading and trailing underscores
+            .trim('_')
+    }
+
+    /**
      * Updates the extension in a live content URL to use the {ext} token.
      * URLs are in format: {BASE_URL}/live/{USERNAME}/{PASSWORD}/{stream_id}.{extension}
      * This replaces the extension part with {ext} token, which will be resolved at runtime.
      * Handles both tokenized URLs (with {BASE_URL}, {USERNAME}, {PASSWORD}) and resolved URLs.
      */
-    private fun updateLiveUrlExtension(tokenizedUrl: String, configuredExtension: String): String {
+    private fun updateLiveUrlExtension(
+        tokenizedUrl: String,
+        configuredExtension: String,
+        providerName: String? = null,
+        channelTitle: String? = null,
+        categoryName: String? = null
+    ): String {
         // Pattern to match: /live/{anything}/{anything}/{stream_id}.{old_extension}
         // This handles both tokenized URLs ({BASE_URL}/live/{USERNAME}/...) and resolved URLs
         // The pattern matches: /live/ followed by two path segments, then stream_id, then extension
@@ -1305,7 +1332,19 @@ class IptvSyncService(
             }
         } else {
             // If pattern doesn't match, return URL as-is (shouldn't happen for valid live URLs)
-            logger.warn("Could not update extension in live URL (pattern didn't match): $tokenizedUrl")
+            // Only log warning if liveLogFilePaths is enabled and we have the necessary info to show file path
+            if (iptvConfigurationProperties.liveLogFilePaths && providerName != null && channelTitle != null && categoryName != null) {
+                val sanitizedProviderName = sanitizeFileName(providerName)
+                val sanitizedCategoryName = sanitizeFileName(categoryName)
+                val sanitizedChannelName = sanitizeFileName(channelTitle)
+                val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.ts"
+                logger.warn("Could not update extension in live URL (pattern didn't match), file path would be: $filePath")
+            } else if (!iptvConfigurationProperties.liveLogFilePaths) {
+                // Don't log if logging is disabled
+            } else {
+                // Log URL only if we don't have file path info
+                logger.debug("Could not update extension in live URL (pattern didn't match): $tokenizedUrl")
+            }
             tokenizedUrl
         }
     }
@@ -1326,7 +1365,14 @@ class IptvSyncService(
         val contentToUpdate = mutableListOf<IptvContentEntity>()
         
         existingLiveContent.forEach { content ->
-            val updatedUrl = updateLiveUrlExtension(content.url, configuredExtension)
+            val category = content.category
+            val updatedUrl = updateLiveUrlExtension(
+                tokenizedUrl = content.url,
+                configuredExtension = configuredExtension,
+                providerName = providerName,
+                channelTitle = content.title,
+                categoryName = category?.categoryName
+            )
             if (updatedUrl != content.url) {
                 content.url = updatedUrl
                 contentToUpdate.add(content)
