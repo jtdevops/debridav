@@ -45,7 +45,9 @@ class DirectoryResource(
     var directoryChildren: MutableList<Resource>? = null
 
     override fun getUniqueId(): String {
-        return directory.id!!.toString()
+        // For virtual directories (like /live folders), id may be null
+        // Use path-based ID for virtual directories, database ID for real directories
+        return directory.id?.toString() ?: "virtual_dir_${directory.path?.hashCode() ?: directory.name?.hashCode() ?: 0}"
     }
 
     override fun getName(): String {
@@ -63,7 +65,7 @@ class DirectoryResource(
     override fun getModifiedDate(): Date {
         return Date.from(
             Instant.ofEpochMilli(
-                directory.lastModified!!
+                directory.lastModified ?: System.currentTimeMillis()
             )
         )
     }
@@ -85,7 +87,7 @@ class DirectoryResource(
     }
 
     override fun getCreateDate(): Date {
-        return Date.from(Instant.ofEpochMilli(directory.lastModified!!))
+        return Date.from(Instant.ofEpochMilli(directory.lastModified ?: System.currentTimeMillis()))
     }
 
     override fun child(childName: String?): Resource? {

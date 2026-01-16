@@ -507,7 +507,8 @@ class IptvSyncService(
                 }
             }
             if (filtered.isNotEmpty()) {
-                syncContentToDatabase(providerConfig.name, filtered)
+                // Pass providerConfig to enable checking existing live channels against exclude configuration
+                syncContentToDatabase(providerConfig.name, filtered, providerConfig, forceSync = false)
             }
 
             // Hashes are updated during sync for Xtream Codes, or here for M3U
@@ -1067,9 +1068,10 @@ class IptvSyncService(
                             config = providerConfig
                         )
                     }
-                    // Only sync categories if they changed (hash is not null) and after filtering
+                    // Always sync categories if they changed (hash is not null) and after filtering
+                    // This ensures database stays aligned with exclude configuration
                     if (liveCategoriesHash != null) {
-                        syncCategories(providerConfig.name, "live", filteredCategories.map { it.category_id.toString() to it.category_name })
+                        syncCategories(providerConfig.name, "live", filteredCategories.map { it.category_id.toString() to it.category_name }, providerConfig)
                     }
                     // Return filtered categories for stream processing
                     filteredCategories
@@ -1238,9 +1240,10 @@ class IptvSyncService(
                             config = providerConfig
                         )
                     }
-                    // Sync categories if they changed (hash is not null) or if forceSync, and after filtering
+                    // Always sync categories if they changed (hash is not null) or if forceSync, and after filtering
+                    // This ensures database stays aligned with exclude configuration, especially when forceSync is true
                     if (liveCategoriesHash != null || forceSync) {
-                        syncCategories(providerConfig.name, "live", filteredCategories.map { it.category_id.toString() to it.category_name })
+                        syncCategories(providerConfig.name, "live", filteredCategories.map { it.category_id.toString() to it.category_name }, providerConfig)
                     }
                     // Return filtered categories for stream processing
                     filteredCategories
@@ -1260,8 +1263,10 @@ class IptvSyncService(
                 // Process streams with database filtering
                 val liveContent = syncLiveContent(providerConfig, liveCategories, liveStreamsBody)
                 
-                if (liveContent.isNotEmpty()) {
-                    syncContentToDatabase(providerConfig.name, liveContent)
+                // Always sync content to database when forceSync is true, even if list is empty
+                // This ensures existing channels are checked against exclude configuration
+                if (liveContent.isNotEmpty() || forceSync) {
+                    syncContentToDatabase(providerConfig.name, liveContent, providerConfig, forceSync)
                     
                     // Update existing live content URLs to use the correct extension
                     updateExistingLiveContentUrls(providerConfig.name, providerConfig.liveChannelExtension)
@@ -1344,7 +1349,8 @@ class IptvSyncService(
     private fun syncCategories(
         providerName: String,
         categoryType: String,
-        categories: List<Pair<String, String>> // categoryId to categoryName
+        categories: List<Pair<String, String>>, // categoryId to categoryName
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration? = null
     ) {
         val now = Instant.now()
         val existingCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, categoryType)
@@ -1352,9 +1358,28 @@ class IptvSyncService(
         
         val incomingIds = categories.map { it.first }.toSet()
         
-        // Mark categories as inactive if they're no longer available
+        // Mark categories as inactive if they're no longer available OR if they should be excluded based on config
         existingMap.values.forEach { existing ->
+            var shouldBeInactive = false
+            
+            // Check if category is no longer in incoming list
             if (!incomingIds.contains(existing.categoryId)) {
+                shouldBeInactive = true
+            }
+            // For live categories, also check if they should be excluded based on current configuration
+            else if (categoryType == "live" && providerConfig != null) {
+                val shouldInclude = liveChannelDatabaseFilterService.shouldIncludeCategoryForDatabase(
+                    categoryName = existing.categoryName,
+                    categoryId = existing.categoryId,
+                    config = providerConfig
+                )
+                if (!shouldInclude) {
+                    shouldBeInactive = true
+                    logger.debug("Marking live category '${existing.categoryName}' (${existing.categoryId}) as inactive - excluded by configuration")
+                }
+            }
+            
+            if (shouldBeInactive && existing.isActive) {
                 existing.isActive = false
                 existing.lastSynced = now
                 iptvCategoryRepository.save(existing)
@@ -1401,7 +1426,9 @@ class IptvSyncService(
 
     private fun syncContentToDatabase(
         providerName: String,
-        contentItems: List<io.skjaere.debridav.iptv.model.IptvContentItem>
+        contentItems: List<io.skjaere.debridav.iptv.model.IptvContentItem>,
+        providerConfig: io.skjaere.debridav.iptv.configuration.IptvProviderConfiguration? = null,
+        forceSync: Boolean = false
     ) {
         val now = Instant.now()
         
@@ -1431,10 +1458,63 @@ class IptvSyncService(
         val incomingIds = uniqueContentItems.map { it.id }.toSet()
         
         // Mark content as inactive if it's no longer available in the provider's source
+        // OR if it should be excluded based on current configuration (for live content)
         // Only mark items of the same content type being synced (e.g., only LIVE items when syncing LIVE)
         // This only affects providers that are currently being synced (in iptv.providers list)
         // Providers removed from the config are not synced, so their content remains unchanged
-        val inactiveEntities = existingMapOfType.values.filter { !incomingIds.contains(it.contentId) }
+        val inactiveEntities = existingMapOfType.values.filter { existing ->
+            var shouldBeInactive = false
+            
+            // Check if content is no longer in incoming list
+            if (!incomingIds.contains(existing.contentId)) {
+                // For live content, verify it should be excluded based on current configuration
+                // This ensures alignment with config changes, especially when forceSync is true
+                if (contentTypeBeingSynced == ContentType.LIVE && providerConfig != null) {
+                    val category = existing.category
+                    val categoryName = category?.categoryName ?: ""
+                    val categoryId = category?.categoryId ?: ""
+                    
+                    // First check if category should be included
+                    val includeCategory = if (categoryId.isNotEmpty()) {
+                        liveChannelDatabaseFilterService.shouldIncludeCategoryForDatabase(
+                            categoryName = categoryName,
+                            categoryId = categoryId,
+                            config = providerConfig
+                        )
+                    } else {
+                        true // If no category, include by default
+                    }
+                    
+                    if (!includeCategory) {
+                        // Category excluded, exclude all channels in it
+                        shouldBeInactive = true
+                        logger.debug("Marking live channel '${existing.title}' as inactive - category '${categoryName}' excluded by configuration")
+                    } else {
+                        // Category included, check channel exclusion
+                        val includeChannel = liveChannelDatabaseFilterService.shouldIncludeChannelForDatabase(
+                            channelName = existing.title,
+                            categoryName = categoryName,
+                            categoryId = categoryId,
+                            config = providerConfig
+                        )
+                        if (!includeChannel) {
+                            shouldBeInactive = true
+                            logger.debug("Marking live channel '${existing.title}' as inactive - excluded by configuration")
+                        } else {
+                            // Channel should be included but is not in incoming list
+                            // This means it was removed from provider or filtered for another reason
+                            shouldBeInactive = true
+                        }
+                    }
+                } else {
+                    // Not live content, or no provider config - mark inactive if not in incoming list
+                    shouldBeInactive = true
+                }
+            }
+            
+            shouldBeInactive && existing.isActive
+        }
+        
         if (inactiveEntities.isNotEmpty()) {
             inactiveEntities.forEach { existing ->
                 existing.isActive = false
@@ -1551,15 +1631,29 @@ class IptvSyncService(
         channelTitle: String? = null,
         categoryName: String? = null
     ): String {
-        // Pattern to match: /live/{anything}/{anything}/{stream_id}.{old_extension}
-        // This handles both tokenized URLs ({BASE_URL}/live/{USERNAME}/...) and resolved URLs
-        // The pattern matches: /live/ followed by two path segments, then stream_id, then extension
-        val xtreamCodesPattern = Regex("""(/live/[^/]+/[^/]+/\d+)\.([a-zA-Z0-9]+)(\?.*)?$""")
-        
-        // Check if this is a file path (not an Xtream Codes URL)
-        // File paths have format: /live/{provider}/{category}/{channel}.ts where channel is not numeric
+        // First, check if this is a file path (not an Xtream Codes URL)
+        // File paths have format: /live/{provider}/{category}/{channel}.{ext}
+        // where channel is NOT purely numeric (unlike Xtream Codes stream IDs)
+        // Pattern: /live/ followed by exactly 3 path segments (provider/category/channel.ext)
         val filePathPattern = Regex("""^/live/[^/]+/[^/]+/[^/]+\.([a-zA-Z0-9]+)(\?.*)?$""")
-        val isFilePath = filePathPattern.matches(tokenizedUrl) && !xtreamCodesPattern.containsMatchIn(tokenizedUrl)
+        
+        if (filePathPattern.matches(tokenizedUrl)) {
+            // Extract the channel name (third path segment before the extension)
+            val pathParts = tokenizedUrl.removePrefix("/live/").substringBefore("?").substringBefore(".").split("/")
+            if (pathParts.size == 3) {
+                val channelName = pathParts[2]
+                // If channel name is NOT purely numeric, this is a file path, not an Xtream Codes URL
+                val isNumericChannel = channelName.matches(Regex("""^\d+$"""))
+                if (!isNumericChannel) {
+                    // This is a file path - return as-is without any warnings
+                    return tokenizedUrl
+                }
+            }
+        }
+        
+        // Pattern to match Xtream Codes URLs: /live/{anything}/{anything}/{numeric_stream_id}.{extension}
+        // This handles both tokenized URLs ({BASE_URL}/live/{USERNAME}/...) and resolved URLs
+        val xtreamCodesPattern = Regex("""(/live/[^/]+/[^/]+/\d+)\.([a-zA-Z0-9]+)(\?.*)?$""")
         
         return if (xtreamCodesPattern.containsMatchIn(tokenizedUrl)) {
             // This is an Xtream Codes URL - update the extension
@@ -1569,18 +1663,14 @@ class IptvSyncService(
                 // Replace extension with {ext} token instead of configured extension
                 "$beforeExtension.{ext}$queryParams"
             }
-        } else if (isFilePath) {
-            // This is a file path - return as-is without any warnings
-            tokenizedUrl
         } else {
-            // Pattern doesn't match and it's not a file path
-            // This might be a malformed Xtream Codes URL, so log a warning
-            // Only log if the URL looks like it should be an Xtream Codes URL (contains tokens or looks like a URL)
+            // Pattern doesn't match - this might be a malformed Xtream Codes URL
+            // Only log if the URL looks like it should be an Xtream Codes URL (contains tokens)
+            // Don't log for file paths or other non-Xtream URLs
             val looksLikeXtreamUrl = tokenizedUrl.contains("{BASE_URL}") || 
                                     tokenizedUrl.contains("{USERNAME}") || 
                                     tokenizedUrl.contains("{PASSWORD}") ||
-                                    tokenizedUrl.contains("://") ||
-                                    (tokenizedUrl.startsWith("/live/") && tokenizedUrl.contains("/"))
+                                    (tokenizedUrl.contains("://") && tokenizedUrl.contains("/live/"))
             
             if (looksLikeXtreamUrl) {
                 logger.debug("Could not update extension in live URL (pattern didn't match): $tokenizedUrl")
