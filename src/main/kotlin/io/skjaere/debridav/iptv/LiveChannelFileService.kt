@@ -237,11 +237,17 @@ class LiveChannelFileService(
         
         val extension = "ts"
         
+        // Use estimated size for live streams (similar to how MOVIES/SERIES use estimates)
+        // Live streams are continuous, so we use a reasonable estimate for directory listing
+        // This prevents I/O errors when listing the /live folder
+        // Using episode size (1GB) since live channels are more like episodes than movies
+        val estimatedSize = 1_000_000_000L // ~1GB estimate (same as episodes)
+        
         // Create DebridIptvContent
         val debridIptvContent = DebridIptvContent().apply {
             this.iptvProviderName = channel.providerName
             this.iptvContentId = channel.contentId
-            this.size = 0L // Live streams don't have a fixed size
+            this.size = estimatedSize // Use estimated size for live streams (prevents I/O errors)
             this.mimeType = when (extension.lowercase()) {
                 "m3u8" -> "application/vnd.apple.mpegurl"
                 "ts" -> "video/mp2t"
@@ -252,7 +258,7 @@ class LiveChannelFileService(
         // Create IptvFile link
         val iptvFile = IptvFile(
             path = "${sanitizeFileName(channel.title)}.$extension",
-            size = 0L,
+            size = estimatedSize, // Use estimated size (same as DebridIptvContent)
             mimeType = debridIptvContent.mimeType ?: "video/mp4",
             link = channel.url, // Use tokenized URL
             params = emptyMap(),
@@ -262,10 +268,11 @@ class LiveChannelFileService(
         debridIptvContent.debridLinks.add(iptvFile)
         
         // Create virtual RemotelyCachedEntity (not persisted)
+        // Set size to match DebridIptvContent.size (same pattern as DBItems)
         val entity = RemotelyCachedEntity().apply {
             this.name = filePath.substringAfterLast("/")
             this.lastModified = Instant.now().toEpochMilli()
-            this.size = 0L
+            this.size = debridIptvContent.size // Use same size as DebridIptvContent (prevents I/O errors)
             this.mimeType = debridIptvContent.mimeType
             this.contents = debridIptvContent
             this.hash = "${channel.providerName}_${channel.contentId}".hashCode().toString()

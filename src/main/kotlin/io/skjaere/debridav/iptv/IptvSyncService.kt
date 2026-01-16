@@ -48,6 +48,10 @@ class IptvSyncService(
     // Track if initial sequential sync has completed (VOS/SERIES then LIVE)
     private val initialSequentialSyncCompleted = AtomicBoolean(false)
     
+    // Track if live sync was just executed as part of initial sequential sync
+    // Used to prevent double execution when triggerPendingSyncs() is called
+    private val liveSyncJustExecutedInSequential = AtomicBoolean(false)
+    
     // Lock to ensure only one IPTV sync runs at a time (prevents collisions between VOD/SERIES and LIVE syncs)
     private val syncLock = ReentrantLock()
     
@@ -109,6 +113,13 @@ class IptvSyncService(
             return
         }
         try {
+            // Check if we just completed initial sequential sync and live sync was already run
+            // If so, clear any pending live sync to avoid double execution
+            if (!initialSequentialSyncCompleted.get()) {
+                // This shouldn't happen since we check above, but handle gracefully
+                logger.debug("Initial sequential sync not completed yet, skipping scheduled live sync")
+                return
+            }
             syncLiveContentOnly(forceSync = false, skipLockCheck = true)
         } finally {
             syncLock.unlock()
@@ -278,15 +289,32 @@ class IptvSyncService(
                 val liveSyncInterval = iptvConfigurationProperties.liveSyncInterval
                 if (liveSyncInterval != null && iptvConfigurationProperties.liveEnabled) {
                     logger.info("Initial sequential sync: triggering live content sync after VOS/SERIES sync completion")
+                    // Mark that we're about to run live sync as part of initial sequential sync
+                    liveSyncJustExecutedInSequential.set(true)
                     try {
                         syncLiveContentOnly(forceSync = false, skipLockCheck = true)
                     } catch (e: Exception) {
                         logger.error("Error during initial sequential live sync", e)
+                        // Reset flag if sync failed
+                        liveSyncJustExecutedInSequential.set(false)
                     }
                 }
-                // Mark initial sequential sync as completed - from now on, both syncs run on their own schedules
+                // Mark initial sequential sync as completed BEFORE releasing lock
+                // This prevents scheduled methods from marking themselves as pending
+                // (they check this flag and return early if false)
                 initialSequentialSyncCompleted.set(true)
                 logger.info("Initial sequential sync completed - syncs will now run on their own schedules")
+                
+                // Clear any pending "live" sync since we just ran it as part of initial sequential sync
+                // This prevents it from running again when triggerPendingSyncs() is called
+                // Do this after setting the flag so scheduled methods won't mark themselves as pending
+                pendingSync.updateAndGet { current ->
+                    when (current) {
+                        "live" -> null // Clear live pending since we just ran it
+                        "both" -> "vod_series" // Keep vod_series pending, remove live
+                        else -> current // Keep other pending states
+                    }
+                }
             }
         } finally {
             // Only release lock if we acquired it (not if it was already held)
@@ -338,6 +366,12 @@ class IptvSyncService(
                     syncIptvContent(forceSync = false, skipLockCheck = true)
                 }
                 "live" -> {
+                    // Check if live sync was just executed as part of initial sequential sync
+                    // If so, skip triggering it again to prevent double execution
+                    if (liveSyncJustExecutedInSequential.getAndSet(false)) {
+                        logger.debug("Skipping pending LIVE sync - it was just executed as part of initial sequential sync")
+                        return
+                    }
                     logger.info("Triggering pending LIVE sync that was skipped earlier")
                     syncLiveContentOnly(forceSync = false, skipLockCheck = true)
                 }
@@ -349,9 +383,22 @@ class IptvSyncService(
                     // (it might have been cleared if it was the initial sequential sync)
                     val stillPending = pendingSync.get()
                     if (stillPending == "live" || stillPending == "both") {
-                        logger.info("Triggering pending LIVE sync that was skipped earlier")
-                        syncLiveContentOnly(forceSync = false, skipLockCheck = true)
-                        pendingSync.set(null) // Clear after both are done
+                        // Check if live sync was just executed as part of initial sequential sync
+                        // If so, skip triggering it again to prevent double execution
+                        if (liveSyncJustExecutedInSequential.getAndSet(false)) {
+                            logger.debug("Skipping pending LIVE sync - it was just executed as part of initial sequential sync")
+                            pendingSync.updateAndGet { current ->
+                                when (current) {
+                                    "live" -> null
+                                    "both" -> "vod_series"
+                                    else -> current
+                                }
+                            }
+                        } else {
+                            logger.info("Triggering pending LIVE sync that was skipped earlier")
+                            syncLiveContentOnly(forceSync = false, skipLockCheck = true)
+                            pendingSync.set(null) // Clear after both are done
+                        }
                     }
                 }
             }
@@ -1493,6 +1540,9 @@ class IptvSyncService(
      * URLs are in format: {BASE_URL}/live/{USERNAME}/{PASSWORD}/{stream_id}.{extension}
      * This replaces the extension part with {ext} token, which will be resolved at runtime.
      * Handles both tokenized URLs (with {BASE_URL}, {USERNAME}, {PASSWORD}) and resolved URLs.
+     * 
+     * Note: File paths (like /live/provider/category/channel.ts) don't need pattern replacement
+     * and will be returned as-is without warnings.
      */
     private fun updateLiveUrlExtension(
         tokenizedUrl: String,
@@ -1504,28 +1554,35 @@ class IptvSyncService(
         // Pattern to match: /live/{anything}/{anything}/{stream_id}.{old_extension}
         // This handles both tokenized URLs ({BASE_URL}/live/{USERNAME}/...) and resolved URLs
         // The pattern matches: /live/ followed by two path segments, then stream_id, then extension
-        val pattern = Regex("""(/live/[^/]+/[^/]+/\d+)\.([a-zA-Z0-9]+)(\?.*)?$""")
+        val xtreamCodesPattern = Regex("""(/live/[^/]+/[^/]+/\d+)\.([a-zA-Z0-9]+)(\?.*)?$""")
         
-        return if (pattern.containsMatchIn(tokenizedUrl)) {
-            pattern.replace(tokenizedUrl) { matchResult ->
+        // Check if this is a file path (not an Xtream Codes URL)
+        // File paths have format: /live/{provider}/{category}/{channel}.ts where channel is not numeric
+        val filePathPattern = Regex("""^/live/[^/]+/[^/]+/[^/]+\.([a-zA-Z0-9]+)(\?.*)?$""")
+        val isFilePath = filePathPattern.matches(tokenizedUrl) && !xtreamCodesPattern.containsMatchIn(tokenizedUrl)
+        
+        return if (xtreamCodesPattern.containsMatchIn(tokenizedUrl)) {
+            // This is an Xtream Codes URL - update the extension
+            xtreamCodesPattern.replace(tokenizedUrl) { matchResult ->
                 val beforeExtension = matchResult.groupValues[1]
                 val queryParams = matchResult.groupValues.getOrNull(3) ?: ""
                 // Replace extension with {ext} token instead of configured extension
                 "$beforeExtension.{ext}$queryParams"
             }
+        } else if (isFilePath) {
+            // This is a file path - return as-is without any warnings
+            tokenizedUrl
         } else {
-            // If pattern doesn't match, return URL as-is (shouldn't happen for valid live URLs)
-            // Only log warning if liveLogFilePaths is enabled and we have the necessary info to show file path
-            if (iptvConfigurationProperties.liveLogFilePaths && providerName != null && channelTitle != null && categoryName != null) {
-                val sanitizedProviderName = sanitizeFileName(providerName)
-                val sanitizedCategoryName = sanitizeFileName(categoryName)
-                val sanitizedChannelName = sanitizeFileName(channelTitle)
-                val filePath = "/live/$sanitizedProviderName/$sanitizedCategoryName/$sanitizedChannelName.ts"
-                logger.warn("Could not update extension in live URL (pattern didn't match), file path would be: $filePath")
-            } else if (!iptvConfigurationProperties.liveLogFilePaths) {
-                // Don't log if logging is disabled
-            } else {
-                // Log URL only if we don't have file path info
+            // Pattern doesn't match and it's not a file path
+            // This might be a malformed Xtream Codes URL, so log a warning
+            // Only log if the URL looks like it should be an Xtream Codes URL (contains tokens or looks like a URL)
+            val looksLikeXtreamUrl = tokenizedUrl.contains("{BASE_URL}") || 
+                                    tokenizedUrl.contains("{USERNAME}") || 
+                                    tokenizedUrl.contains("{PASSWORD}") ||
+                                    tokenizedUrl.contains("://") ||
+                                    (tokenizedUrl.startsWith("/live/") && tokenizedUrl.contains("/"))
+            
+            if (looksLikeXtreamUrl) {
                 logger.debug("Could not update extension in live URL (pattern didn't match): $tokenizedUrl")
             }
             tokenizedUrl
