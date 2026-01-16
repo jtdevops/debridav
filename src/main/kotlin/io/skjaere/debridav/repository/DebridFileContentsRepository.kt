@@ -82,6 +82,19 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
         )
     """)
     fun findByIptvContentRefId(iptvContentRefId: Long): List<RemotelyCachedEntity>
+    
+    /**
+     * Bulk query to find all VFS files linked to multiple IPTV content IDs in a single query.
+     * This avoids N+1 query problems when cleaning up large numbers of streams.
+     */
+    @Query("""
+        select rce from RemotelyCachedEntity rce 
+        where rce.contents.id in (
+            select dic.id from DebridIptvContent dic 
+            where dic.iptvContentRefId in :iptvContentRefIds
+        )
+    """)
+    fun findByIptvContentRefIds(iptvContentRefIds: Collection<Long>): List<RemotelyCachedEntity>
 
     @Query(
         """

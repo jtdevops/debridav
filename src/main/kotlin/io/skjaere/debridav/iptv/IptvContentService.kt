@@ -829,60 +829,87 @@ class IptvContentService(
         
         logger.info("Found ${liveStreamsToDelete.size} live streams linked to inactive categories for provider $providerName")
         
-        // Batch fetch all VFS files linked to these streams to avoid N+1 queries
-        val streamIds = liveStreamsToDelete.mapNotNull { it.id }.toSet()
+        // Only check for VFS files if VFS creation is enabled
+        // If VFS is disabled, skip file operations entirely to avoid unnecessary database queries
+        val vfsEnabled = iptvConfigurationProperties.liveCreateVfsEntries
+        logger.debug("VFS entry creation enabled: $vfsEnabled for provider $providerName")
         
-        // Fetch files in batches to avoid loading everything into memory at once
-        val allLinkedFiles = mutableListOf<RemotelyCachedEntity>()
-        streamIds.chunked(1000).forEachIndexed { batchIndex, batch ->
-            val batchFiles = batch.flatMap { streamId ->
-                try {
-                    debridFileContentsRepository.findByIptvContentRefId(streamId)
-                } catch (e: Exception) {
-                    logger.warn("Error fetching files for stream ID $streamId", e)
-                    emptyList()
-                }
-            }
-            allLinkedFiles.addAll(batchFiles.filterIsInstance<RemotelyCachedEntity>())
+        if (vfsEnabled) {
+            val streamIds = liveStreamsToDelete.mapNotNull { it.id }.toSet()
             
-            if ((batchIndex + 1) % 10 == 0) {
-                logger.info("Fetched files for ${(batchIndex + 1) * 1000} streams (found ${allLinkedFiles.size} files so far)...")
-            }
-        }
-        
-        val totalFilesToDelete = allLinkedFiles.size
-        logger.info("Found $totalFilesToDelete VFS files linked to ${liveStreamsToDelete.size} streams, deleting them")
-        
-        // Delete VFS files using bulk deleteAll instead of individual hash deletes
-        // This is much more efficient and reduces CPU usage
-        if (allLinkedFiles.isNotEmpty()) {
-            // Delete in batches to avoid huge transactions
-            allLinkedFiles.chunked(500).forEachIndexed { batchIndex, fileBatch ->
-                try {
-                    // Use deleteAll for bulk deletion - much more efficient than individual deletes
-                    debridFileContentsRepository.deleteAll(fileBatch)
-                    logger.info("Deleted batch ${batchIndex + 1}: ${fileBatch.size} VFS files (total: ${(batchIndex + 1) * 500} out of $totalFilesToDelete)")
-                } catch (e: Exception) {
-                    logger.error("Error deleting batch ${batchIndex + 1} of VFS files", e)
-                    // Fallback to individual deletes for this batch if bulk delete fails
-                    fileBatch.forEach { file ->
+            if (streamIds.isEmpty()) {
+                logger.debug("No stream IDs found, skipping VFS file cleanup")
+            } else {
+                logger.info("Checking for VFS files linked to ${streamIds.size} streams using bulk query")
+                
+                // Use bulk query to fetch all files in a single database query (or a few queries if needed)
+                // This avoids N+1 query problems - instead of 26,892+ queries, we do 1-2 queries
+                val allLinkedFiles = try {
+                    // Some databases have limits on IN clause size, so chunk if needed
+                    // PostgreSQL typically handles 1000s of values, but we'll be safe with 5000
+                    streamIds.chunked(5000).flatMap { chunk ->
                         try {
-                            val hash = file.hash
-                            if (hash != null) {
-                                debridFileContentsRepository.deleteDbEntityByHash(hash)
-                            }
-                        } catch (e2: Exception) {
-                            logger.warn("Failed to delete VFS file with hash ${file.hash}", e2)
+                            debridFileContentsRepository.findByIptvContentRefIds(chunk)
+                        } catch (e: Exception) {
+                            logger.warn("Error fetching VFS files for chunk of ${chunk.size} stream IDs", e)
+                            emptyList()
                         }
                     }
+                } catch (e: Exception) {
+                    logger.error("Error fetching VFS files for streams", e)
+                    emptyList()
+                }
+                
+                val totalFilesToDelete = allLinkedFiles.size
+                
+                if (totalFilesToDelete > 0) {
+                    logger.info("Found $totalFilesToDelete VFS files linked to ${liveStreamsToDelete.size} streams, deleting them")
+                    
+                    // Delete VFS files using bulk deleteAll instead of individual hash deletes
+                    // This is much more efficient and reduces CPU usage
+                    // Delete in batches to avoid huge transactions
+                    allLinkedFiles.chunked(500).forEachIndexed { batchIndex, fileBatch ->
+                        try {
+                            // Use deleteAll for bulk deletion - much more efficient than individual deletes
+                            debridFileContentsRepository.deleteAll(fileBatch)
+                            logger.info("Deleted batch ${batchIndex + 1}: ${fileBatch.size} VFS files (total: ${(batchIndex + 1) * 500} out of $totalFilesToDelete)")
+                        } catch (e: Exception) {
+                            logger.error("Error deleting batch ${batchIndex + 1} of VFS files", e)
+                            // Fallback to individual deletes for this batch if bulk delete fails
+                            fileBatch.forEach { file ->
+                                try {
+                                    val hash = file.hash
+                                    if (hash != null) {
+                                        debridFileContentsRepository.deleteDbEntityByHash(hash)
+                                    }
+                                } catch (e2: Exception) {
+                                    logger.warn("Failed to delete VFS file with hash ${file.hash}", e2)
+                                }
+                            }
+                        }
+                    }
+                    logger.info("Deleted $totalFilesToDelete VFS files linked to inactive live streams")
+                } else {
+                    logger.info("No VFS files found for inactive live streams, skipping file deletion")
                 }
             }
-            logger.info("Deleted $totalFilesToDelete VFS files linked to inactive live streams")
+        } else {
+            logger.info("Skipping VFS file cleanup - VFS entry creation is disabled (IPTV_LIVE_CREATE_VFS_ENTRIES=false)")
         }
         
-        // Delete all live streams linked to inactive categories
+        // Delete all live streams linked to inactive categories in batches to avoid CPU spikes
         logger.info("Deleting ${liveStreamsToDelete.size} live streams linked to inactive categories for provider $providerName")
-        iptvContentRepository.deleteAll(liveStreamsToDelete)
+        
+        // Delete streams in batches to avoid overwhelming the database and reduce CPU usage
+        liveStreamsToDelete.chunked(1000).forEachIndexed { batchIndex, batch ->
+            try {
+                iptvContentRepository.deleteAll(batch)
+                logger.info("Deleted batch ${batchIndex + 1}: ${batch.size} live streams (total: ${(batchIndex + 1) * 1000} out of ${liveStreamsToDelete.size})")
+            } catch (e: Exception) {
+                logger.error("Error deleting batch ${batchIndex + 1} of live streams", e)
+                throw e // Re-throw to fail the transaction
+            }
+        }
         
         // Delete the inactive categories
         iptvCategoryRepository.deleteAll(inactiveLiveCategories)
