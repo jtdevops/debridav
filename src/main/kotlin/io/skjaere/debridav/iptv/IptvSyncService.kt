@@ -238,6 +238,17 @@ class IptvSyncService(
                     logger.error("Error during cleanup of inactive IPTV content items for provider ${providerConfig.name}", e)
                     // Don't fail the sync if cleanup fails
                 }
+                
+                // Cleanup inactive Movies and Series categories and content
+                try {
+                    val (deletedCategories, deletedContent) = iptvContentService.deleteInactiveMoviesAndSeriesCategoriesAndContentForProvider(providerConfig.name)
+                    if (deletedCategories > 0 || deletedContent > 0) {
+                        logger.info("Cleaned up $deletedCategories inactive Movies/Series categories and $deletedContent content items for provider ${providerConfig.name} after successful sync")
+                    }
+                } catch (e: Exception) {
+                    logger.error("Error during cleanup of inactive Movies/Series categories and content for provider ${providerConfig.name}", e)
+                    // Don't fail the sync if cleanup fails
+                }
             } else {
                 logger.warn("Skipping cleanup for provider ${providerConfig.name} - sync did not complete successfully")
             }
@@ -773,19 +784,33 @@ class IptvSyncService(
         contentItems: List<io.skjaere.debridav.iptv.model.IptvContentItem>
     ) {
         val now = Instant.now()
-        // Query all content for this provider (including inactive) to avoid duplicate key violations
-        val existingContent = iptvContentRepository.findByProviderName(providerName)
         
-        val existingMap = existingContent.associateBy { it.contentId }.toMutableMap()
+        // Determine the content type being synced (all items should be the same type)
+        val contentTypeBeingSynced = contentItems.firstOrNull()?.type
+            ?: throw IllegalArgumentException("Cannot sync empty content list")
+        
+        // Query all content for this provider (including inactive) to avoid duplicate key violations
+        // Note: We need ALL content (not filtered by type) because the unique constraint is on (provider_name, content_id)
+        // The same content_id cannot exist twice for the same provider, regardless of content_type
+        val allExistingContent = iptvContentRepository.findByProviderName(providerName)
+        
+        // Create a map of ALL existing content by contentId (across all types) to check for duplicates
+        val allExistingMap = allExistingContent.associateBy { it.contentId }.toMutableMap()
+        
+        // Filter to only existing content of the same type being synced (for inactive marking)
+        // This prevents marking other content types (e.g., MOVIES/SERIES) as inactive when syncing LIVE
+        val existingContentOfType = allExistingContent.filter { it.contentType == contentTypeBeingSynced }
+        val existingMapOfType = existingContentOfType.associateBy { it.contentId }.toMutableMap()
         
         // Deduplicate contentItems by id to avoid processing the same item twice
         val uniqueContentItems = contentItems.distinctBy { it.id }
         val incomingIds = uniqueContentItems.map { it.id }.toSet()
         
         // Mark content as inactive if it's no longer available in the provider's source
+        // Only mark items of the same content type being synced (e.g., only MOVIE items when syncing MOVIE)
         // This only affects providers that are currently being synced (in iptv.providers list)
         // Providers removed from the config are not synced, so their content remains unchanged
-        val inactiveEntities = existingMap.values.filter { !incomingIds.contains(it.contentId) }
+        val inactiveEntities = existingMapOfType.values.filter { !incomingIds.contains(it.contentId) }
         if (inactiveEntities.isNotEmpty()) {
             inactiveEntities.forEach { existing ->
                 existing.isActive = false
@@ -805,8 +830,10 @@ class IptvSyncService(
         // Prepare all entities for batch save
         val entitiesToSave = mutableListOf<IptvContentEntity>()
         uniqueContentItems.forEach { item ->
-            // Check if entity already exists in database or was already processed in this batch
-            val entity = existingMap[item.id] ?: IptvContentEntity().apply {
+            // Check if entity already exists in database (across ALL types, not just current type)
+            // This is necessary because the unique constraint is on (provider_name, content_id) without content_type
+            // If the same content_id exists with a different type, we need to update it, not create a new one
+            val entity = allExistingMap[item.id] ?: IptvContentEntity().apply {
                 this.providerName = providerName
                 this.contentId = item.id
             }
@@ -837,12 +864,12 @@ class IptvSyncService(
             entitiesToSave.add(entity)
         }
         
-        // Batch save all entities at once
+            // Batch save all entities at once
         if (entitiesToSave.isNotEmpty()) {
             val savedEntities = iptvContentRepository.saveAll(entitiesToSave)
             // Update the map with saved entities
             savedEntities.forEach { saved ->
-                existingMap[saved.contentId] = saved
+                allExistingMap[saved.contentId] = saved
             }
             logger.info("Synced ${entitiesToSave.size} items for provider $providerName")
         }
