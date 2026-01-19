@@ -4,6 +4,8 @@ import io.milton.config.HttpManagerBuilder
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.configuration.HostnameDetectionService
 import io.skjaere.debridav.debrid.DebridLinkService
+import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
+import io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository
 import io.skjaere.debridav.fs.DatabaseFileService
 import io.skjaere.debridav.fs.LocalContentsService
 import io.skjaere.debridav.resource.ArrRequestDetector
@@ -36,7 +38,9 @@ class MiltonConfiguration {
         arrRequestDetector: ArrRequestDetector,
         serverProperties: ServerProperties,
         environment: Environment,
-        hostnameDetectionService: HostnameDetectionService
+        hostnameDetectionService: HostnameDetectionService,
+        debridFolderMappingRepository: DebridFolderMappingRepository?,
+        debridSyncedFileRepository: DebridSyncedFileRepository?
     ): StreamableResourceFactory = StreamableResourceFactory(
         fileService,
         debridService,
@@ -46,6 +50,8 @@ class MiltonConfiguration {
         arrRequestDetector,
         serverProperties,
         environment,
-        hostnameDetectionService
+        hostnameDetectionService,
+        debridFolderMappingRepository,
+        debridSyncedFileRepository
     )
 }

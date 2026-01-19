@@ -9,6 +9,7 @@ import io.milton.resource.MoveableResource
 import io.milton.resource.PutableResource
 import io.milton.resource.Resource
 import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalContentsService
@@ -30,7 +31,9 @@ class DirectoryResource(
     val resourceFactory: StreamableResourceFactory,
     private val localContentsService: LocalContentsService,
     fileService: DatabaseFileService,
-    private val arrRequestDetector: ArrRequestDetector
+    private val arrRequestDetector: ArrRequestDetector,
+    private val debridFolderMappingRepository: io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository?,
+    private val debridSyncedFileRepository: io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository?
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
     DeletableResource {
     
@@ -115,6 +118,27 @@ class DirectoryResource(
             }
         }
         
+        // If this is the root directory and debrid folder mapping is enabled, add mapped folders
+        if (directoryPath == "/" && debridFolderMappingRepository != null && debridSyncedFileRepository != null) {
+            val mappings = debridFolderMappingRepository.findByEnabled(true)
+            
+            mappings.forEach { mapping ->
+                val internalPath = mapping.internalPath ?: return@forEach
+                // Only add mappings that are at the root level (no subdirectories)
+                val pathParts = internalPath.removePrefix("/").split("/")
+                if (pathParts.size == 1) {
+                    // This is a root-level mapping
+                    val folderDirResource = DebridFolderDirectoryResource(
+                        mapping,
+                        resourceFactory,
+                        fileService,
+                        debridSyncedFileRepository
+                    )
+                    children.add(folderDirResource)
+                }
+            }
+        }
+        
         return children
     }
 
@@ -176,7 +200,9 @@ class DirectoryResource(
             resourceFactory,
             localContentsService,
             fileService,
-            arrRequestDetector
+            arrRequestDetector,
+            debridFolderMappingRepository,
+            debridSyncedFileRepository
         )
     }
 
@@ -192,7 +218,7 @@ class DirectoryResource(
 
     private fun toResource(file: DbEntity): Resource? {
         return if (file is DbDirectory)
-            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector)
+            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector, debridFolderMappingRepository, debridSyncedFileRepository)
         else resourceFactory.toFileResource(file)
     }
 }

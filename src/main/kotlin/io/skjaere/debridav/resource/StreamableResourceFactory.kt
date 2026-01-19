@@ -15,7 +15,10 @@ import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.LocalContentsService
+import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
+import io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository
 import io.skjaere.debridav.fs.LocalEntity
+import kotlinx.coroutines.runBlocking
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.stream.StreamingService
 import org.springframework.boot.autoconfigure.web.ServerProperties
@@ -32,7 +35,9 @@ class StreamableResourceFactory(
     private val arrRequestDetector: ArrRequestDetector,
     internal val serverProperties: ServerProperties,
     internal val environment: Environment,
-    internal val hostnameDetectionService: HostnameDetectionService
+    internal val hostnameDetectionService: HostnameDetectionService,
+    private val debridFolderMappingRepository: DebridFolderMappingRepository?,
+    private val debridSyncedFileRepository: DebridSyncedFileRepository?
 ) : ResourceFactory {
     private val logger = LoggerFactory.getLogger(StreamableResourceFactory::class.java)
 
@@ -115,7 +120,65 @@ class StreamableResourceFactory(
                 }
             }
             
-            // Not a STRM path, handle normally
+            // Check if this is a mapped debrid folder path
+            if (debridFolderMappingRepository != null && debridSyncedFileRepository != null) {
+                val mappings = debridFolderMappingRepository.findByEnabled(true)
+                val matchingMapping = mappings.firstOrNull { mapping ->
+                    val internalPath = mapping.internalPath ?: ""
+                    path == internalPath || path.startsWith("$internalPath/")
+                }
+                
+                if (matchingMapping != null) {
+                    // This is a mapped folder path
+                    val internalPath = matchingMapping.internalPath ?: ""
+                    if (path == internalPath) {
+                        // Root of mapped folder - return directory resource
+                        return DebridFolderDirectoryResource(
+                            matchingMapping,
+                            this,
+                            fileService,
+                            debridSyncedFileRepository
+                        )
+                    } else {
+                        // Subdirectory or file within mapped folder
+                        val relativePath = path.removePrefix(internalPath).removePrefix("/")
+                        val syncedFiles = kotlinx.coroutines.runBlocking {
+                            debridSyncedFileRepository.findByFolderMappingAndIsDeleted(matchingMapping, false)
+                        }
+                        
+                        // Check if it's a file
+                        val matchingFile = syncedFiles.firstOrNull { syncedFile ->
+                            syncedFile.vfsPath == path
+                        }
+                        
+                        if (matchingFile != null) {
+                            // Return the actual VFS file
+                            val fileEntity = fileService.getFileAtPath(path)
+                            return fileEntity?.let { toFileResource(it) }
+                        } else {
+                            // Check if it's a subdirectory
+                            val subdirFiles = syncedFiles.filter { syncedFile ->
+                                val vfsPath = syncedFile.vfsPath ?: ""
+                                vfsPath.startsWith("$path/")
+                            }
+                            
+                            if (subdirFiles.isNotEmpty()) {
+                                val dirName = relativePath.substringBeforeLast("/").ifEmpty { relativePath }
+                                return DebridFolderSubdirectoryResource(
+                                    path,
+                                    dirName,
+                                    subdirFiles,
+                                    this,
+                                    fileService,
+                                    debridSyncedFileRepository
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Not a STRM path or mapped folder path, handle normally
             fileService.getFileAtPath(path)
                 ?.let {
                     if (it is DbDirectory) {
@@ -135,7 +198,15 @@ class StreamableResourceFactory(
         if (dbItem !is DbDirectory) {
             error("Not a directory")
         }
-        return DirectoryResource(dbItem, this, localContentsService, fileService, arrRequestDetector)
+        return DirectoryResource(
+            dbItem, 
+            this, 
+            localContentsService, 
+            fileService, 
+            arrRequestDetector,
+            debridFolderMappingRepository,
+            debridSyncedFileRepository
+        )
     }
 
     fun toFileResource(dbItem: DbEntity): Resource? {
