@@ -57,15 +57,11 @@ class GenericWebDavClient(
             }
 
             val responseBody = response.body<String>()
-            logger.debug("WebDAV provider '${config.name}' response status: ${response.status}")
+            logger.trace("WebDAV provider '${config.name}' response status: ${response.status}")
             logger.trace("WebDAV provider '${config.name}' response body: $responseBody")
 
             if (response.status.value == 207) { // Multi-Status
                 val files = parseWebDavResponse(responseBody, config.url)
-                logger.debug("Parsed ${files.size} files from WebDAV provider '${config.name}'")
-                files.forEach { file ->
-                    logger.debug("  - ${file.name} (${if (file.isDirectory) "directory" else "file"}, path: ${file.path})")
-                }
                 files
             } else {
                 logger.warn("Unexpected response status from WebDAV provider '${config.name}': ${response.status}")
@@ -156,7 +152,6 @@ class GenericWebDavClient(
 
             // Try different namespace prefixes that WebDAV servers might use
             val responses = findElements(doc, "response")
-            logger.debug("Found ${responses.size} response elements in WebDAV XML")
 
             for (response in responses) {
                 val href = findElementText(response, "href") ?: continue

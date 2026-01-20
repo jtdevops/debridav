@@ -23,6 +23,8 @@ import io.skjaere.debridav.webdav.folder.WebDavAuthType
 import kotlinx.coroutines.delay
 import io.skjaere.debridav.util.ByteFormatUtil
 import org.slf4j.LoggerFactory
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 class DefaultStreamableLinkPreparer(
     override val httpClient: HttpClient,
@@ -192,7 +194,7 @@ class DefaultStreamableLinkPreparer(
                     headers {
                         // Add WebDAV authentication if this is a folder-mapped file
                         webDavAuthHeader?.let {
-                            logger.debug("Adding WebDAV auth header for folder-mapped file: {}", debridLink.path)
+                            logger.debug("Adding WebDAV auth header for folder-mapped file: {}", urlDecode(debridLink.path))
                             append(HttpHeaders.Authorization, it)
                         }
                         
@@ -336,5 +338,18 @@ class DefaultStreamableLinkPreparer(
         
         // Should never reach here, but return false as fallback
         return false
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original path if decoding fails, or "null" if path is null.
+     */
+    private fun urlDecode(path: String?): String {
+        if (path == null) return "null"
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            path // Return original path if decoding fails
+        }
     }
 }
