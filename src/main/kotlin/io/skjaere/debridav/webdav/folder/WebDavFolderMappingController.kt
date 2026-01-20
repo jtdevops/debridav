@@ -12,11 +12,18 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.PutMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.web.bind.annotation.RestController
 import java.time.Instant
 
 @RestController
 @RequestMapping("/api/webdav-folder-mapping")
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
 class WebDavFolderMappingController(
     private val folderMappingRepository: WebDavFolderMappingRepository,
     private val syncService: WebDavFolderSyncService

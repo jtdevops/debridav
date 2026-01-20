@@ -3,11 +3,18 @@ package io.skjaere.debridav.webdav.folder.webdav
 import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
 import io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Service
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 @Service
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
 class WebDavFolderService(
     private val genericWebDavClient: GenericWebDavClient,
     private val providerConfigService: WebDavProviderConfigurationService

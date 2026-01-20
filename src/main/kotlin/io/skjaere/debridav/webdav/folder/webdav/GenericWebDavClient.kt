@@ -12,6 +12,7 @@ import io.ktor.http.contentType
 import io.skjaere.debridav.webdav.folder.WebDavProviderConfiguration
 import io.skjaere.debridav.webdav.folder.WebDavAuthType
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Component
 import java.io.ByteArrayInputStream
 import java.net.URLDecoder
@@ -24,6 +25,12 @@ import org.w3c.dom.Element
  * Supports both Basic and Bearer token authentication
  */
 @Component
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
 class GenericWebDavClient(
     private val httpClient: HttpClient
 ) {

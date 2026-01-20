@@ -16,6 +16,7 @@ import io.skjaere.debridav.webdav.folder.webdav.WebDavFile
 import io.skjaere.debridav.webdav.folder.webdav.WebDavFolderService
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.net.URLDecoder
@@ -23,6 +24,12 @@ import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 @Service
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
 class WebDavFolderSyncService(
     private val folderMappingRepository: WebDavFolderMappingRepository,
     private val syncedFileRepository: WebDavSyncedFileRepository,

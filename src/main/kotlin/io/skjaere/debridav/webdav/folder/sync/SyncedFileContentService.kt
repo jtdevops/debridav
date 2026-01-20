@@ -6,10 +6,17 @@ import io.skjaere.debridav.fs.DebridCachedTorrentContent
 import io.skjaere.debridav.fs.DebridFileContents
 import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Service
 import java.time.Instant
 
 @Service
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
 class SyncedFileContentService {
     private val logger = LoggerFactory.getLogger(SyncedFileContentService::class.java)
 

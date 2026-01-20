@@ -3,11 +3,18 @@ package io.skjaere.debridav.webdav.folder.sync
 import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
 import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Service
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 @Service
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
 class FileMappingService {
     private val logger = LoggerFactory.getLogger(FileMappingService::class.java)
 
