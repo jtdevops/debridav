@@ -15,8 +15,8 @@ import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.LocalContentsService
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingRepository
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository
 import io.skjaere.debridav.fs.LocalEntity
 import kotlinx.coroutines.runBlocking
 import io.skjaere.debridav.fs.RemotelyCachedEntity
@@ -36,8 +36,8 @@ class StreamableResourceFactory(
     internal val serverProperties: ServerProperties,
     internal val environment: Environment,
     internal val hostnameDetectionService: HostnameDetectionService,
-    private val debridFolderMappingRepository: DebridFolderMappingRepository?,
-    private val debridSyncedFileRepository: DebridSyncedFileRepository?
+    private val webDavFolderMappingRepository: WebDavFolderMappingRepository?,
+    private val webDavSyncedFileRepository: WebDavSyncedFileRepository?
 ) : ResourceFactory {
     private val logger = LoggerFactory.getLogger(StreamableResourceFactory::class.java)
 
@@ -120,9 +120,9 @@ class StreamableResourceFactory(
                 }
             }
             
-            // Check if this is a mapped debrid folder path
-            if (debridFolderMappingRepository != null && debridSyncedFileRepository != null) {
-                val mappings = debridFolderMappingRepository.findByEnabled(true)
+            // Check if this is a mapped WebDAV folder path
+            if (webDavFolderMappingRepository != null && webDavSyncedFileRepository != null) {
+                val mappings = webDavFolderMappingRepository.findByEnabled(true)
                 val matchingMapping = mappings.firstOrNull { mapping ->
                     val internalPath = mapping.internalPath ?: ""
                     path == internalPath || path.startsWith("$internalPath/")
@@ -133,17 +133,17 @@ class StreamableResourceFactory(
                     val internalPath = matchingMapping.internalPath ?: ""
                     if (path == internalPath) {
                         // Root of mapped folder - return directory resource
-                        return DebridFolderDirectoryResource(
+                        return WebDavFolderDirectoryResource(
                             matchingMapping,
                             this,
                             fileService,
-                            debridSyncedFileRepository
+                            webDavSyncedFileRepository
                         )
                     } else {
                         // Subdirectory or file within mapped folder
                         val relativePath = path.removePrefix(internalPath).removePrefix("/")
                         val syncedFiles = kotlinx.coroutines.runBlocking {
-                            debridSyncedFileRepository.findByFolderMappingAndIsDeleted(matchingMapping, false)
+                            webDavSyncedFileRepository.findByFolderMappingAndIsDeleted(matchingMapping, false)
                         }
                         
                         // Check if it's a file by constructing full path from vfsPath + vfsFileName
@@ -177,13 +177,13 @@ class StreamableResourceFactory(
                             
                             if (subdirFiles.isNotEmpty()) {
                                 val dirName = path.substringAfterLast("/")
-                                return DebridFolderSubdirectoryResource(
+                                return WebDavFolderSubdirectoryResource(
                                     path,
                                     dirName,
                                     subdirFiles,
                                     this,
                                     fileService,
-                                    debridSyncedFileRepository
+                                    webDavSyncedFileRepository
                                 )
                             }
                         }
@@ -217,8 +217,8 @@ class StreamableResourceFactory(
             localContentsService, 
             fileService, 
             arrRequestDetector,
-            debridFolderMappingRepository,
-            debridSyncedFileRepository
+            webDavFolderMappingRepository,
+            webDavSyncedFileRepository
         )
     }
 

@@ -1,4 +1,4 @@
-package io.skjaere.debridav.debrid.folder.webdav
+package io.skjaere.debridav.webdav.folder.webdav
 
 import java.time.Instant
 

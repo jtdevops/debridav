@@ -1,4 +1,4 @@
-package io.skjaere.debridav.debrid.folder
+package io.skjaere.debridav.webdav.folder
 
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
@@ -15,12 +15,12 @@ import java.time.Instant
 
 @Entity
 @Table(
-    name = "debrid_synced_file",
+    name = "webdav_synced_file",
     indexes = [
-        Index(name = "idx_debrid_synced_file_folder_mapping_id", columnList = "folder_mapping_id"),
-        Index(name = "idx_debrid_synced_file_provider_file_id", columnList = "provider_file_id"),
-        Index(name = "idx_debrid_synced_file_vfs_path", columnList = "vfs_path"),
-        Index(name = "idx_debrid_synced_file_is_deleted", columnList = "is_deleted")
+        Index(name = "idx_webdav_synced_file_folder_mapping_id", columnList = "folder_mapping_id"),
+        Index(name = "idx_webdav_synced_file_provider_file_id", columnList = "provider_file_id"),
+        Index(name = "idx_webdav_synced_file_vfs_path", columnList = "vfs_path"),
+        Index(name = "idx_webdav_synced_file_is_deleted", columnList = "is_deleted")
     ],
     uniqueConstraints = [
         UniqueConstraint(
@@ -29,7 +29,7 @@ import java.time.Instant
         )
     ]
 )
-class DebridSyncedFileEntity {
+class WebDavSyncedFileEntity {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     var id: Long? = null
@@ -38,9 +38,9 @@ class DebridSyncedFileEntity {
     @JoinColumn(
         name = "folder_mapping_id",
         nullable = false,
-        foreignKey = ForeignKey(name = "fk_debrid_synced_file_folder_mapping")
+        foreignKey = ForeignKey(name = "fk_webdav_synced_file_folder_mapping")
     )
-    var folderMapping: DebridFolderMappingEntity? = null
+    var folderMapping: WebDavFolderMappingEntity? = null
 
     @Column(name = "provider_file_id", nullable = false, length = 512)
     var providerFileId: String? = null

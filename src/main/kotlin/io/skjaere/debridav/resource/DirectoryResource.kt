@@ -9,7 +9,7 @@ import io.milton.resource.MoveableResource
 import io.milton.resource.PutableResource
 import io.milton.resource.Resource
 import io.skjaere.debridav.fs.DatabaseFileService
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingRepository
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalContentsService
@@ -32,8 +32,8 @@ class DirectoryResource(
     private val localContentsService: LocalContentsService,
     fileService: DatabaseFileService,
     private val arrRequestDetector: ArrRequestDetector,
-    private val debridFolderMappingRepository: io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository?,
-    private val debridSyncedFileRepository: io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository?
+    private val webDavFolderMappingRepository: WebDavFolderMappingRepository?,
+    private val webDavSyncedFileRepository: io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository?
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
     DeletableResource {
     
@@ -118,9 +118,9 @@ class DirectoryResource(
             }
         }
         
-        // If this is the root directory and debrid folder mapping is enabled, add mapped folders
-        if (directoryPath == "/" && debridFolderMappingRepository != null && debridSyncedFileRepository != null) {
-            val mappings = debridFolderMappingRepository.findByEnabled(true)
+        // If this is the root directory and WebDAV folder mapping is enabled, add mapped folders
+        if (directoryPath == "/" && webDavFolderMappingRepository != null && webDavSyncedFileRepository != null) {
+            val mappings = webDavFolderMappingRepository.findByEnabled(true)
             
             mappings.forEach { mapping ->
                 val internalPath = mapping.internalPath ?: return@forEach
@@ -128,11 +128,11 @@ class DirectoryResource(
                 val pathParts = internalPath.removePrefix("/").split("/")
                 if (pathParts.size == 1) {
                     // This is a root-level mapping
-                    val folderDirResource = DebridFolderDirectoryResource(
+                    val folderDirResource = WebDavFolderDirectoryResource(
                         mapping,
                         resourceFactory,
                         fileService,
-                        debridSyncedFileRepository
+                        webDavSyncedFileRepository
                     )
                     children.add(folderDirResource)
                 }
@@ -201,8 +201,8 @@ class DirectoryResource(
             localContentsService,
             fileService,
             arrRequestDetector,
-            debridFolderMappingRepository,
-            debridSyncedFileRepository
+            webDavFolderMappingRepository,
+            webDavSyncedFileRepository
         )
     }
 
@@ -218,7 +218,7 @@ class DirectoryResource(
 
     private fun toResource(file: DbEntity): Resource? {
         return if (file is DbDirectory)
-            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector, debridFolderMappingRepository, debridSyncedFileRepository)
+            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector, webDavFolderMappingRepository, webDavSyncedFileRepository)
         else resourceFactory.toFileResource(file)
     }
 }

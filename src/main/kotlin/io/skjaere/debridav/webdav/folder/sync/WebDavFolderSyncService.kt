@@ -1,54 +1,31 @@
-package io.skjaere.debridav.debrid.folder.sync
+package io.skjaere.debridav.webdav.folder.sync
 
 import io.skjaere.debridav.debrid.DebridProvider
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingEntity
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingProperties
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileEntity
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository
-import io.skjaere.debridav.debrid.folder.SyncMethod
-import io.skjaere.debridav.debrid.folder.api.DebridFile
-import io.skjaere.debridav.debrid.folder.api.DebridFolderApiClient
-import io.skjaere.debridav.debrid.folder.webdav.DebridWebDavClient
-import io.skjaere.debridav.debrid.folder.webdav.WebDavFile
-import io.skjaere.debridav.debrid.folder.webdav.WebDavFolderService
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DatabaseFileService
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingProperties
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingRepository
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository
+import io.skjaere.debridav.webdav.folder.webdav.WebDavFile
+import io.skjaere.debridav.webdav.folder.webdav.WebDavFolderService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 
 @Service
-class DebridFolderSyncService(
-    private val folderMappingRepository: DebridFolderMappingRepository,
-    private val syncedFileRepository: DebridSyncedFileRepository,
+class WebDavFolderSyncService(
+    private val folderMappingRepository: WebDavFolderMappingRepository,
+    private val syncedFileRepository: WebDavSyncedFileRepository,
     private val webDavFolderService: WebDavFolderService,
-    private val apiClients: List<DebridFolderApiClient>,
     private val fileMappingService: FileMappingService,
     private val syncedFileContentService: SyncedFileContentService,
     private val databaseFileService: DatabaseFileService,
-    private val folderMappingProperties: DebridFolderMappingProperties
+    private val folderMappingProperties: WebDavFolderMappingProperties
 ) {
-    private val logger = LoggerFactory.getLogger(DebridFolderSyncService::class.java)
-    private val apiClientCache = ConcurrentHashMap<DebridProvider, DebridFolderApiClient>()
-
-    init {
-        // Initialize API client cache
-        apiClients.forEach { client ->
-            when (client) {
-                is io.skjaere.debridav.debrid.folder.api.RealDebridFolderApiClient -> 
-                    apiClientCache[DebridProvider.REAL_DEBRID] = client
-                is io.skjaere.debridav.debrid.folder.api.PremiumizeFolderApiClient -> 
-                    apiClientCache[DebridProvider.PREMIUMIZE] = client
-                is io.skjaere.debridav.debrid.folder.api.TorBoxFolderApiClient -> 
-                    apiClientCache[DebridProvider.TORBOX] = client
-            }
-        }
-    }
+    private val logger = LoggerFactory.getLogger(WebDavFolderSyncService::class.java)
 
     @Transactional
     suspend fun syncAllMappings() {
@@ -59,13 +36,13 @@ class DebridFolderSyncService(
             try {
                 syncMappingWithRetry(mapping)
             } catch (e: Exception) {
-                logger.error("Error syncing mapping ${mapping.id} (${mapping.provider}:${mapping.externalPath})", e)
+                logger.error("Error syncing mapping ${mapping.id} (${mapping.providerName}:${mapping.externalPath})", e)
                 // Continue with other mappings even if one fails
             }
         }
     }
 
-    private suspend fun syncMappingWithRetry(mapping: DebridFolderMappingEntity, maxRetries: Int = 3) {
+    private suspend fun syncMappingWithRetry(mapping: WebDavFolderMappingEntity, maxRetries: Int = 3) {
         var lastException: Exception? = null
         repeat(maxRetries) { attempt ->
             try {
@@ -84,21 +61,23 @@ class DebridFolderSyncService(
     }
 
     @Transactional
-    suspend fun syncMapping(mapping: DebridFolderMappingEntity) {
-        logger.debug("Syncing mapping ${mapping.id}: ${mapping.provider} -> ${mapping.internalPath}")
+    suspend fun syncMapping(mapping: WebDavFolderMappingEntity) {
+        logger.debug("Syncing mapping ${mapping.id}: ${mapping.providerName} -> ${mapping.internalPath}")
 
-        when (mapping.syncMethod) {
-            SyncMethod.WEBDAV -> syncWebDavMapping(mapping)
-            SyncMethod.API_SYNC -> syncApiMapping(mapping)
-            null -> logger.warn("Mapping ${mapping.id} has no sync method configured, skipping")
+        // Log root folders if enabled for this provider
+        val providerName = mapping.providerName
+        if (providerName != null && providerName in folderMappingProperties.getLogRootFoldersList()) {
+            webDavFolderService.logRootFolders(providerName)
         }
+
+        syncWebDavMapping(mapping)
 
         // Update last synced timestamp
         mapping.lastSynced = Instant.now()
         folderMappingRepository.save(mapping)
     }
 
-    private suspend fun syncWebDavMapping(mapping: DebridFolderMappingEntity) {
+    private suspend fun syncWebDavMapping(mapping: WebDavFolderMappingEntity) {
         try {
             val files = webDavFolderService.listFiles(mapping)
             logger.info("WebDAV sync found ${files.size} total items for mapping ${mapping.id}")
@@ -161,52 +140,8 @@ class DebridFolderSyncService(
         }
     }
 
-    private suspend fun syncApiMapping(mapping: DebridFolderMappingEntity) {
-        val apiClient = apiClientCache[mapping.provider]
-        if (apiClient == null) {
-            logger.warn("No API client found for provider: ${mapping.provider}")
-            return
-        }
-
-        try {
-            val files = apiClient.listFiles(mapping.externalPath ?: "")
-            val existingFiles = syncedFileRepository.findByFolderMapping(mapping)
-                .associateBy { it.providerFileId }
-
-            val providerFileIds = mutableSetOf<String>()
-
-            files.forEach { debridFile ->
-                try {
-                    providerFileIds.add(debridFile.id)
-
-                    val existingFile = existingFiles[debridFile.id]
-                    if (existingFile == null) {
-                        // Create new synced file
-                        createSyncedFileFromApi(mapping, debridFile)
-                    } else {
-                        // Update existing file (check for moves/renames)
-                        updateSyncedFileFromApi(existingFile, debridFile, mapping)
-                    }
-                } catch (e: Exception) {
-                    logger.error("Error processing API file ${debridFile.id} for mapping ${mapping.id}", e)
-                    // Continue with other files
-                }
-            }
-
-            // Mark files as deleted if they're no longer in provider
-            try {
-                syncedFileRepository.markAsDeletedForMissingFiles(mapping, providerFileIds.toList())
-            } catch (e: Exception) {
-                logger.error("Error marking files as deleted for mapping ${mapping.id}", e)
-            }
-        } catch (e: Exception) {
-            logger.error("Error syncing API mapping ${mapping.id}", e)
-            throw e
-        }
-    }
-
     private suspend fun createSyncedFileFromWebDav(
-        mapping: DebridFolderMappingEntity,
+        mapping: WebDavFolderMappingEntity,
         webDavFile: WebDavFile,
         fileId: String
     ) {
@@ -216,7 +151,7 @@ class DebridFolderSyncService(
         logger.info("Creating synced file: vfsPath='{}', vfsFileName='{}', providerPath='{}'", 
             vfsPath, vfsFileName, webDavFile.path)
 
-        val syncedFile = DebridSyncedFileEntity().apply {
+        val syncedFile = WebDavSyncedFileEntity().apply {
             folderMapping = mapping
             providerFileId = fileId
             providerFilePath = webDavFile.path
@@ -232,38 +167,17 @@ class DebridFolderSyncService(
         val savedFile = syncedFileRepository.save(syncedFile)
         logger.info("Saved synced file with id: {}", savedFile.id)
 
-        // Create VFS entry
-        createVfsEntry(savedFile, mapping.provider!!)
-    }
-
-    private suspend fun createSyncedFileFromApi(
-        mapping: DebridFolderMappingEntity,
-        debridFile: DebridFile
-    ) {
-        val vfsPath = fileMappingService.mapToVfsPath(mapping, debridFile.path)
-        val vfsFileName = fileMappingService.getVfsFileName(debridFile.path)
-
-        val syncedFile = DebridSyncedFileEntity().apply {
-            folderMapping = mapping
-            providerFileId = debridFile.id
-            providerFilePath = debridFile.path
-            this.vfsPath = vfsPath
-            this.vfsFileName = vfsFileName
-            fileSize = debridFile.size
-            mimeType = debridFile.mimeType
-            providerLink = debridFile.downloadLink
-            lastChecked = Instant.now()
-            isDeleted = false
+        // Create VFS entry - convert providerName to DebridProvider
+        val provider = mapProviderNameToDebridProvider(mapping.providerName ?: "")
+        if (provider != null) {
+            createVfsEntry(savedFile, provider)
+        } else {
+            logger.warn("Cannot create VFS entry: unknown provider name '${mapping.providerName}'")
         }
-
-        syncedFileRepository.save(syncedFile)
-
-        // Create VFS entry
-        createVfsEntry(syncedFile, mapping.provider!!)
     }
 
     private suspend fun updateSyncedFileFromWebDav(
-        existingFile: DebridSyncedFileEntity,
+        existingFile: WebDavSyncedFileEntity,
         webDavFile: WebDavFile
     ) {
         // Update file metadata
@@ -280,48 +194,7 @@ class DebridFolderSyncService(
         updateVfsEntry(existingFile)
     }
 
-    private suspend fun updateSyncedFileFromApi(
-        existingFile: DebridSyncedFileEntity,
-        debridFile: DebridFile,
-        mapping: DebridFolderMappingEntity
-    ) {
-        // Check if file was moved/renamed using UUID/ID tracking
-        val newVfsPath = fileMappingService.mapToVfsPath(mapping, debridFile.path)
-        val fileWasMoved = existingFile.vfsPath != newVfsPath
-        
-        if (fileWasMoved) {
-            logger.debug("File ${debridFile.id} was moved from ${existingFile.vfsPath} to $newVfsPath")
-            // File was moved in provider - update VFS path
-            existingFile.vfsPath = newVfsPath
-            existingFile.vfsFileName = fileMappingService.getVfsFileName(debridFile.path)
-            
-            // Update VFS entry path if it exists
-            try {
-                val oldFileEntity = databaseFileService.getFileAtPath(existingFile.vfsPath ?: "")
-                if (oldFileEntity != null) {
-                    // File exists at old path - we may need to move it or recreate at new path
-                    // For now, we'll update the existing entry and let the sync handle the move
-                }
-            } catch (e: Exception) {
-                logger.warn("Error checking old VFS path for moved file ${debridFile.id}", e)
-            }
-        }
-
-        // Update file metadata
-        existingFile.providerFilePath = debridFile.path
-        existingFile.fileSize = debridFile.size
-        existingFile.mimeType = debridFile.mimeType
-        existingFile.providerLink = debridFile.downloadLink
-        existingFile.lastChecked = Instant.now()
-        existingFile.isDeleted = false
-
-        syncedFileRepository.save(existingFile)
-
-        // Update VFS entry
-        updateVfsEntry(existingFile)
-    }
-
-    private suspend fun createVfsEntry(syncedFile: DebridSyncedFileEntity, provider: DebridProvider) {
+    private suspend fun createVfsEntry(syncedFile: WebDavSyncedFileEntity, provider: DebridProvider) {
         try {
             val vfsPath = syncedFile.vfsPath
             if (vfsPath.isNullOrBlank()) {
@@ -359,7 +232,7 @@ class DebridFolderSyncService(
         }
     }
 
-    private suspend fun updateVfsEntry(syncedFile: DebridSyncedFileEntity) {
+    private suspend fun updateVfsEntry(syncedFile: WebDavSyncedFileEntity) {
         try {
             val vfsPath = syncedFile.vfsPath ?: return
             val vfsFileName = syncedFile.vfsFileName ?: syncedFile.providerFilePath?.substringAfterLast("/") ?: return
@@ -372,14 +245,16 @@ class DebridFolderSyncService(
 
             val existingFile = databaseFileService.getFileAtPath(fullVfsPath)
             if (existingFile is io.skjaere.debridav.fs.RemotelyCachedEntity) {
-                val provider = syncedFile.folderMapping?.provider ?: return
-                val updatedContents = syncedFileContentService.updateDebridFileContents(
-                    existingFile.contents ?: return,
-                    syncedFile,
-                    provider
-                )
-                databaseFileService.writeDebridFileContentsToFile(existingFile, updatedContents)
-                logger.debug("Updated VFS entry: $fullVfsPath")
+                val provider = mapProviderNameToDebridProvider(syncedFile.folderMapping?.providerName ?: "")
+                if (provider != null) {
+                    val updatedContents = syncedFileContentService.updateDebridFileContents(
+                        existingFile.contents ?: return,
+                        syncedFile,
+                        provider
+                    )
+                    databaseFileService.writeDebridFileContentsToFile(existingFile, updatedContents)
+                    logger.debug("Updated VFS entry: $fullVfsPath")
+                }
             }
         } catch (e: Exception) {
             logger.error("Error updating VFS entry for synced file ${syncedFile.id}", e)
@@ -397,5 +272,18 @@ class DebridFolderSyncService(
         return java.security.MessageDigest.getInstance("SHA-256")
             .digest(path.toByteArray())
             .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Map provider name (string) to DebridProvider enum
+     * Returns null for custom providers that don't map to a DebridProvider
+     */
+    private fun mapProviderNameToDebridProvider(providerName: String): DebridProvider? {
+        return when (providerName.lowercase().trim()) {
+            "premiumize" -> DebridProvider.PREMIUMIZE
+            "real_debrid", "realdebrid" -> DebridProvider.REAL_DEBRID
+            "torbox" -> DebridProvider.TORBOX
+            else -> null // Custom provider - we'll need to handle this differently
+        }
     }
 }

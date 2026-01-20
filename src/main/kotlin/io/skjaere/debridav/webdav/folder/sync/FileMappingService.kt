@@ -1,7 +1,7 @@
-package io.skjaere.debridav.debrid.folder.sync
+package io.skjaere.debridav.webdav.folder.sync
 
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingEntity
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileEntity
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.net.URLDecoder
@@ -14,7 +14,7 @@ class FileMappingService {
     /**
      * Maps a provider file path to VFS path based on the folder mapping
      */
-    fun mapToVfsPath(mapping: DebridFolderMappingEntity, providerFilePath: String): String {
+    fun mapToVfsPath(mapping: WebDavFolderMappingEntity, providerFilePath: String): String {
         val externalPath = mapping.externalPath ?: ""
         val internalPath = mapping.internalPath ?: ""
 
@@ -92,9 +92,9 @@ class FileMappingService {
      * Updates VFS file name if file was renamed in VFS
      */
     fun updateVfsFileName(
-        syncedFile: DebridSyncedFileEntity,
+        syncedFile: WebDavSyncedFileEntity,
         newVfsFileName: String
-    ): DebridSyncedFileEntity {
+    ): WebDavSyncedFileEntity {
         syncedFile.vfsFileName = newVfsFileName
         return syncedFile
     }
@@ -102,7 +102,7 @@ class FileMappingService {
     /**
      * Checks if a file path matches the mapping's external path
      */
-    fun matchesMapping(mapping: DebridFolderMappingEntity, providerFilePath: String): Boolean {
+    fun matchesMapping(mapping: WebDavFolderMappingEntity, providerFilePath: String): Boolean {
         val externalPath = mapping.externalPath ?: ""
         return providerFilePath.startsWith(externalPath) || 
                providerFilePath.startsWith("/$externalPath")

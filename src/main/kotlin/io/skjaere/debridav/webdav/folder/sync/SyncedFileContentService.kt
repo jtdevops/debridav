@@ -1,10 +1,10 @@
-package io.skjaere.debridav.debrid.folder.sync
+package io.skjaere.debridav.webdav.folder.sync
 
 import io.skjaere.debridav.debrid.DebridProvider
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileEntity
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DebridCachedTorrentContent
 import io.skjaere.debridav.fs.DebridFileContents
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Instant
@@ -17,7 +17,7 @@ class SyncedFileContentService {
      * Creates DebridFileContents for a synced file
      */
     fun createDebridFileContents(
-        syncedFile: DebridSyncedFileEntity,
+        syncedFile: WebDavSyncedFileEntity,
         provider: DebridProvider
     ): DebridFileContents {
         val cachedFile = CachedFile(
@@ -49,7 +49,7 @@ class SyncedFileContentService {
      */
     fun updateDebridFileContents(
         contents: DebridFileContents,
-        syncedFile: DebridSyncedFileEntity,
+        syncedFile: WebDavSyncedFileEntity,
         provider: DebridProvider
     ): DebridFileContents {
         val cachedFile = contents.debridLinks

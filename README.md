@@ -296,11 +296,11 @@ The following values can be defined as environment variables. These environment 
 | DEBRIDAV_CHUNK_CACHING_SIZE_THRESHOLD | The maximum chunk size to cache in bytes.                                                                                                                                                                            | 5120000 ( 5Mb )  |
 | DEBRIDAV_CACHE_MAX_SIZE_GB        | The maximum size of the cache in gigabytes.                                                                                                                                                                          | 2                |
 | PREMIUMIZE_API_KEY                 | The api key for Premiumize (REST API)                                                                                                                                                                                |                  |
-| PREMIUMIZE_WEBDAV_USERNAME         | The username for Premiumize WebDAV (required for folder mapping with webdav sync method). Get from https://www.premiumize.me/account                                                                                 |                  |
-| PREMIUMIZE_WEBDAV_PASSWORD         | The password for Premiumize WebDAV (required for folder mapping with webdav sync method). Get from https://www.premiumize.me/account                                                                                 |                  |
+| PREMIUMIZE_WEBDAV_USERNAME         | The username for Premiumize WebDAV (required for WebDAV folder mapping). Get from https://www.premiumize.me/account                                                                                 |                  |
+| PREMIUMIZE_WEBDAV_PASSWORD         | The password for Premiumize WebDAV (required for WebDAV folder mapping). Get from https://www.premiumize.me/account                                                                                 |                  |
 | REAL_DEBRID_API_KEY                | The api key for Real Debrid (REST API)                                                                                                                                                                               |                  |
-| REAL_DEBRID_WEBDAV_USERNAME        | The username for Real-Debrid WebDAV (required for folder mapping with webdav sync method). Get from your Real-Debrid account settings                                                                                |                  |
-| REAL_DEBRID_WEBDAV_PASSWORD        | The password for Real-Debrid WebDAV (required for folder mapping with webdav sync method). Get from your Real-Debrid account settings                                                                                |                  |
+| REAL_DEBRID_WEBDAV_USERNAME        | The username for Real-Debrid WebDAV (required for WebDAV folder mapping). Get from your Real-Debrid account settings                                                                                |                  |
+| REAL_DEBRID_WEBDAV_PASSWORD        | The password for Real-Debrid WebDAV (required for WebDAV folder mapping). Get from your Real-Debrid account settings                                                                                |                  |
 | REAL_DEBRID_SYNC_ENABLED           | If set to true, DebriDav will periodically poll Real-Debrid's API for torrents and downloads for re-use                                                                                                              | true             |
 | REAL_DEBRID_SYNC_POLL_RATE         | The rate at which DebriDav will sync downloads and torrents ( if enabled by REAL_DEBRID_SYNC_ENABLED ) as a [ISO8601 time string](https://en.wikipedia.org/wiki/ISO_8601#Durations).                                       | PT4H ( 4 hours ) |
 | EASYNEWS_USERNAME                  | The Easynews username                                                                                                                                                                                                |                  |
@@ -310,7 +310,9 @@ The following values can be defined as environment variables. These environment 
 | EASYNEWS_ALLOWED_REQUESTS_IN_WINDOW | The number of requests allowed in the time window. eg: EASYNEWS_RATE_LIMIT_WINDOW_DURATION=10s and  EASYNEWS_ALLOWED_REQUESTS_IN_WINDOW=3 will allow 3 requests per 10 seconds before forcing subsequent requests to wait. | 10               |
 | EASYNEWS_CONNECT_TIMEOUT           | The amount of time in milliseconds to wait while establishing a connection to Easynews' servers.                                                                                                                     | 20000            |
 | EASYNEWS_SOCKET_TIMEOUT            | The amount of time in milliseconds to wait between receiving bytes from Easynews' servers.                                                                                                                           | 5000             |
-| TORBOX_API_KEY                     | The api key for TorBox                                                                                                                                                                                               |                  |
+| TORBOX_API_KEY                     | The api key for TorBox (REST API)                                                                                                                                                                                    |                  |
+| TORBOX_WEBDAV_USERNAME             | The username for TorBox WebDAV (required for WebDAV folder mapping). Get from your TorBox account settings                                                                                                         |                  |
+| TORBOX_WEBDAV_PASSWORD             | The password for TorBox WebDAV (required for WebDAV folder mapping). Get from your TorBox account settings                                                                                                         |                  |
 | SONARR_INTEGRATION_ENABLED         | Enable integration of Sonarr.                                                                                                                                                                                        | true             |
 | SONARR_HOST                        | The host of Sonarr                                                                                                                                                                                                   | sonarr-debridav  |
 | SONARR_PORT                        | The port of Sonarr                                                                                                                                                                                                   | 8989             |
@@ -484,6 +486,62 @@ The indexer supports searching by title, IMDb ID, TMDB ID, TVDB ID, and other me
 - **Virtual Filesystem**: IPTV content appears in the same virtual filesystem as debrid content, making it transparent to Sonarr/Radarr.
 
 For detailed IPTV configuration and troubleshooting, see [IPTV_CONFIGURATION_GUIDE.md](IPTV_CONFIGURATION_GUIDE.md).
+
+### WebDAV Folder Mapping
+
+Map folders from WebDAV providers (built-in debrid providers or custom WebDAV servers) to your VFS. Files are synced periodically and appear as virtual directories in your file system.
+
+**Built-in Providers:**
+- **Premiumize**: Uses `https://webdav.premiumize.me` (auto-configured)
+- **Real-Debrid**: Uses `https://dav.real-debrid.com` (auto-configured)
+- **TorBox**: Uses `https://webdav.torbox.app` (auto-configured)
+
+**Custom Providers:** Configure any WebDAV server using `DEBRIDAV_WEBDAV_PROVIDER_{NAME}_*` environment variables.
+
+**Configuration:**
+
+| NAME                                           | Explanation                                                                                                                                                                                                          | Default          |
+|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------|
+| DEBRIDAV_WEBDAV_FOLDER_MAPPING_ENABLED         | Enable/disable WebDAV folder mapping feature.                                                                                                                                                                        | false            |
+| DEBRIDAV_WEBDAV_FOLDER_MAPPING_PROVIDERS       | Comma-separated list of providers to enable. Built-in: `premiumize`, `real_debrid`, `torbox`. Custom providers: any name configured via `DEBRIDAV_WEBDAV_PROVIDER_{NAME}_*` variables.                                |                  |
+| DEBRIDAV_WEBDAV_FOLDER_MAPPING_MAPPINGS        | Folder mappings per provider. Format: `provider:externalPath=internalPath`. Example: `premiumize:/pm_movies=/pm_movies,mywebdav:/media=/custom_media`. No method suffix needed - all mappings use WebDAV.              |                  |
+| DEBRIDAV_WEBDAV_FOLDER_MAPPING_SYNC_INTERVAL   | Default sync interval. Format: ISO 8601 duration (PT1H = 1 hour). Can be overridden per provider via `DEBRIDAV_WEBDAV_PROVIDER_{NAME}_SYNC_INTERVAL`.                                                              | PT1H             |
+| DEBRIDAV_WEBDAV_FOLDER_MAPPING_ALLOWED_EXTENSIONS | Comma-separated list of file extensions to sync. If empty, syncs all files.                                                                                                                                       | mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts,srt,sub,ass,ssa,vtt,idx,sup |
+| DEBRIDAV_WEBDAV_FOLDER_MAPPING_LOG_ROOT_FOLDERS | Comma-separated list of provider names to enable root folder logging for. When enabled, INFO log messages will show available root folders on the WebDAV server. Useful for discovering available folders when configuring mappings. Example: `premiumize,real_debrid,mywebdav` |                  |
+| DEBRIDAV_WEBDAV_PROVIDER_{NAME}_URL            | WebDAV URL for custom provider. Example: `DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_URL=https://webdav.example.com`                                                                                                        |                  |
+| DEBRIDAV_WEBDAV_PROVIDER_{NAME}_USERNAME       | Username for custom WebDAV provider. Example: `DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_USERNAME=user`                                                                                                                      |                  |
+| DEBRIDAV_WEBDAV_PROVIDER_{NAME}_PASSWORD       | Password for custom WebDAV provider. Example: `DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_PASSWORD=secret`                                                                                                                   |                  |
+| DEBRIDAV_WEBDAV_PROVIDER_{NAME}_SYNC_INTERVAL  | Optional sync interval override for custom provider. Example: `DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_SYNC_INTERVAL=PT2H`                                                                                                  |                  |
+
+**Example Configuration:**
+
+```yaml
+# Enable WebDAV folder mapping
+DEBRIDAV_WEBDAV_FOLDER_MAPPING_ENABLED=true
+DEBRIDAV_WEBDAV_FOLDER_MAPPING_PROVIDERS=premiumize,mywebdav
+
+# Built-in provider mappings (no URL needed - auto-configured)
+DEBRIDAV_WEBDAV_FOLDER_MAPPING_MAPPINGS=premiumize:/pm_movies=/pm_movies
+
+# Custom WebDAV provider configuration
+DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_URL=https://webdav.example.com
+DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_USERNAME=user
+DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_PASSWORD=secret
+DEBRIDAV_WEBDAV_PROVIDER_MYWEBDAV_SYNC_INTERVAL=PT2H
+
+# Custom provider mapping
+DEBRIDAV_WEBDAV_FOLDER_MAPPING_MAPPINGS=premiumize:/pm_movies=/pm_movies,mywebdav:/media=/custom_media
+```
+
+**Built-in Provider Credentials:**
+- **Premiumize**: Set `PREMIUMIZE_WEBDAV_USERNAME` and `PREMIUMIZE_WEBDAV_PASSWORD` (separate from REST API key)
+- **Real-Debrid**: Set `REAL_DEBRID_WEBDAV_USERNAME` and `REAL_DEBRID_WEBDAV_PASSWORD` (separate from REST API key)
+- **TorBox**: Set `TORBOX_WEBDAV_USERNAME` and `TORBOX_WEBDAV_PASSWORD` (separate from REST API key)
+
+**API Endpoints:**
+- `POST /api/webdav-folder-mapping/sync` - Manually trigger sync for all mappings
+- `POST /api/webdav-folder-mapping/provider/{provider}/sync` - Sync all mappings for a specific provider
+- `GET /api/webdav-folder-mapping` - List all folder mappings
 
 ### STRM File Support
 

@@ -18,6 +18,8 @@ import io.skjaere.debridav.debrid.client.premiumize.PremiumizeConfigurationPrope
 import io.skjaere.debridav.debrid.client.realdebrid.RealDebridClient
 import io.skjaere.debridav.debrid.client.realdebrid.RealDebridConfigurationProperties
 import io.skjaere.debridav.fs.CachedFile
+import io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService
+import io.skjaere.debridav.webdav.folder.WebDavAuthType
 import kotlinx.coroutines.delay
 import io.skjaere.debridav.util.ByteFormatUtil
 import org.slf4j.LoggerFactory
@@ -28,7 +30,8 @@ class DefaultStreamableLinkPreparer(
     private val rateLimiter: RateLimiter,
     private val userAgent: String?,
     private val premiumizeConfig: PremiumizeConfigurationProperties?,
-    private val realDebridConfig: RealDebridConfigurationProperties?
+    private val realDebridConfig: RealDebridConfigurationProperties?,
+    private val webDavProviderConfigService: WebDavProviderConfigurationService?
 ) : StreamableLinkPreparable {
     private val logger = LoggerFactory.getLogger(DefaultStreamableLinkPreparer::class.java)
 
@@ -43,14 +46,14 @@ class DefaultStreamableLinkPreparer(
         httpClient: HttpClient,
         debridavConfigurationProperties: DebridavConfigurationProperties,
         rateLimiter: RateLimiter
-    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null, null, null)
+    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null, null, null, null)
 
     constructor(
         httpClient: HttpClient,
         debridavConfigurationProperties: DebridavConfigurationProperties,
         rateLimiter: RateLimiter,
         userAgent: String?
-    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, userAgent, null, null)
+    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, userAgent, null, null, null)
 
     /**
      * Calculates dynamic socket timeout based on chunk size.
@@ -116,8 +119,9 @@ class DefaultStreamableLinkPreparer(
     }
 
     /**
-     * Gets WebDAV Basic auth header for folder-mapped files.
+     * Gets WebDAV auth header for folder-mapped files.
      * Returns null if not a WebDAV URL or credentials not configured.
+     * Supports both built-in providers and generic WebDAV providers.
      */
     private fun getWebDavAuthHeader(debridLink: CachedFile): String? {
         val link = debridLink.link ?: return null
@@ -125,25 +129,52 @@ class DefaultStreamableLinkPreparer(
         
         if (!isFolderMapped) return null
         
-        return when {
+        // Try built-in providers first
+        when {
             link.contains("webdav.premiumize.me") && premiumizeConfig != null -> {
                 val username = premiumizeConfig.webdavUsername
                 val password = premiumizeConfig.webdavPassword
                 if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
                     val credentials = "$username:$password"
-                    "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
-                } else null
+                    return "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                }
             }
             link.contains("dav.real-debrid.com") && realDebridConfig != null -> {
                 val username = realDebridConfig.webdavUsername
                 val password = realDebridConfig.webdavPassword
                 if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
                     val credentials = "$username:$password"
-                    "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
-                } else null
+                    return "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                }
             }
-            else -> null
+            link.contains("webdav.torbox.app") -> {
+                // TorBox uses Bearer token - handled via provider config service
+            }
         }
+        
+        // Try generic WebDAV providers by matching URL
+        webDavProviderConfigService?.let { configService ->
+            val allConfigs = configService.getAllConfigurations()
+            for ((_, config) in allConfigs) {
+                if (link.startsWith(config.url)) {
+                    return when (config.authType) {
+                        WebDavAuthType.BASIC -> {
+                            if (config.hasCredentials()) {
+                                val credentials = "${config.username}:${config.password}"
+                                "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                            } else null
+                        }
+                        WebDavAuthType.BEARER -> {
+                            if (config.hasCredentials()) {
+                                "Bearer ${config.bearerToken}"
+                            } else null
+                        }
+                    }
+                }
+            }
+        }
+        
+        return null
     }
 
     @Suppress("MagicNumber")

@@ -1,6 +1,6 @@
-package io.skjaere.debridav.debrid.folder.sync
+package io.skjaere.debridav.webdav.folder.sync
 
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingProperties
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingProperties
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,16 +17,16 @@ import org.springframework.stereotype.Component
 
 @Component
 @ConditionalOnProperty(
-    prefix = "debridav.debrid-folder-mapping",
+    prefix = "debridav.webdav-folder-mapping",
     name = ["enabled"],
     havingValue = "true",
     matchIfMissing = false
 )
-class DebridFolderSyncScheduler(
-    private val syncService: DebridFolderSyncService,
-    private val folderMappingProperties: DebridFolderMappingProperties
+class WebDavFolderSyncScheduler(
+    private val syncService: WebDavFolderSyncService,
+    private val folderMappingProperties: WebDavFolderMappingProperties
 ) {
-    private val logger = LoggerFactory.getLogger(DebridFolderSyncScheduler::class.java)
+    private val logger = LoggerFactory.getLogger(WebDavFolderSyncScheduler::class.java)
     private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -39,13 +39,13 @@ class DebridFolderSyncScheduler(
             return
         }
 
-        logger.info("Starting initial debrid folder sync on application startup")
+        logger.info("Starting initial WebDAV folder sync on application startup")
         syncScope.launch {
             try {
                 syncService.syncAllMappings()
-                logger.info("Initial debrid folder sync completed")
+                logger.info("Initial WebDAV folder sync completed")
             } catch (e: Exception) {
-                logger.error("Error in initial debrid folder sync", e)
+                logger.error("Error in initial WebDAV folder sync", e)
             }
         }
     }
@@ -56,8 +56,8 @@ class DebridFolderSyncScheduler(
      * is handled separately by [runInitialSync].
      */
     @Scheduled(
-        initialDelayString = "\${debridav.debrid-folder-mapping.sync-interval:PT1H}",
-        fixedRateString = "\${debridav.debrid-folder-mapping.sync-interval:PT1H}"
+        initialDelayString = "\${debridav.webdav-folder-mapping.sync-interval:PT1H}",
+        fixedRateString = "\${debridav.webdav-folder-mapping.sync-interval:PT1H}"
     )
     fun syncTask() {
         if (folderMappingProperties.enabled) {

@@ -1,7 +1,6 @@
-package io.skjaere.debridav.debrid.folder
+package io.skjaere.debridav.webdav.folder
 
-import io.skjaere.debridav.debrid.DebridProvider
-import io.skjaere.debridav.debrid.folder.sync.DebridFolderSyncService
+import io.skjaere.debridav.webdav.folder.sync.WebDavFolderSyncService
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -17,12 +16,12 @@ import org.springframework.web.bind.annotation.RestController
 import java.time.Instant
 
 @RestController
-@RequestMapping("/api/debrid-folder-mapping")
-class DebridFolderMappingController(
-    private val folderMappingRepository: DebridFolderMappingRepository,
-    private val syncService: DebridFolderSyncService
+@RequestMapping("/api/webdav-folder-mapping")
+class WebDavFolderMappingController(
+    private val folderMappingRepository: WebDavFolderMappingRepository,
+    private val syncService: WebDavFolderSyncService
 ) {
-    private val logger = LoggerFactory.getLogger(DebridFolderMappingController::class.java)
+    private val logger = LoggerFactory.getLogger(WebDavFolderMappingController::class.java)
 
     @PostMapping("/sync")
     fun syncAll(): ResponseEntity<Map<String, String>> {
@@ -41,33 +40,24 @@ class DebridFolderMappingController(
     @PostMapping("/provider/{providerName}/sync")
     fun syncByProvider(@PathVariable providerName: String): ResponseEntity<Map<String, Any>> {
         return try {
-            val provider = parseProvider(providerName)
-            if (provider == null) {
-                ResponseEntity.status(HttpStatus.BAD_REQUEST)
+            val mappings = folderMappingRepository.findByProviderName(providerName)
+            if (mappings.isEmpty()) {
+                ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(mapOf(
                         "status" to "error",
-                        "message" to "Invalid provider: $providerName. Valid providers: premiumize, real_debrid, torbox"
+                        "message" to "No mappings found for provider: $providerName"
                     ))
             } else {
-                val mappings = folderMappingRepository.findByProvider(provider)
-                if (mappings.isEmpty()) {
-                    ResponseEntity.status(HttpStatus.NOT_FOUND)
-                        .body(mapOf(
-                            "status" to "error",
-                            "message" to "No mappings found for provider: $providerName"
-                        ))
-                } else {
-                    runBlocking {
-                        mappings.forEach { mapping ->
-                            syncService.syncMapping(mapping)
-                        }
+                runBlocking {
+                    mappings.forEach { mapping ->
+                        syncService.syncMapping(mapping)
                     }
-                    ResponseEntity.ok(mapOf(
-                        "status" to "success",
-                        "message" to "Sync completed for ${mappings.size} mapping(s)",
-                        "syncedMappings" to mappings.size
-                    ))
                 }
+                ResponseEntity.ok(mapOf(
+                    "status" to "success",
+                    "message" to "Sync completed for ${mappings.size} mapping(s)",
+                    "syncedMappings" to mappings.size
+                ))
             }
         } catch (e: Exception) {
             logger.error("Error syncing mappings for provider $providerName", e)
@@ -96,22 +86,13 @@ class DebridFolderMappingController(
         }
     }
 
-    private fun parseProvider(providerName: String): DebridProvider? {
-        return when (providerName.lowercase()) {
-            "premiumize" -> DebridProvider.PREMIUMIZE
-            "real_debrid", "realdebrid" -> DebridProvider.REAL_DEBRID
-            "torbox" -> DebridProvider.TORBOX
-            else -> null
-        }
-    }
-
     @GetMapping
-    fun listMappings(): ResponseEntity<List<DebridFolderMappingEntity>> {
+    fun listMappings(): ResponseEntity<List<WebDavFolderMappingEntity>> {
         return ResponseEntity.ok(folderMappingRepository.findAll())
     }
 
     @GetMapping("/{id}")
-    fun getMapping(@PathVariable id: Long): ResponseEntity<DebridFolderMappingEntity> {
+    fun getMapping(@PathVariable id: Long): ResponseEntity<WebDavFolderMappingEntity> {
         val mapping = folderMappingRepository.findById(id).orElse(null)
         return if (mapping != null) {
             ResponseEntity.ok(mapping)
@@ -121,7 +102,7 @@ class DebridFolderMappingController(
     }
 
     @PostMapping
-    fun createMapping(@RequestBody mapping: DebridFolderMappingEntity): ResponseEntity<DebridFolderMappingEntity> {
+    fun createMapping(@RequestBody mapping: WebDavFolderMappingEntity): ResponseEntity<WebDavFolderMappingEntity> {
         mapping.createdAt = Instant.now()
         mapping.updatedAt = Instant.now()
         val saved = folderMappingRepository.save(mapping)
@@ -131,14 +112,13 @@ class DebridFolderMappingController(
     @PutMapping("/{id}")
     fun updateMapping(
         @PathVariable id: Long,
-        @RequestBody mapping: DebridFolderMappingEntity
-    ): ResponseEntity<DebridFolderMappingEntity> {
+        @RequestBody mapping: WebDavFolderMappingEntity
+    ): ResponseEntity<WebDavFolderMappingEntity> {
         val existing = folderMappingRepository.findById(id).orElse(null)
         return if (existing != null) {
-            existing.provider = mapping.provider
+            existing.providerName = mapping.providerName
             existing.externalPath = mapping.externalPath
             existing.internalPath = mapping.internalPath
-            existing.syncMethod = mapping.syncMethod
             existing.enabled = mapping.enabled
             existing.syncInterval = mapping.syncInterval
             existing.updatedAt = Instant.now()

@@ -7,9 +7,9 @@ import io.milton.resource.CollectionResource
 import io.milton.resource.DigestResource
 import io.milton.resource.PropFindableResource
 import io.milton.resource.Resource
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingEntity
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileEntity
-import io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository
 import io.skjaere.debridav.fs.DatabaseFileService
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -17,16 +17,16 @@ import java.time.Instant
 import java.util.*
 
 /**
- * Virtual directory resource for mapped debrid folders.
+ * Virtual directory resource for mapped WebDAV folders.
  * Lists synced files from the database and creates virtual directory structure.
  */
-class DebridFolderDirectoryResource(
-    private val mapping: DebridFolderMappingEntity,
+class WebDavFolderDirectoryResource(
+    private val mapping: WebDavFolderMappingEntity,
     private val resourceFactory: StreamableResourceFactory,
     private val fileService: DatabaseFileService,
-    private val syncedFileRepository: DebridSyncedFileRepository
+    private val syncedFileRepository: WebDavSyncedFileRepository
 ) : DigestResource, PropFindableResource, CollectionResource {
-    private val logger = LoggerFactory.getLogger(DebridFolderDirectoryResource::class.java)
+    private val logger = LoggerFactory.getLogger(WebDavFolderDirectoryResource::class.java)
 
     override fun getUniqueId(): String {
         return "debrid_folder_mapping_${mapping.id}"
@@ -80,7 +80,7 @@ class DebridFolderDirectoryResource(
         
         // Group files by directory structure
         val children = mutableListOf<Resource>()
-        val directoryMap = mutableMapOf<String, MutableList<DebridSyncedFileEntity>>()
+        val directoryMap = mutableMapOf<String, MutableList<WebDavSyncedFileEntity>>()
         
         syncedFiles.forEach { syncedFile ->
             val vfsPath = syncedFile.vfsPath ?: return@forEach
@@ -119,7 +119,7 @@ class DebridFolderDirectoryResource(
             }
             
             // Create a virtual directory resource for this subdirectory
-            val dirResource = DebridFolderSubdirectoryResource(
+            val dirResource = WebDavFolderSubdirectoryResource(
                 dirPath,
                 dirName,
                 files,
@@ -135,17 +135,17 @@ class DebridFolderDirectoryResource(
 }
 
 /**
- * Virtual subdirectory resource for nested folders within mapped debrid folders.
+ * Virtual subdirectory resource for nested folders within mapped WebDAV folders.
  */
-class DebridFolderSubdirectoryResource(
+class WebDavFolderSubdirectoryResource(
     private val fullPath: String,
     private val dirName: String,
-    private val syncedFiles: List<DebridSyncedFileEntity>,
+    private val syncedFiles: List<WebDavSyncedFileEntity>,
     private val resourceFactory: StreamableResourceFactory,
     private val fileService: DatabaseFileService,
-    private val syncedFileRepository: DebridSyncedFileRepository
+    private val syncedFileRepository: WebDavSyncedFileRepository
 ) : DigestResource, PropFindableResource, CollectionResource {
-    private val logger = LoggerFactory.getLogger(DebridFolderSubdirectoryResource::class.java)
+    private val logger = LoggerFactory.getLogger(WebDavFolderSubdirectoryResource::class.java)
 
     override fun getUniqueId(): String {
         return "debrid_folder_subdir_${fullPath.hashCode()}"
@@ -193,7 +193,7 @@ class DebridFolderSubdirectoryResource(
 
     override fun getChildren(): List<Resource> = runBlocking {
         val children = mutableListOf<Resource>()
-        val directoryMap = mutableMapOf<String, MutableList<DebridSyncedFileEntity>>()
+        val directoryMap = mutableMapOf<String, MutableList<WebDavSyncedFileEntity>>()
         
         syncedFiles.forEach { syncedFile ->
             val vfsPath = syncedFile.vfsPath ?: return@forEach
@@ -231,7 +231,7 @@ class DebridFolderSubdirectoryResource(
                 "$fullPath/$nestedDirName"
             }
             
-            val nestedDirResource = DebridFolderSubdirectoryResource(
+            val nestedDirResource = WebDavFolderSubdirectoryResource(
                 nestedPath,
                 nestedDirName,
                 files,

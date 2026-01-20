@@ -1,6 +1,5 @@
-package io.skjaere.debridav.debrid.folder
+package io.skjaere.debridav.webdav.folder
 
-import io.skjaere.debridav.debrid.folder.DebridFolderMappingProperties
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -9,16 +8,16 @@ import org.springframework.transaction.annotation.Transactional
 
 @Service
 @ConditionalOnProperty(
-    prefix = "debridav.debrid-folder-mapping",
+    prefix = "debridav.webdav-folder-mapping",
     name = ["enabled"],
     havingValue = "true",
     matchIfMissing = false
 )
-class DebridFolderMappingConfigurationService(
-    private val folderMappingProperties: DebridFolderMappingProperties,
-    private val folderMappingRepository: DebridFolderMappingRepository
+class WebDavFolderMappingConfigurationService(
+    private val folderMappingProperties: WebDavFolderMappingProperties,
+    private val folderMappingRepository: WebDavFolderMappingRepository
 ) {
-    private val logger = LoggerFactory.getLogger(DebridFolderMappingConfigurationService::class.java)
+    private val logger = LoggerFactory.getLogger(WebDavFolderMappingConfigurationService::class.java)
 
     @PostConstruct
     @Transactional
@@ -37,63 +36,56 @@ class DebridFolderMappingConfigurationService(
         }
 
         val configuredMappings = folderMappingProperties.getMappingsList()
-        logger.info("Initializing ${configuredMappings.size} debrid folder mappings")
+        logger.info("Initializing ${configuredMappings.size} WebDAV folder mappings")
 
         // Get all existing mappings to check for ones removed from config
         val allExistingMappings = folderMappingRepository.findAll()
         
         // Create a set of configured mapping keys for comparison
         val configuredKeys = configuredMappings.map { mapping ->
-            Triple(mapping.provider, mapping.externalPath, mapping.internalPath)
+            Triple(mapping.providerName, mapping.externalPath, mapping.internalPath)
         }.toSet()
 
         // Process configured mappings (create/update)
         configuredMappings.forEach { mapping ->
             try {
-                val existing = folderMappingRepository.findByProviderAndExternalPathAndInternalPath(
-                    mapping.provider,
+                val existing = folderMappingRepository.findByProviderNameAndExternalPathAndInternalPath(
+                    mapping.providerName,
                     mapping.externalPath,
                     mapping.internalPath
                 )
 
                 if (existing == null) {
-                    val entity = DebridFolderMappingEntity().apply {
-                        provider = mapping.provider
+                    val entity = WebDavFolderMappingEntity().apply {
+                        providerName = mapping.providerName
                         externalPath = mapping.externalPath
                         internalPath = mapping.internalPath
-                        syncMethod = mapping.syncMethod
                         enabled = true
                         syncInterval = folderMappingProperties.syncInterval.toString()
                     }
                     folderMappingRepository.save(entity)
-                    logger.info("Created folder mapping: ${mapping.provider}:${mapping.externalPath}=${mapping.internalPath}:${mapping.syncMethod}")
+                    logger.info("Created folder mapping: ${mapping.providerName}:${mapping.externalPath}=${mapping.internalPath}")
                 } else {
                     // Re-enable if it was disabled
                     if (!existing.enabled) {
                         existing.enabled = true
-                        logger.info("Re-enabled folder mapping: ${mapping.provider}:${mapping.externalPath}=${mapping.internalPath}")
-                    }
-                    
-                    // Update existing mapping if sync method changed
-                    if (existing.syncMethod != mapping.syncMethod) {
-                        existing.syncMethod = mapping.syncMethod
-                        logger.info("Updated folder mapping sync method: ${mapping.provider}:${mapping.externalPath}")
+                        logger.info("Re-enabled folder mapping: ${mapping.providerName}:${mapping.externalPath}=${mapping.internalPath}")
                     }
                     
                     folderMappingRepository.save(existing)
                 }
             } catch (e: Exception) {
-                logger.error("Error initializing mapping: ${mapping.provider}:${mapping.externalPath}=${mapping.internalPath}", e)
+                logger.error("Error initializing mapping: ${mapping.providerName}:${mapping.externalPath}=${mapping.internalPath}", e)
             }
         }
 
         // Disable mappings that are no longer in config
         allExistingMappings.forEach { existing ->
-            val key = Triple(existing.provider, existing.externalPath, existing.internalPath)
+            val key = Triple(existing.providerName, existing.externalPath, existing.internalPath)
             if (!configuredKeys.contains(key) && existing.enabled) {
                 existing.enabled = false
                 folderMappingRepository.save(existing)
-                logger.info("Disabled mapping no longer in config: ${existing.provider}:${existing.externalPath}=${existing.internalPath}")
+                logger.info("Disabled mapping no longer in config: ${existing.providerName}:${existing.externalPath}=${existing.internalPath}")
             }
         }
     }
