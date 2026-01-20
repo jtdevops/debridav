@@ -82,11 +82,26 @@ class WebDavProviderConfigurationService(
     }
     
     /**
-     * Get configuration for a provider by name
-     * Built-in providers take precedence over custom providers with the same name
+     * Check if a provider is in the enabled providers list.
+     * If the providers list is empty, no providers are allowed.
+     */
+    fun isProviderEnabled(providerName: String): Boolean {
+        return normalizeProviderName(providerName) in enabledProviders
+    }
+    
+    /**
+     * Get configuration for a provider by name.
+     * Returns null if the provider is not in the enabled providers list.
+     * Built-in providers take precedence over custom providers with the same name.
      */
     fun getConfiguration(providerName: String): WebDavProviderConfiguration? {
         val normalizedName = normalizeProviderName(providerName)
+        
+        // Provider must be in the enabled list
+        if (normalizedName !in enabledProviders) {
+            logger.debug("Provider '$normalizedName' is not in the enabled providers list")
+            return null
+        }
         
         // Check built-in providers first
         builtInConfigs[normalizedName]?.let {
@@ -132,52 +147,69 @@ class WebDavProviderConfigurationService(
     private fun buildBuiltInConfigs(): Map<String, WebDavProviderConfiguration> {
         val configs = mutableMapOf<String, WebDavProviderConfiguration>()
         
+        // Only configure built-in providers that are in the enabled providers list
+        
         // Premiumize
-        premiumizeConfig?.let { config ->
-            val username = config.webdavUsername
-            val password = config.webdavPassword
-            if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
-                configs["premiumize"] = WebDavProviderConfiguration(
-                    name = "premiumize",
-                    url = "https://webdav.premiumize.me",
-                    username = username,
-                    password = password,
-                    isBuiltIn = true
-                )
+        if ("premiumize" in enabledProviders) {
+            premiumizeConfig?.let { config ->
+                val username = config.webdavUsername
+                val password = config.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    configs["premiumize"] = WebDavProviderConfiguration(
+                        name = "premiumize",
+                        url = "https://webdav.premiumize.me",
+                        username = username,
+                        password = password,
+                        isBuiltIn = true
+                    )
+                    logger.info("Configured built-in WebDAV provider: premiumize")
+                } else {
+                    logger.warn("Provider 'premiumize' is enabled but WebDAV credentials are not configured")
+                }
             }
         }
         
         // Real-Debrid
-        realDebridConfig?.let { config ->
-            val username = config.webdavUsername
-            val password = config.webdavPassword
-            if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
-                configs["real_debrid"] = WebDavProviderConfiguration(
-                    name = "real_debrid",
-                    url = "https://dav.real-debrid.com",
-                    username = username,
-                    password = password,
-                    isBuiltIn = true
-                )
-                // Also support "realdebrid" variant
-                configs["realdebrid"] = configs["real_debrid"]!!
+        if ("real_debrid" in enabledProviders || "realdebrid" in enabledProviders) {
+            realDebridConfig?.let { config ->
+                val username = config.webdavUsername
+                val password = config.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    configs["real_debrid"] = WebDavProviderConfiguration(
+                        name = "real_debrid",
+                        url = "https://dav.real-debrid.com",
+                        username = username,
+                        password = password,
+                        isBuiltIn = true
+                    )
+                    // Also support "realdebrid" variant
+                    configs["realdebrid"] = configs["real_debrid"]!!
+                    logger.info("Configured built-in WebDAV provider: real_debrid")
+                } else {
+                    logger.warn("Provider 'real_debrid' is enabled but WebDAV credentials are not configured")
+                }
             }
         }
         
         // TorBox - uses Basic auth with WebDAV username/password
-        torBoxConfig?.let { config ->
-            val webdavUrl = "https://webdav.torbox.app"
-            val username = config.webdavUsername
-            val password = config.webdavPassword
-            if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
-                configs["torbox"] = WebDavProviderConfiguration(
-                    name = "torbox",
-                    url = webdavUrl,
-                    username = username,
-                    password = password,
-                    authType = WebDavAuthType.BASIC,
-                    isBuiltIn = true
-                )
+        if ("torbox" in enabledProviders) {
+            torBoxConfig?.let { config ->
+                val webdavUrl = "https://webdav.torbox.app"
+                val username = config.webdavUsername
+                val password = config.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    configs["torbox"] = WebDavProviderConfiguration(
+                        name = "torbox",
+                        url = webdavUrl,
+                        username = username,
+                        password = password,
+                        authType = WebDavAuthType.BASIC,
+                        isBuiltIn = true
+                    )
+                    logger.info("Configured built-in WebDAV provider: torbox")
+                } else {
+                    logger.warn("Provider 'torbox' is enabled but WebDAV credentials are not configured")
+                }
             }
         }
         

@@ -90,10 +90,29 @@ class DirectoryResource(
     }
 
     override fun getChildren(): List<Resource> {
-        val children = directoryChildren ?: getChildren(directory).toMutableList()
+        var children = directoryChildren ?: getChildren(directory).toMutableList()
+        
+        val directoryPath = directory.fileSystemPath()
+        
+        // If this is the root directory, filter out WebDAV mapped folders when the feature is disabled
+        // or when the specific mapping is disabled
+        if (directoryPath == "/" && webDavFolderMappingRepository != null) {
+            val allMappings = webDavFolderMappingRepository.findAll()
+            val disabledMappingPaths = allMappings
+                .filter { !it.enabled }
+                .mapNotNull { it.internalPath?.removePrefix("/")?.split("/")?.firstOrNull() }
+                .toSet()
+            
+            // Also hide paths for mappings that exist but WebDAV feature is disabled
+            // (all mappings would be disabled in that case via WebDavFolderMappingConfigurationService)
+            if (disabledMappingPaths.isNotEmpty()) {
+                children = children.filterNot { resource ->
+                    resource.name in disabledMappingPaths
+                }.toMutableList()
+            }
+        }
         
         // If this is the root directory and STRM is enabled, add STRM folders
-        val directoryPath = directory.fileSystemPath()
         if (directoryPath == "/" && resourceFactory.debridavConfigurationProperties.isStrmEnabled()) {
             val strmMappings = resourceFactory.debridavConfigurationProperties.parseStrmFolderMappings()
             
