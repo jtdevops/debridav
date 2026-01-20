@@ -28,6 +28,14 @@ class WebDavFolderDirectoryResource(
 ) : DigestResource, PropFindableResource, CollectionResource {
     private val logger = LoggerFactory.getLogger(WebDavFolderDirectoryResource::class.java)
 
+    /**
+     * Get the full VFS path for this WebDAV folder directory.
+     * Used for move operations to determine the destination path.
+     */
+    fun getFullPath(): String {
+        return mapping.internalPath ?: "/"
+    }
+
     override fun getUniqueId(): String {
         return "debrid_folder_mapping_${mapping.id}"
     }
@@ -146,6 +154,14 @@ class WebDavFolderSubdirectoryResource(
     private val syncedFileRepository: WebDavSyncedFileRepository
 ) : DigestResource, PropFindableResource, CollectionResource {
     private val logger = LoggerFactory.getLogger(WebDavFolderSubdirectoryResource::class.java)
+
+    /**
+     * Get the full VFS path for this WebDAV folder subdirectory.
+     * Used for move operations to determine the destination path.
+     */
+    fun getFullPath(): String {
+        return fullPath
+    }
 
     override fun getUniqueId(): String {
         return "debrid_folder_subdir_${fullPath.hashCode()}"

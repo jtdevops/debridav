@@ -28,6 +28,8 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionTemplate
 import java.io.InputStream
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 private const val ROOT_NODE = "ROOT"
@@ -411,7 +413,7 @@ class DatabaseFileService(
             }
         }
         
-        logger.debug("Downloading content from {} for file {}", downloadUrl, fileName)
+        logger.debug("Downloading content from {} for file {}", urlDecode(downloadUrl), fileName)
         
         try {
             // Download the content with optional authentication
@@ -449,7 +451,7 @@ class DatabaseFileService(
             logger.info("Successfully downloaded and stored {} as LocalEntity (size: {} bytes)", fileName, contentSize)
             debridFileRepository.save(localFile)
         } catch (e: Exception) {
-            logger.error("Failed to download content from {} for file {}: {}", downloadUrl, fileName, e.message, e)
+            logger.error("Failed to download content from {} for file {}: {}", urlDecode(downloadUrl), fileName, e.message, e)
             throw e
         }
     }
@@ -544,6 +546,19 @@ class DatabaseFileService(
                 contents.iptvUrlTemplate?.baseUrl
             }
             mergedEntity
+        }
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original string if decoding fails.
+     */
+    private fun urlDecode(url: String?): String {
+        if (url == null) return "null"
+        return try {
+            URLDecoder.decode(url, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            url // Return original if decoding fails
         }
     }
 }

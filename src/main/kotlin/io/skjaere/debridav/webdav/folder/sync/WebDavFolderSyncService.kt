@@ -294,7 +294,12 @@ class WebDavFolderSyncService(
                 "$vfsPath/$vfsFileName"
             }
 
-            val existingFile = databaseFileService.getFileAtPath(fullVfsPath)
+            // Look up by hash (providerFileId) instead of path to support renamed files
+            // The hash is the WebDAV path which doesn't change even if the user renames the VFS file
+            val hash = syncedFile.providerFileId ?: return
+            val existingFiles = debridFileRepository.getByHash(hash)
+            val existingFile = existingFiles.firstOrNull()
+            
             val provider = mapProviderNameToDebridProvider(syncedFile.folderMapping?.providerName ?: "")
             if (provider == null) return
 
