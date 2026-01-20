@@ -1,5 +1,6 @@
 package io.skjaere.debridav.debrid.folder
 
+import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.debrid.folder.sync.DebridFolderSyncService
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -37,6 +38,44 @@ class DebridFolderMappingController(
         }
     }
 
+    @PostMapping("/provider/{providerName}/sync")
+    fun syncByProvider(@PathVariable providerName: String): ResponseEntity<Map<String, Any>> {
+        return try {
+            val provider = parseProvider(providerName)
+            if (provider == null) {
+                ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(mapOf(
+                        "status" to "error",
+                        "message" to "Invalid provider: $providerName. Valid providers: premiumize, real_debrid, torbox"
+                    ))
+            } else {
+                val mappings = folderMappingRepository.findByProvider(provider)
+                if (mappings.isEmpty()) {
+                    ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(mapOf(
+                            "status" to "error",
+                            "message" to "No mappings found for provider: $providerName"
+                        ))
+                } else {
+                    runBlocking {
+                        mappings.forEach { mapping ->
+                            syncService.syncMapping(mapping)
+                        }
+                    }
+                    ResponseEntity.ok(mapOf(
+                        "status" to "success",
+                        "message" to "Sync completed for ${mappings.size} mapping(s)",
+                        "syncedMappings" to mappings.size
+                    ))
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("Error syncing mappings for provider $providerName", e)
+            ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(mapOf("status" to "error", "message" to (e.message ?: "Unknown error")))
+        }
+    }
+
     @PostMapping("/{id}/sync")
     fun syncMapping(@PathVariable id: Long): ResponseEntity<Map<String, String>> {
         return try {
@@ -54,6 +93,15 @@ class DebridFolderMappingController(
             logger.error("Error syncing mapping $id", e)
             ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(mapOf("status" to "error", "message" to (e.message ?: "Unknown error")))
+        }
+    }
+
+    private fun parseProvider(providerName: String): DebridProvider? {
+        return when (providerName.lowercase()) {
+            "premiumize" -> DebridProvider.PREMIUMIZE
+            "real_debrid", "realdebrid" -> DebridProvider.REAL_DEBRID
+            "torbox" -> DebridProvider.TORBOX
+            else -> null
         }
     }
 
