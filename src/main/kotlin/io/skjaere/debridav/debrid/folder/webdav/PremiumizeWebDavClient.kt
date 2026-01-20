@@ -53,10 +53,20 @@ class PremiumizeWebDavClient(
                 setBody(propfindBody)
             }
 
+            val responseBody = response.body<String>()
+            logger.debug("Premiumize WebDAV response status: ${response.status}")
+            logger.trace("Premiumize WebDAV response body: $responseBody")
+
             if (response.status.value == 207) { // Multi-Status
-                parseWebDavResponse(response.body<String>())
+                val files = parseWebDavResponse(responseBody)
+                logger.debug("Parsed ${files.size} files from Premiumize WebDAV response")
+                files.forEach { file ->
+                    logger.debug("  - ${file.name} (${if (file.isDirectory) "directory" else "file"}, path: ${file.path})")
+                }
+                files
             } else {
                 logger.warn("Unexpected response status from Premiumize WebDAV: ${response.status}")
+                logger.warn("Response body: $responseBody")
                 emptyList()
             }
         } catch (e: Exception) {
@@ -107,8 +117,18 @@ class PremiumizeWebDavClient(
 
     private fun getBasicAuth(): String {
         // Basic auth: base64(username:password)
-        // For Premiumize, typically API key is used as both username and password
-        val credentials = "${premiumizeConfiguration.apiKey}:${premiumizeConfiguration.apiKey}"
+        // Premiumize WebDAV requires separate credentials from the REST API
+        val username = premiumizeConfiguration.webdavUsername
+        val password = premiumizeConfiguration.webdavPassword
+
+        if (username.isNullOrBlank() || password.isNullOrBlank()) {
+            logger.warn(
+                "Premiumize WebDAV credentials not configured. " +
+                "Set PREMIUMIZE_WEBDAV_USERNAME and PREMIUMIZE_WEBDAV_PASSWORD environment variables."
+            )
+        }
+
+        val credentials = "${username ?: ""}:${password ?: ""}"
         return java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())
     }
 
@@ -127,24 +147,30 @@ class PremiumizeWebDavClient(
         val files = mutableListOf<WebDavFile>()
         try {
             val factory = DocumentBuilderFactory.newInstance()
+            factory.isNamespaceAware = true
             val builder = factory.newDocumentBuilder()
             val doc = builder.parse(ByteArrayInputStream(xmlResponse.toByteArray()))
 
-            val responses = doc.getElementsByTagName("D:response")
-            for (i in 0 until responses.length) {
-                val response = responses.item(i) as Element
-                val href = response.getElementsByTagName("D:href").item(0)?.textContent ?: continue
-                val propstat = response.getElementsByTagName("D:propstat").item(0) as? Element ?: continue
-                val prop = propstat.getElementsByTagName("D:prop").item(0) as? Element ?: continue
+            // Try different namespace prefixes that WebDAV servers might use
+            val responses = findElements(doc, "response")
+            logger.debug("Found ${responses.size} response elements in WebDAV XML")
 
-                val displayName = prop.getElementsByTagName("D:displayname").item(0)?.textContent
-                val contentLength = prop.getElementsByTagName("D:getcontentlength").item(0)?.textContent?.toLongOrNull() ?: 0
-                val contentType = prop.getElementsByTagName("D:getcontenttype").item(0)?.textContent
-                val lastModified = prop.getElementsByTagName("D:getlastmodified").item(0)?.textContent
-                val isCollection = prop.getElementsByTagName("D:resourcetype").item(0)
-                    ?.let { (it as Element).getElementsByTagName("D:collection").length > 0 } ?: false
+            for (response in responses) {
+                val href = findElementText(response, "href") ?: continue
+                val propstat = findElement(response, "propstat") ?: continue
+                val prop = findElement(propstat, "prop") ?: continue
 
-                val name = displayName ?: href.substringAfterLast("/")
+                val displayName = findElementText(prop, "displayname")
+                val contentLength = findElementText(prop, "getcontentlength")?.toLongOrNull() ?: 0
+                val contentType = findElementText(prop, "getcontenttype")
+                val lastModified = findElementText(prop, "getlastmodified")
+                val resourceType = findElement(prop, "resourcetype")
+                val isCollection = resourceType?.let { 
+                    findElement(it, "collection") != null 
+                } ?: false
+
+                val name = displayName?.takeIf { it.isNotBlank() } 
+                    ?: java.net.URLDecoder.decode(href.substringAfterLast("/"), "UTF-8")
                 val path = href.removePrefix(webdavBaseUrl)
 
                 files.add(
@@ -163,6 +189,49 @@ class PremiumizeWebDavClient(
             logger.error("Error parsing WebDAV response", e)
         }
         return files
+    }
+
+    /**
+     * Find elements by local name, ignoring namespace prefix.
+     * Handles both "D:response" and "response" formats.
+     */
+    private fun findElements(parent: org.w3c.dom.Node, localName: String): List<Element> {
+        val result = mutableListOf<Element>()
+        val children = parent.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child is Element) {
+                if (child.localName == localName || child.tagName.endsWith(":$localName") || child.tagName == localName) {
+                    result.add(child)
+                }
+                // Recursively search in child elements
+                result.addAll(findElements(child, localName))
+            }
+        }
+        return result
+    }
+
+    /**
+     * Find first element by local name within a parent element.
+     */
+    private fun findElement(parent: Element, localName: String): Element? {
+        val children = parent.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child is Element) {
+                if (child.localName == localName || child.tagName.endsWith(":$localName") || child.tagName == localName) {
+                    return child
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Find element text by local name within a parent element.
+     */
+    private fun findElementText(parent: Element, localName: String): String? {
+        return findElement(parent, localName)?.textContent
     }
 
     private fun parseFileInfo(xmlResponse: String, filePath: String): WebDavFile? {

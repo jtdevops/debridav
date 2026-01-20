@@ -98,31 +98,42 @@ class DebridFolderSyncService(
     private suspend fun syncWebDavMapping(mapping: DebridFolderMappingEntity) {
         try {
             val files = webDavFolderService.listFiles(mapping)
+            logger.info("WebDAV sync found ${files.size} total items for mapping ${mapping.id}")
+            
+            val actualFiles = files.filter { !it.isDirectory }
+            val directories = files.filter { it.isDirectory }
+            logger.info("WebDAV sync: ${actualFiles.size} files, ${directories.size} directories")
+            
             val existingFiles = syncedFileRepository.findByFolderMapping(mapping)
                 .associateBy { it.providerFileId }
 
             val providerFileIds = mutableSetOf<String>()
+            var newFilesCount = 0
+            var updatedFilesCount = 0
 
-            files.forEach { webDavFile ->
+            actualFiles.forEach { webDavFile ->
                 try {
-                    if (!webDavFile.isDirectory) {
-                        val fileId = generateFileId(webDavFile.path, webDavFile.name)
-                        providerFileIds.add(fileId)
+                    val fileId = generateFileId(webDavFile.path, webDavFile.name)
+                    providerFileIds.add(fileId)
 
-                        val existingFile = existingFiles[fileId]
-                        if (existingFile == null) {
-                            // Create new synced file
-                            createSyncedFileFromWebDav(mapping, webDavFile, fileId)
-                        } else {
-                            // Update existing file
-                            updateSyncedFileFromWebDav(existingFile, webDavFile)
-                        }
+                    val existingFile = existingFiles[fileId]
+                    if (existingFile == null) {
+                        // Create new synced file
+                        createSyncedFileFromWebDav(mapping, webDavFile, fileId)
+                        newFilesCount++
+                        logger.debug("Created new synced file: ${webDavFile.path}")
+                    } else {
+                        // Update existing file
+                        updateSyncedFileFromWebDav(existingFile, webDavFile)
+                        updatedFilesCount++
                     }
                 } catch (e: Exception) {
                     logger.error("Error processing WebDAV file ${webDavFile.path} for mapping ${mapping.id}", e)
                     // Continue with other files
                 }
             }
+            
+            logger.info("WebDAV sync completed for mapping ${mapping.id}: $newFilesCount new, $updatedFilesCount updated")
 
             // Mark files as deleted if they're no longer in provider
             try {

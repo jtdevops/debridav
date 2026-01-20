@@ -2,7 +2,6 @@ package io.skjaere.debridav.debrid.folder.webdav
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
-import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -47,7 +46,7 @@ class RealDebridWebDavClient(
 
             val response = httpClient.post(url) {
                 method = HttpMethod("PROPFIND")
-                header(HttpHeaders.Authorization, "Bearer ${realDebridConfiguration.apiKey}")
+                header(HttpHeaders.Authorization, "Basic ${getBasicAuth()}")
                 header("Depth", "1")
                 contentType(io.ktor.http.ContentType.Application.Xml)
                 setBody(propfindBody)
@@ -83,7 +82,7 @@ class RealDebridWebDavClient(
 
             val response = httpClient.post(url) {
                 method = HttpMethod("PROPFIND")
-                header(HttpHeaders.Authorization, "Bearer ${realDebridConfiguration.apiKey}")
+                header(HttpHeaders.Authorization, "Basic ${getBasicAuth()}")
                 header("Depth", "0")
                 contentType(io.ktor.http.ContentType.Application.Xml)
                 setBody(propfindBody)
@@ -102,6 +101,23 @@ class RealDebridWebDavClient(
 
     override suspend fun getDownloadLink(filePath: String): String? {
         return "$webdavBaseUrl${normalizePath(filePath)}"
+    }
+
+    private fun getBasicAuth(): String {
+        // Basic auth: base64(username:password)
+        // Real-Debrid WebDAV requires separate credentials from the REST API
+        val username = realDebridConfiguration.webdavUsername
+        val password = realDebridConfiguration.webdavPassword
+
+        if (username.isNullOrBlank() || password.isNullOrBlank()) {
+            logger.warn(
+                "Real-Debrid WebDAV credentials not configured. " +
+                "Set REAL_DEBRID_WEBDAV_USERNAME and REAL_DEBRID_WEBDAV_PASSWORD environment variables."
+            )
+        }
+
+        val credentials = "${username ?: ""}:${password ?: ""}"
+        return java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())
     }
 
     private fun normalizePath(path: String): String {
