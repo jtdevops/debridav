@@ -133,7 +133,7 @@ class StreamableResourceFactory(
                     val internalPath = matchingMapping.internalPath ?: ""
                     if (path == internalPath) {
                         // Root of mapped folder - return directory resource
-                        return WebDavFolderDirectoryResource(
+                        return WebDavDirectoryResource(
                             matchingMapping,
                             this,
                             fileService,
@@ -177,7 +177,7 @@ class StreamableResourceFactory(
                             
                             if (subdirFiles.isNotEmpty()) {
                                 val dirName = path.substringAfterLast("/")
-                                return WebDavFolderSubdirectoryResource(
+                                return WebDavDirectoryResource(
                                     path,
                                     dirName,
                                     subdirFiles,

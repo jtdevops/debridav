@@ -128,7 +128,7 @@ class DirectoryResource(
                 val pathParts = internalPath.removePrefix("/").split("/")
                 if (pathParts.size == 1) {
                     // This is a root-level mapping
-                    val folderDirResource = WebDavFolderDirectoryResource(
+                    val folderDirResource = WebDavDirectoryResource(
                         mapping,
                         resourceFactory,
                         fileService,
