@@ -165,7 +165,20 @@ class LocalEntityStartupScanService(
                         }
 
                         // Download and store as LocalEntity (with WebDAV auth if needed)
-                        databaseFileService.downloadAndStoreAsLocalEntity(filePath, debridFileContents, authHeader)
+                        val newLocalEntity = databaseFileService.downloadAndStoreAsLocalEntity(filePath, debridFileContents, authHeader)
+
+                        // Update the WebDavSyncedFileEntity.dbEntityId to point to the new LocalEntity
+                        if (isWebDavFile && webDavSyncedFileRepository != null) {
+                            val syncedFileId = cachedFile?.params?.get("synced_file_id")?.toLongOrNull()
+                            if (syncedFileId != null) {
+                                val syncedFile = webDavSyncedFileRepository.findById(syncedFileId).orElse(null)
+                                if (syncedFile != null) {
+                                    syncedFile.dbEntityId = newLocalEntity.id
+                                    webDavSyncedFileRepository.save(syncedFile)
+                                    logger.debug("Updated WebDavSyncedFileEntity {} with new dbEntityId {}", syncedFileId, newLocalEntity.id)
+                                }
+                            }
+                        }
 
                         // Delete the renamed RemotelyCachedEntity after successful LocalEntity creation
                         when (reloadedEntity.contents) {

@@ -263,19 +263,28 @@ class WebDavFolderSyncService(
                         databaseFileService.deleteFile(existingFile)
                     }
                     // Use the existing downloadAndStoreAsLocalEntity method with WebDAV auth
-                    databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
-                    logger.info("Successfully downloaded and stored subtitle file as LocalEntity: {}", urlDecode(fullVfsPath))
+                    val createdFile = databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
+                    // Store the db_entity_id to link this synced file to the VFS entity
+                    syncedFile.dbEntityId = createdFile.id
+                    syncedFileRepository.save(syncedFile)
+                    logger.info("Successfully downloaded and stored subtitle file as LocalEntity: {} (id: {})", urlDecode(fullVfsPath), createdFile.id)
                 } catch (e: Exception) {
                     logger.warn("Failed to download subtitle file {}, falling back to RemotelyCachedEntity: {}", 
                         urlDecode(fullVfsPath), e.message)
                     // Fall through to create RemotelyCachedEntity as normal (same pattern as createDebridFile)
                     val createdFile = databaseFileService.createDebridFile(fullVfsPath, hash, contents, skipLocalEntityConversion = true)
+                    // Store the db_entity_id to link this synced file to the VFS entity
+                    syncedFile.dbEntityId = createdFile.id
+                    syncedFileRepository.save(syncedFile)
                     logger.info("Successfully created VFS entry: {} (id: {})", fullVfsPath, createdFile.id)
                 }
             } else {
                 // Skip LocalEntity conversion for non-subtitle files - keep as RemotelyCachedEntity
                 // pointing to the provider's WebDAV URL for direct streaming
                 val createdFile = databaseFileService.createDebridFile(fullVfsPath, hash, contents, skipLocalEntityConversion = true)
+                // Store the db_entity_id to link this synced file to the VFS entity
+                syncedFile.dbEntityId = createdFile.id
+                syncedFileRepository.save(syncedFile)
                 logger.info("Successfully created VFS entry: {} (id: {})", fullVfsPath, createdFile.id)
             }
         } catch (e: Exception) {
@@ -294,11 +303,13 @@ class WebDavFolderSyncService(
                 "$vfsPath/$vfsFileName"
             }
 
-            // Look up by hash (providerFileId) instead of path to support renamed files
-            // The hash is the WebDAV path which doesn't change even if the user renames the VFS file
-            val hash = syncedFile.providerFileId ?: return
-            val existingFiles = debridFileRepository.getByHash(hash)
-            val existingFile = existingFiles.firstOrNull()
+            // Look up by dbEntityId first (works for both RemotelyCachedEntity and LocalEntity, even after rename)
+            // Fall back to hash lookup for backward compatibility with entries created before dbEntityId was added
+            val existingFile = syncedFile.dbEntityId?.let { databaseFileService.getFileById(it) }
+                ?: run {
+                    val hash = syncedFile.providerFileId ?: return
+                    debridFileRepository.getByHash(hash).firstOrNull()
+                }
             
             val provider = mapProviderNameToDebridProvider(syncedFile.folderMapping?.providerName ?: "")
             if (provider == null) return
@@ -321,8 +332,11 @@ class WebDavFolderSyncService(
                         // Delete the old RemotelyCachedEntity first (same pattern as startup scan)
                         databaseFileService.deleteFile(existingFile)
                         // Then download and store as LocalEntity using existing method
-                        databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
-                        logger.info("Successfully converted subtitle file to LocalEntity: {}", urlDecode(fullVfsPath))
+                        val newLocalEntity = databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
+                        // Update dbEntityId to point to the new LocalEntity
+                        syncedFile.dbEntityId = newLocalEntity.id
+                        syncedFileRepository.save(syncedFile)
+                        logger.info("Successfully converted subtitle file to LocalEntity: {} (id: {})", urlDecode(fullVfsPath), newLocalEntity.id)
                     } catch (e: Exception) {
                         logger.error("Failed to convert subtitle file to LocalEntity: {}", urlDecode(fullVfsPath), e)
                         throw e
@@ -341,8 +355,11 @@ class WebDavFolderSyncService(
                             // Delete the old LocalEntity first
                             databaseFileService.deleteFile(existingFile)
                             // Then download and store new LocalEntity using existing method
-                            databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
-                            logger.info("Successfully re-downloaded subtitle file: {}", urlDecode(fullVfsPath))
+                            val newLocalEntity = databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
+                            // Update dbEntityId to point to the new LocalEntity
+                            syncedFile.dbEntityId = newLocalEntity.id
+                            syncedFileRepository.save(syncedFile)
+                            logger.info("Successfully re-downloaded subtitle file: {} (id: {})", urlDecode(fullVfsPath), newLocalEntity.id)
                         } catch (e: Exception) {
                             logger.error("Failed to re-download subtitle file: {}", urlDecode(fullVfsPath), e)
                             throw e

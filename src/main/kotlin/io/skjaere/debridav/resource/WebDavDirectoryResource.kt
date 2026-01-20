@@ -159,11 +159,15 @@ class WebDavDirectoryResource private constructor(
                 directoryMap.getOrPut(subDirName) { mutableListOf() }.add(syncedFile)
             } else {
                 // File is directly in this directory
-                val fileEntity = fileService.getFileAtPath(fullFilePath)
+                // First try to find by dbEntityId (works even if user renamed the file)
+                // Fall back to path lookup for backward compatibility with existing entries
+                val fileEntity = syncedFile.dbEntityId?.let { fileService.getFileById(it) }
+                    ?: fileService.getFileAtPath(fullFilePath)
+                
                 if (fileEntity != null) {
                     resourceFactory.toFileResource(fileEntity)?.let { children.add(it) }
                 } else {
-                    logger.warn("File not found at path: {}", fullFilePath)
+                    logger.warn("File not found for synced file id={}, path={}", syncedFile.id, fullFilePath)
                 }
             }
         }

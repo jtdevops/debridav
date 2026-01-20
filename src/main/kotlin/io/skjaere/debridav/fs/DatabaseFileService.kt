@@ -465,6 +465,14 @@ class DatabaseFileService(
 
     }
 
+    /**
+     * Get a file by its database ID.
+     * Used to find files that may have been renamed by the user.
+     */
+    fun getFileById(id: Long): DbEntity? {
+        return debridFileRepository.findById(id).orElse(null)
+    }
+
     @Transactional
     fun createDirectory(path: String): DbDirectory {
         return getOrCreateDirectory(if (path != "/") StringUtils.removeEnd(path, "/") else path)

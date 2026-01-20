@@ -69,6 +69,14 @@ class WebDavSyncedFileEntity {
     @Column(name = "is_deleted", nullable = false)
     var isDeleted: Boolean = false
 
+    /**
+     * Reference to the VFS db_item.id for this synced file.
+     * Used to find the file even after user renames it (since name can change but id stays the same).
+     * Can be null for files that haven't been synced to VFS yet.
+     */
+    @Column(name = "db_entity_id")
+    var dbEntityId: Long? = null
+
     @Column(name = "created_at", nullable = false)
     var createdAt: Instant = Instant.now()
 
