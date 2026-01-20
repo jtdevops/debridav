@@ -84,17 +84,28 @@ class DebridFolderDirectoryResource(
         
         syncedFiles.forEach { syncedFile ->
             val vfsPath = syncedFile.vfsPath ?: return@forEach
-            val relativePath = vfsPath.removePrefix(internalPath).removePrefix("/")
+            val vfsFileName = syncedFile.vfsFileName ?: return@forEach
+            
+            // Construct full file path from vfsPath (directory) + vfsFileName
+            val fullFilePath = if (vfsPath.endsWith("/")) {
+                "$vfsPath$vfsFileName"
+            } else {
+                "$vfsPath/$vfsFileName"
+            }
+            
+            val relativePath = fullFilePath.removePrefix(internalPath).removePrefix("/")
             
             if (relativePath.contains("/")) {
-                // File is in a subdirectory
-                val dirPath = relativePath.substringBeforeLast("/")
-                directoryMap.getOrPut(dirPath) { mutableListOf() }.add(syncedFile)
+                // File is in a subdirectory - get the first directory level
+                val firstDirName = relativePath.substringBefore("/")
+                directoryMap.getOrPut(firstDirName) { mutableListOf() }.add(syncedFile)
             } else {
                 // File is directly in this directory
-                val fileEntity = fileService.getFileAtPath(vfsPath)
+                val fileEntity = fileService.getFileAtPath(fullFilePath)
                 if (fileEntity != null) {
                     resourceFactory.toFileResource(fileEntity)?.let { children.add(it) }
+                } else {
+                    logger.warn("File not found at path: {}", fullFilePath)
                 }
             }
         }
@@ -186,17 +197,28 @@ class DebridFolderSubdirectoryResource(
         
         syncedFiles.forEach { syncedFile ->
             val vfsPath = syncedFile.vfsPath ?: return@forEach
-            val relativePath = vfsPath.removePrefix(fullPath).removePrefix("/")
+            val vfsFileName = syncedFile.vfsFileName ?: return@forEach
+            
+            // Construct full file path from vfsPath (directory) + vfsFileName
+            val fullFilePath = if (vfsPath.endsWith("/")) {
+                "$vfsPath$vfsFileName"
+            } else {
+                "$vfsPath/$vfsFileName"
+            }
+            
+            val relativePath = fullFilePath.removePrefix(fullPath).removePrefix("/")
             
             if (relativePath.contains("/")) {
-                // File is in a nested subdirectory
-                val nestedDirName = relativePath.substringBeforeLast("/")
+                // File is in a nested subdirectory - get the first directory level
+                val nestedDirName = relativePath.substringBefore("/")
                 directoryMap.getOrPut(nestedDirName) { mutableListOf() }.add(syncedFile)
             } else {
                 // File is directly in this directory
-                val fileEntity = fileService.getFileAtPath(vfsPath)
+                val fileEntity = fileService.getFileAtPath(fullFilePath)
                 if (fileEntity != null) {
                     resourceFactory.toFileResource(fileEntity)?.let { children.add(it) }
+                } else {
+                    logger.warn("File not found at path: {}", fullFilePath)
                 }
             }
         }

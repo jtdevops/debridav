@@ -13,7 +13,10 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.milton.http.Range
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.debrid.DebridProvider
+import io.skjaere.debridav.debrid.client.premiumize.PremiumizeConfigurationProperties
 import io.skjaere.debridav.debrid.client.realdebrid.RealDebridClient
+import io.skjaere.debridav.debrid.client.realdebrid.RealDebridConfigurationProperties
 import io.skjaere.debridav.fs.CachedFile
 import kotlinx.coroutines.delay
 import io.skjaere.debridav.util.ByteFormatUtil
@@ -23,7 +26,9 @@ class DefaultStreamableLinkPreparer(
     override val httpClient: HttpClient,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val rateLimiter: RateLimiter,
-    private val userAgent: String?
+    private val userAgent: String?,
+    private val premiumizeConfig: PremiumizeConfigurationProperties?,
+    private val realDebridConfig: RealDebridConfigurationProperties?
 ) : StreamableLinkPreparable {
     private val logger = LoggerFactory.getLogger(DefaultStreamableLinkPreparer::class.java)
 
@@ -38,7 +43,14 @@ class DefaultStreamableLinkPreparer(
         httpClient: HttpClient,
         debridavConfigurationProperties: DebridavConfigurationProperties,
         rateLimiter: RateLimiter
-    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null)
+    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null, null, null)
+
+    constructor(
+        httpClient: HttpClient,
+        debridavConfigurationProperties: DebridavConfigurationProperties,
+        rateLimiter: RateLimiter,
+        userAgent: String?
+    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, userAgent, null, null)
 
     /**
      * Calculates dynamic socket timeout based on chunk size.
@@ -103,18 +115,56 @@ class DefaultStreamableLinkPreparer(
         return false
     }
 
+    /**
+     * Gets WebDAV Basic auth header for folder-mapped files.
+     * Returns null if not a WebDAV URL or credentials not configured.
+     */
+    private fun getWebDavAuthHeader(debridLink: CachedFile): String? {
+        val link = debridLink.link ?: return null
+        val isFolderMapped = debridLink.params?.containsKey("synced_file_id") == true
+        
+        if (!isFolderMapped) return null
+        
+        return when {
+            link.contains("webdav.premiumize.me") && premiumizeConfig != null -> {
+                val username = premiumizeConfig.webdavUsername
+                val password = premiumizeConfig.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    val credentials = "$username:$password"
+                    "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                } else null
+            }
+            link.contains("dav.real-debrid.com") && realDebridConfig != null -> {
+                val username = realDebridConfig.webdavUsername
+                val password = realDebridConfig.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    val credentials = "$username:$password"
+                    "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                } else null
+            }
+            else -> null
+        }
+    }
+
     @Suppress("MagicNumber")
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
         val isIptv = isIptvUrl(debridLink.link ?: "")
         val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
         val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
         val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
+        val webDavAuthHeader = getWebDavAuthHeader(debridLink)
         
         for (attempt in 0..maxRetries) {
             try {
                 return rateLimiter.executeSuspendFunction {
                     httpClient.prepareGet(debridLink.link!!) {
                     headers {
+                        // Add WebDAV authentication if this is a folder-mapped file
+                        webDavAuthHeader?.let {
+                            logger.debug("Adding WebDAV auth header for folder-mapped file: {}", debridLink.path)
+                            append(HttpHeaders.Authorization, it)
+                        }
+                        
                         // Apply Range headers to the original URL (including IPTV URLs)
                         // Range headers will be re-applied to redirect URLs in StreamingService to ensure providers honor the requested range
                         range?.let { range ->
@@ -204,6 +254,7 @@ class DefaultStreamableLinkPreparer(
         val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
         val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
         val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
+        val webDavAuthHeader = getWebDavAuthHeader(debridLink)
         
         for (attempt in 0..maxRetries) {
             try {
@@ -216,6 +267,10 @@ class DefaultStreamableLinkPreparer(
                     // HEAD requests are not supported by all servers, but byte range requests are more universally supported
                     val result = httpClient.get(debridLink.link!!) {
                         headers {
+                            // Add WebDAV authentication if this is a folder-mapped file
+                            webDavAuthHeader?.let {
+                                append(HttpHeaders.Authorization, it)
+                            }
                             append(io.ktor.http.HttpHeaders.Range, "bytes=0-0")
                         }
                         timeout {

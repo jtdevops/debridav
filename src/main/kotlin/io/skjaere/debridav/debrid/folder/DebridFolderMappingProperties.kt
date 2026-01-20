@@ -9,8 +9,33 @@ data class DebridFolderMappingProperties(
     val enabled: Boolean = false,
     val providers: String? = null, // Comma-separated list
     val mappings: String? = null, // Comma-separated list of mappings
-    val syncInterval: Duration = Duration.ofHours(1)
+    val syncInterval: Duration = Duration.ofHours(1),
+    // Comma-separated list of file extensions to sync (e.g., "mkv,mp4,avi,srt,sub")
+    // If empty, syncs all files
+    val allowedExtensions: String = "mkv,mp4,avi,mov,m4v,mpg,mpeg,wmv,flv,webm,ts,m2ts,srt,sub,ass,ssa,vtt,idx,sup"
 ) {
+    private val allowedExtensionsList: Set<String> by lazy {
+        if (allowedExtensions.isBlank()) {
+            emptySet()
+        } else {
+            allowedExtensions.split(",")
+                .map { it.trim().lowercase() }
+                .filter { it.isNotBlank() }
+                .toSet()
+        }
+    }
+
+    /**
+     * Check if a file should be synced based on its extension
+     */
+    fun shouldSyncFile(fileName: String): Boolean {
+        if (allowedExtensionsList.isEmpty()) {
+            return true // Sync all files if no extensions specified
+        }
+        val extension = fileName.substringAfterLast(".", "").lowercase()
+        return extension in allowedExtensionsList
+    }
+
     fun getProvidersList(): List<DebridProvider> {
         if (providers.isNullOrBlank()) {
             return emptyList()

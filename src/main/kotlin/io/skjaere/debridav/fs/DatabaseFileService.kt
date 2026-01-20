@@ -66,12 +66,24 @@ class DatabaseFileService(
     @Transactional
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents
+    ): RemotelyCachedEntity = createDebridFile(path, hash, debridFileContents, skipLocalEntityConversion = false)
+
+    /**
+     * Creates a debrid file entry in the database.
+     * @param skipLocalEntityConversion If true, skips the LocalEntity conversion even if the file
+     *        extension is whitelisted. Useful for folder mapping sync where we want to keep files
+     *        as RemotelyCachedEntity pointing to the provider's WebDAV URL.
+     */
+    @Transactional
+    fun createDebridFile(
+        path: String, hash: String, debridFileContents: DebridFileContents, skipLocalEntityConversion: Boolean
     ): RemotelyCachedEntity = runBlocking {
         val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
         val name = path.substringAfterLast("/")
         
-        // Check if file extension is whitelisted for local storage
-        val shouldStoreAsLocal = debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(name)
+        // Check if file extension is whitelisted for local storage (unless skipped)
+        val shouldStoreAsLocal = !skipLocalEntityConversion && 
+            debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(name)
         
         if (shouldStoreAsLocal) {
             // Check if we have debrid links available for download

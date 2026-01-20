@@ -315,7 +315,18 @@ class DebridLinkService(
             }
             return MissingFile(io.skjaere.debridav.debrid.DebridProvider.IPTV, clock.instant().toEpochMilli())
         }
-        
+
+        // Folder-mapped content (synced files) don't have magnets - return existing link
+        // These files use WebDAV URLs that are permanent and don't need refreshing
+        if (debridFileContents is DebridCachedTorrentContent && debridFileContents.magnet == null) {
+            val cachedFile = debridFileContents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+            if (cachedFile != null) {
+                logger.debug("Folder-mapped file detected (no magnet), returning existing link: {}", cachedFile.path)
+                return cachedFile
+            }
+            return MissingFile(debridClient.getProvider(), clock.instant().toEpochMilli())
+        }
+
         val key = when (debridFileContents) {
             is DebridCachedTorrentContent -> TorrentMagnet(debridFileContents.magnet!!)
             is DebridCachedUsenetReleaseContent -> UsenetRelease(debridFileContents.releaseName!!)
@@ -438,6 +449,16 @@ class DebridLinkService(
         debridFileContents: DebridFileContents,
         debridProvider: DebridProvider
     ) {
+        // Check if this is a folder-mapped file (identified by synced_file_id in params)
+        // Folder-mapped files use WebDAV URLs that require authentication, so we skip the
+        // link alive check and always consider them alive. The WebDAV URL is permanent.
+        val isFolderMappedFile = debridFile.params?.containsKey("synced_file_id") == true
+        
+        if (isFolderMappedFile) {
+            logger.debug("Folder-mapped file detected, skipping link alive check: {}", debridFile.path)
+            emit(debridFile)
+            return
+        }
 
         /*if (debridClients
                 .first { it.getProvider() == debridProvider }

@@ -146,9 +146,16 @@ class StreamableResourceFactory(
                             debridSyncedFileRepository.findByFolderMappingAndIsDeleted(matchingMapping, false)
                         }
                         
-                        // Check if it's a file
+                        // Check if it's a file by constructing full path from vfsPath + vfsFileName
                         val matchingFile = syncedFiles.firstOrNull { syncedFile ->
-                            syncedFile.vfsPath == path
+                            val vfsPath = syncedFile.vfsPath ?: return@firstOrNull false
+                            val vfsFileName = syncedFile.vfsFileName ?: return@firstOrNull false
+                            val fullFilePath = if (vfsPath.endsWith("/")) {
+                                "$vfsPath$vfsFileName"
+                            } else {
+                                "$vfsPath/$vfsFileName"
+                            }
+                            fullFilePath == path
                         }
                         
                         if (matchingFile != null) {
@@ -156,14 +163,20 @@ class StreamableResourceFactory(
                             val fileEntity = fileService.getFileAtPath(path)
                             return fileEntity?.let { toFileResource(it) }
                         } else {
-                            // Check if it's a subdirectory
+                            // Check if it's a subdirectory by looking for files whose full path starts with this path
                             val subdirFiles = syncedFiles.filter { syncedFile ->
-                                val vfsPath = syncedFile.vfsPath ?: ""
-                                vfsPath.startsWith("$path/")
+                                val vfsPath = syncedFile.vfsPath ?: return@filter false
+                                val vfsFileName = syncedFile.vfsFileName ?: return@filter false
+                                val fullFilePath = if (vfsPath.endsWith("/")) {
+                                    "$vfsPath$vfsFileName"
+                                } else {
+                                    "$vfsPath/$vfsFileName"
+                                }
+                                fullFilePath.startsWith("$path/")
                             }
                             
                             if (subdirFiles.isNotEmpty()) {
-                                val dirName = relativePath.substringBeforeLast("/").ifEmpty { relativePath }
+                                val dirName = path.substringAfterLast("/")
                                 return DebridFolderSubdirectoryResource(
                                     path,
                                     dirName,

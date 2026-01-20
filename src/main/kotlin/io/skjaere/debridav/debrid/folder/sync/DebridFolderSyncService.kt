@@ -2,6 +2,7 @@ package io.skjaere.debridav.debrid.folder.sync
 
 import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.debrid.folder.DebridFolderMappingEntity
+import io.skjaere.debridav.debrid.folder.DebridFolderMappingProperties
 import io.skjaere.debridav.debrid.folder.DebridFolderMappingRepository
 import io.skjaere.debridav.debrid.folder.DebridSyncedFileEntity
 import io.skjaere.debridav.debrid.folder.DebridSyncedFileRepository
@@ -11,6 +12,7 @@ import io.skjaere.debridav.debrid.folder.api.DebridFolderApiClient
 import io.skjaere.debridav.debrid.folder.webdav.DebridWebDavClient
 import io.skjaere.debridav.debrid.folder.webdav.WebDavFile
 import io.skjaere.debridav.debrid.folder.webdav.WebDavFolderService
+import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DatabaseFileService
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -28,7 +30,8 @@ class DebridFolderSyncService(
     private val apiClients: List<DebridFolderApiClient>,
     private val fileMappingService: FileMappingService,
     private val syncedFileContentService: SyncedFileContentService,
-    private val databaseFileService: DatabaseFileService
+    private val databaseFileService: DatabaseFileService,
+    private val folderMappingProperties: DebridFolderMappingProperties
 ) {
     private val logger = LoggerFactory.getLogger(DebridFolderSyncService::class.java)
     private val apiClientCache = ConcurrentHashMap<DebridProvider, DebridFolderApiClient>()
@@ -104,6 +107,17 @@ class DebridFolderSyncService(
             val directories = files.filter { it.isDirectory }
             logger.info("WebDAV sync: ${actualFiles.size} files, ${directories.size} directories")
             
+            // Filter files by allowed extensions
+            val filteredFiles = actualFiles.filter { file ->
+                val fileName = fileMappingService.getVfsFileName(file.path)
+                val shouldSync = folderMappingProperties.shouldSyncFile(fileName)
+                if (!shouldSync) {
+                    logger.debug("Skipping file (extension not allowed): {}", fileName)
+                }
+                shouldSync
+            }
+            logger.info("After extension filtering: ${filteredFiles.size} files to sync")
+            
             val existingFiles = syncedFileRepository.findByFolderMapping(mapping)
                 .associateBy { it.providerFileId }
 
@@ -111,7 +125,7 @@ class DebridFolderSyncService(
             var newFilesCount = 0
             var updatedFilesCount = 0
 
-            actualFiles.forEach { webDavFile ->
+            filteredFiles.forEach { webDavFile ->
                 try {
                     val fileId = generateFileId(webDavFile.path, webDavFile.name)
                     providerFileIds.add(fileId)
@@ -199,6 +213,9 @@ class DebridFolderSyncService(
         val vfsPath = fileMappingService.mapToVfsPath(mapping, webDavFile.path)
         val vfsFileName = fileMappingService.getVfsFileName(webDavFile.path)
 
+        logger.info("Creating synced file: vfsPath='{}', vfsFileName='{}', providerPath='{}'", 
+            vfsPath, vfsFileName, webDavFile.path)
+
         val syncedFile = DebridSyncedFileEntity().apply {
             folderMapping = mapping
             providerFileId = fileId
@@ -212,10 +229,11 @@ class DebridFolderSyncService(
             isDeleted = false
         }
 
-        syncedFileRepository.save(syncedFile)
+        val savedFile = syncedFileRepository.save(syncedFile)
+        logger.info("Saved synced file with id: {}", savedFile.id)
 
         // Create VFS entry
-        createVfsEntry(syncedFile, mapping.provider!!)
+        createVfsEntry(savedFile, mapping.provider!!)
     }
 
     private suspend fun createSyncedFileFromApi(
@@ -305,8 +323,17 @@ class DebridFolderSyncService(
 
     private suspend fun createVfsEntry(syncedFile: DebridSyncedFileEntity, provider: DebridProvider) {
         try {
-            val vfsPath = syncedFile.vfsPath ?: return
-            val vfsFileName = syncedFile.vfsFileName ?: syncedFile.providerFilePath?.substringAfterLast("/") ?: return
+            val vfsPath = syncedFile.vfsPath
+            if (vfsPath.isNullOrBlank()) {
+                logger.warn("Cannot create VFS entry: vfsPath is null or blank for synced file ${syncedFile.id}")
+                return
+            }
+            
+            val vfsFileName = syncedFile.vfsFileName ?: syncedFile.providerFilePath?.substringAfterLast("/")
+            if (vfsFileName.isNullOrBlank()) {
+                logger.warn("Cannot create VFS entry: vfsFileName is null or blank for synced file ${syncedFile.id}")
+                return
+            }
 
             val fullVfsPath = if (vfsPath.endsWith("/")) {
                 "$vfsPath$vfsFileName"
@@ -314,13 +341,21 @@ class DebridFolderSyncService(
                 "$vfsPath/$vfsFileName"
             }
 
+            logger.info("Creating VFS entry at path: {}", fullVfsPath)
+
             val contents = syncedFileContentService.createDebridFileContents(syncedFile, provider)
             val hash = syncedFile.providerFileId ?: generateHash(fullVfsPath)
 
-            databaseFileService.createDebridFile(fullVfsPath, hash, contents)
-            logger.debug("Created VFS entry: $fullVfsPath")
+            logger.debug("VFS entry contents: size={}, mimeType={}, link={}", 
+                contents.size, contents.mimeType, 
+                (contents.debridLinks.firstOrNull() as? CachedFile)?.link?.take(50))
+
+            // Skip LocalEntity conversion for folder mapping sync - we want to keep files as 
+            // RemotelyCachedEntity pointing to the provider's WebDAV URL for direct streaming
+            val createdFile = databaseFileService.createDebridFile(fullVfsPath, hash, contents, skipLocalEntityConversion = true)
+            logger.info("Successfully created VFS entry: {} (id: {})", fullVfsPath, createdFile.id)
         } catch (e: Exception) {
-            logger.error("Error creating VFS entry for synced file ${syncedFile.id}", e)
+            logger.error("Error creating VFS entry for synced file ${syncedFile.id}: ${e.message}", e)
         }
     }
 

@@ -38,7 +38,10 @@ class PremiumizeClient(
     StreamableLinkPreparable by DefaultStreamableLinkPreparer(
         httpClient,
         debridavConfigurationProperties,
-        premiumizeRateLimiter
+        premiumizeRateLimiter,
+        null,
+        premiumizeConfiguration,
+        null
     ) {
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
 

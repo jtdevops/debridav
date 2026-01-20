@@ -4,6 +4,8 @@ import io.skjaere.debridav.debrid.folder.DebridFolderMappingEntity
 import io.skjaere.debridav.debrid.folder.DebridSyncedFileEntity
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 @Service
 class FileMappingService {
@@ -16,28 +18,53 @@ class FileMappingService {
         val externalPath = mapping.externalPath ?: ""
         val internalPath = mapping.internalPath ?: ""
 
+        // URL decode the provider file path (WebDAV returns URL-encoded paths)
+        val decodedProviderPath = urlDecode(providerFilePath)
+        val decodedExternalPath = urlDecode(externalPath)
+
         // Remove the external path prefix from provider file path
-        val relativePath = if (providerFilePath.startsWith(externalPath)) {
-            providerFilePath.removePrefix(externalPath).removePrefix("/")
+        val relativePath = if (decodedProviderPath.startsWith(decodedExternalPath)) {
+            decodedProviderPath.removePrefix(decodedExternalPath).removePrefix("/")
         } else {
-            providerFilePath.removePrefix("/")
+            decodedProviderPath.removePrefix("/")
         }
 
-        // Combine internal path with relative path
-        val vfsPath = if (internalPath.endsWith("/")) {
-            "$internalPath$relativePath"
+        // Get just the directory part (without the filename)
+        val relativeDir = relativePath.substringBeforeLast("/", "")
+
+        // Combine internal path with relative directory
+        val vfsPath = if (relativeDir.isEmpty()) {
+            internalPath
+        } else if (internalPath.endsWith("/")) {
+            "$internalPath$relativeDir"
         } else {
-            "$internalPath/$relativePath"
+            "$internalPath/$relativeDir"
         }
 
-        return vfsPath.replace("//", "/")
+        val result = vfsPath.replace("//", "/")
+        logger.debug("Mapped provider path '{}' to VFS path '{}'", providerFilePath, result)
+        return result
     }
 
     /**
      * Gets the VFS file name from the provider file path
      */
     fun getVfsFileName(providerFilePath: String): String {
-        return providerFilePath.substringAfterLast("/")
+        // URL decode the path first
+        val decoded = urlDecode(providerFilePath)
+        return decoded.substringAfterLast("/")
+    }
+
+    /**
+     * URL decode a path, handling URL-encoded characters like %20, %5b, etc.
+     */
+    private fun urlDecode(path: String): String {
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            logger.warn("Failed to URL decode path: {}", path)
+            path
+        }
     }
 
     /**
