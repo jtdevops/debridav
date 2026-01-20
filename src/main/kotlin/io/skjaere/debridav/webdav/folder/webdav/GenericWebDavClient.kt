@@ -35,7 +35,7 @@ class GenericWebDavClient(
     suspend fun listFiles(config: WebDavProviderConfiguration, folderPath: String): List<WebDavFile> {
         return try {
             val url = "${config.url}${normalizePath(folderPath)}"
-            logger.debug("Listing files from WebDAV provider '${config.name}': $url")
+            logger.trace("Listing files from WebDAV provider '${config.name}': $url")
 
             val propfindBody = """<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:">

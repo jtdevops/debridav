@@ -2,10 +2,13 @@ package io.skjaere.debridav.fs
 
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DebridCachedTorrentContent
 import io.skjaere.debridav.fs.DebridCachedUsenetReleaseContent
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.repository.DebridFileContentsRepository
+import io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,7 +25,9 @@ class LocalEntityStartupScanService(
     private val debridFileContentsRepository: DebridFileContentsRepository,
     private val databaseFileService: DatabaseFileService,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
-    private val fileChunkCachingService: FileChunkCachingService
+    private val fileChunkCachingService: FileChunkCachingService,
+    private val webDavSyncedFileRepository: WebDavSyncedFileRepository?,
+    private val webDavProviderConfigService: WebDavProviderConfigurationService?
 ) {
     private val logger = LoggerFactory.getLogger(LocalEntityStartupScanService::class.java)
     private val scanScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -138,8 +143,29 @@ class LocalEntityStartupScanService(
                             logger.debug("Renamed RemotelyCachedEntity {} to {} for safe conversion", fileName, renamedFileName)
                         }
 
-                        // Download and store as LocalEntity
-                        databaseFileService.downloadAndStoreAsLocalEntity(filePath, debridFileContents)
+                        // Check if this is a WebDAV synced file (has synced_file_id in params)
+                        val cachedFile = debridFileContents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+                        val isWebDavFile = cachedFile?.params?.containsKey("synced_file_id") == true
+                        val authHeader = if (isWebDavFile && webDavSyncedFileRepository != null && webDavProviderConfigService != null) {
+                            // Get WebDAV auth header for this file
+                            val syncedFileId = cachedFile.params?.get("synced_file_id")?.toLongOrNull()
+                            if (syncedFileId != null) {
+                                val syncedFile = webDavSyncedFileRepository.findById(syncedFileId).orElse(null)
+                                if (syncedFile != null) {
+                                    getWebDavAuthHeader(syncedFile, cachedFile.link ?: "")
+                                } else {
+                                    logger.warn("WebDAV synced file with id {} not found, skipping auth header", syncedFileId)
+                                    null
+                                }
+                            } else {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+
+                        // Download and store as LocalEntity (with WebDAV auth if needed)
+                        databaseFileService.downloadAndStoreAsLocalEntity(filePath, debridFileContents, authHeader)
 
                         // Delete the renamed RemotelyCachedEntity after successful LocalEntity creation
                         when (reloadedEntity.contents) {
@@ -210,5 +236,27 @@ class LocalEntityStartupScanService(
      */
     private fun removeToLocalSuffix(fileName: String): String {
         return fileName.replace("_to-local", "")
+    }
+
+    /**
+     * Gets WebDAV auth header for downloading files (same logic as WebDavFolderSyncService)
+     */
+    private fun getWebDavAuthHeader(syncedFile: io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity, downloadUrl: String): String? {
+        val providerName = syncedFile.folderMapping?.providerName ?: return null
+        val config = webDavProviderConfigService?.getConfiguration(providerName) ?: return null
+        
+        return when (config.authType) {
+            io.skjaere.debridav.webdav.folder.WebDavAuthType.BASIC -> {
+                if (config.hasCredentials()) {
+                    val credentials = "${config.username}:${config.password}"
+                    "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                } else null
+            }
+            io.skjaere.debridav.webdav.folder.WebDavAuthType.BEARER -> {
+                if (config.hasCredentials()) {
+                    "Bearer ${config.bearerToken}"
+                } else null
+            }
+        }
     }
 }

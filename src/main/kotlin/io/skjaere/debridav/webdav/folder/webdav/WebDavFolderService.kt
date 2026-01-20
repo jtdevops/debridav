@@ -4,6 +4,8 @@ import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
 import io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 @Service
 class WebDavFolderService(
@@ -19,9 +21,9 @@ class WebDavFolderService(
         return if (config != null && config.hasCredentials()) {
             try {
                 val basePath = mapping.externalPath ?: ""
-                logger.debug("Listing files recursively from WebDAV path: $basePath")
+                logger.trace("Listing files recursively from WebDAV path: ${urlDecode(basePath)}")
                 val allFiles = listFilesRecursively(config, basePath)
-                logger.info("Found ${allFiles.size} files (including ${allFiles.count { it.isDirectory }} directories) in $basePath")
+                logger.info("Found ${allFiles.size} files (including ${allFiles.count { it.isDirectory }} directories) in ${urlDecode(basePath)}")
                 allFiles
             } catch (e: Exception) {
                 logger.error("Error listing files from WebDAV for mapping ${mapping.id}", e)
@@ -57,14 +59,14 @@ class WebDavFolderService(
             normalizedFilePath != normalizedBasePath && normalizedFilePath.isNotBlank()
         }
 
-        logger.debug("Found ${filteredFiles.size} items at depth $currentDepth in path: $path")
+        logger.trace("Found ${filteredFiles.size} items at depth $currentDepth in path: ${urlDecode(path)}")
 
         for (file in filteredFiles) {
             result.add(file)
 
             // If it's a directory, recursively list its contents
             if (file.isDirectory) {
-                logger.debug("Recursing into directory: ${file.path}")
+                logger.trace("Recursing into directory: ${urlDecode(file.path)}")
                 val subFiles = listFilesRecursively(config, file.path, maxDepth, currentDepth + 1)
                 result.addAll(subFiles)
             }
@@ -139,11 +141,24 @@ class WebDavFolderService(
             } else {
                 logger.info("Available root folders for WebDAV provider '$providerName' (${rootFolders.size} total):")
                 rootFolders.forEach { folder ->
-                    logger.info("  - $folder")
+                    logger.info("  - ${urlDecode(folder)}")
                 }
             }
         } catch (e: Exception) {
             logger.error("Error listing root folders for WebDAV provider '$providerName'", e)
+        }
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original path if decoding fails, or "null" if path is null.
+     */
+    private fun urlDecode(path: String?): String {
+        if (path == null) return "null"
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            path // Return original path if decoding fails
         }
     }
 }

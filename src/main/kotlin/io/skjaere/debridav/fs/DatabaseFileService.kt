@@ -4,6 +4,7 @@ import io.ipfs.multibase.Base58
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.CachedFile
@@ -369,13 +370,15 @@ class DatabaseFileService(
      * 
      * @param path The file path where the LocalEntity should be created
      * @param debridFileContents The DebridFileContents containing the download URL
+     * @param authHeader Optional authentication header (e.g., "Basic ..." or "Bearer ...") for WebDAV or other authenticated sources
      * @return The created LocalEntity with downloaded content
      * @throws Exception If download fails, the exception is logged and rethrown
      */
     @Transactional
     suspend fun downloadAndStoreAsLocalEntity(
         path: String,
-        debridFileContents: DebridFileContents
+        debridFileContents: DebridFileContents,
+        authHeader: String? = null
     ): LocalEntity = withContext(Dispatchers.IO) {
         val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
         val fileName = path.substringAfterLast("/")
@@ -411,8 +414,14 @@ class DatabaseFileService(
         logger.debug("Downloading content from {} for file {}", downloadUrl, fileName)
         
         try {
-            // Download the content
-            val bytes = httpClient.get(downloadUrl).body<ByteArray>()
+            // Download the content with optional authentication
+            val bytes = if (authHeader != null) {
+                httpClient.get(downloadUrl) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }.body<ByteArray>()
+            } else {
+                httpClient.get(downloadUrl).body<ByteArray>()
+            }
             val contentSize = bytes.size.toLong()
             
             // Create LocalEntity with downloaded content
