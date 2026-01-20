@@ -25,9 +25,15 @@ class WebDavProviderConfigurationService(
     private val environment: Environment,
     private val premiumizeConfig: PremiumizeConfigurationProperties?,
     private val realDebridConfig: RealDebridConfigurationProperties?,
-    private val torBoxConfig: TorBoxConfigurationProperties?
+    private val torBoxConfig: TorBoxConfigurationProperties?,
+    private val folderMappingProperties: WebDavFolderMappingProperties
 ) {
     private val logger = LoggerFactory.getLogger(WebDavProviderConfigurationService::class.java)
+    
+    // Cache the enabled providers list (normalized to lowercase)
+    private val enabledProviders: Set<String> by lazy {
+        folderMappingProperties.getProvidersList().map { it.lowercase().trim() }.toSet()
+    }
     
     private val builtInConfigs: Map<String, WebDavProviderConfiguration> by lazy {
         buildBuiltInConfigs()
@@ -35,6 +41,44 @@ class WebDavProviderConfigurationService(
     
     private val customConfigs: Map<String, WebDavProviderConfiguration> by lazy {
         buildCustomConfigs()
+    }
+    
+    init {
+        // Check for collisions between enabled built-in providers and custom provider configs
+        checkForBuiltInProviderCollisions()
+    }
+    
+    /**
+     * Check if any enabled built-in provider has custom provider config environment variables defined.
+     * This warns users who may have accidentally configured both.
+     */
+    private fun checkForBuiltInProviderCollisions() {
+        val enabledBuiltInProviders = enabledProviders.filter { it in BUILT_IN_PROVIDERS }
+        
+        enabledBuiltInProviders.forEach { providerName ->
+            val hasCustomUrl = hasCustomProviderConfig(providerName, "URL")
+            val hasCustomUsername = hasCustomProviderConfig(providerName, "USERNAME")
+            val hasCustomPassword = hasCustomProviderConfig(providerName, "PASSWORD")
+            
+            if (hasCustomUrl || hasCustomUsername || hasCustomPassword) {
+                logger.warn(
+                    "Custom WebDAV provider config detected for built-in provider '$providerName' - " +
+                    "custom config (DEBRIDAV_WEBDAV_PROVIDER_${providerName.uppercase()}_*) will be ignored. " +
+                    "Use the built-in provider config instead (e.g., PREMIUMIZE_WEBDAV_USERNAME)."
+                )
+            }
+        }
+    }
+    
+    /**
+     * Check if a custom provider config environment variable exists for a given provider and property.
+     */
+    private fun hasCustomProviderConfig(providerName: String, property: String): Boolean {
+        val envVar = "DEBRIDAV_WEBDAV_PROVIDER_${providerName.uppercase()}_$property"
+        val propKey = "debridav.webdav.provider.$providerName.${property.lowercase()}"
+        
+        return !environment.getProperty(propKey).isNullOrBlank() ||
+               !System.getenv(envVar).isNullOrBlank()
     }
     
     /**
@@ -143,58 +187,12 @@ class WebDavProviderConfigurationService(
     private fun buildCustomConfigs(): Map<String, WebDavProviderConfiguration> {
         val configs = mutableMapOf<String, WebDavProviderConfiguration>()
         
-        // Find all custom provider names from environment variables
-        // Pattern: DEBRIDAV_WEBDAV_PROVIDER_{NAME}_URL
-        val providerNames = mutableSetOf<String>()
+        // Only process providers that are explicitly listed in DEBRIDAV_WEBDAV_FOLDER_MAPPING_PROVIDERS
+        // and are not built-in providers
+        val customProviderNames = enabledProviders.filter { it !in BUILT_IN_PROVIDERS }
         
-        environment.activeProfiles.forEach { profile ->
-            // This is a simplified approach - in practice, we'd need to scan all properties
-            // For now, we'll rely on the providers list from WebDavFolderMappingProperties
-        }
-        
-        // We'll discover providers by checking for URL properties
-        // This is called after providers are configured in WebDavFolderMappingProperties
-        // So we can get the list from there or scan environment
-        
-        // For now, we'll parse from environment properties directly
-        // Pattern: debridav.webdav.provider.{name}.url
-        val propertySources = (environment as org.springframework.core.env.AbstractEnvironment).propertySources
-        propertySources.forEach { propertySource ->
-            if (propertySource.source is java.util.Map<*, *>) {
-                @Suppress("UNCHECKED_CAST")
-                val source = propertySource.source as Map<String, Any>
-                source.keys.forEach { key ->
-                    val prefix = "debridav.webdav.provider."
-                    if (key.startsWith(prefix) && key.endsWith(".url")) {
-                        val providerName = key.removePrefix(prefix).removeSuffix(".url")
-                        if (providerName.isNotBlank() && normalizeProviderName(providerName) !in BUILT_IN_PROVIDERS) {
-                            providerNames.add(providerName)
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Also check environment variables directly
-        System.getenv().keys.forEach { envKey ->
-            val prefix = "DEBRIDAV_WEBDAV_PROVIDER_"
-            val suffix = "_URL"
-            if (envKey.startsWith(prefix) && envKey.endsWith(suffix)) {
-                val providerName = envKey.removePrefix(prefix).removeSuffix(suffix)
-                if (providerName.isNotBlank()) {
-                    providerNames.add(providerName.lowercase())
-                }
-            }
-        }
-        
-        // Build configurations for each discovered provider
-        providerNames.forEach { providerName ->
+        customProviderNames.forEach { providerName ->
             val normalizedName = normalizeProviderName(providerName)
-            
-            // Skip if it's a built-in provider (handled separately)
-            if (normalizedName in BUILT_IN_PROVIDERS) {
-                return@forEach
-            }
             
             val url = environment.getProperty("debridav.webdav.provider.$providerName.url")
                 ?: System.getenv("DEBRIDAV_WEBDAV_PROVIDER_${providerName.uppercase()}_URL")
