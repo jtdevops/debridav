@@ -9,5 +9,6 @@ class TorBoxConfigurationProperties(
     val version: String,
     val requestTimeoutMillis: Long,
     val socketTimeoutMillis: Long,
-
-    )
+    val webdavUsername: String? = null,
+    val webdavPassword: String? = null
+)

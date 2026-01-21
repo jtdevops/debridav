@@ -178,6 +178,53 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
     fun findEmptyDirectoriesInDownloads(
         downloadPathPrefix: String
     ): List<DbDirectory>
+
+    @Query(
+        """
+        SELECT dir.* FROM db_item dir
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:pathPrefix AS ltree)
+        AND dir.path != CAST(:pathPrefix AS ltree)
+        ORDER BY nlevel(dir.path) DESC
+        """,
+        nativeQuery = true
+    )
+    fun findAllDirectoriesUnderPath(pathPrefix: String): List<DbDirectory>
+
+    @Query(
+        """
+        SELECT child.* FROM db_item child
+        WHERE child.directory_id = :directoryId
+        AND child.db_item_type != 'DbDirectory'
+        """,
+        nativeQuery = true
+    )
+    fun findFilesInDirectory(directoryId: Long): List<DbEntity>
+
+    @Modifying
+    @Transactional
+    @Query(
+        """
+        DELETE FROM db_item
+        WHERE db_item_type = 'DbDirectory'
+        AND path <@ CAST(:directoryPath AS ltree)
+        AND path != CAST(:directoryPath AS ltree)
+        """,
+        nativeQuery = true
+    )
+    fun deleteChildDirectoriesByPath(directoryPath: String): Int
+
+    @Query(
+        """
+        SELECT child.* FROM db_item child
+        INNER JOIN db_item dir ON child.directory_id = dir.id
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:directoryPath AS ltree)
+        AND child.db_item_type != 'DbDirectory'
+        """,
+        nativeQuery = true
+    )
+    fun findFilesInDirectoryTree(directoryPath: String): List<DbEntity>
 }
 
 data class LibraryStats(val provider: String, val type: String, val count: Long)

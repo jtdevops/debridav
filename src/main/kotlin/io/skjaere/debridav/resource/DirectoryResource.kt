@@ -9,6 +9,7 @@ import io.milton.resource.MoveableResource
 import io.milton.resource.PutableResource
 import io.milton.resource.Resource
 import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingRepository
 import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalContentsService
@@ -30,7 +31,9 @@ class DirectoryResource(
     val resourceFactory: StreamableResourceFactory,
     private val localContentsService: LocalContentsService,
     fileService: DatabaseFileService,
-    private val arrRequestDetector: ArrRequestDetector
+    private val arrRequestDetector: ArrRequestDetector,
+    private val webDavFolderMappingRepository: WebDavFolderMappingRepository?,
+    private val webDavSyncedFileRepository: io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository?
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
     DeletableResource {
     
@@ -87,10 +90,29 @@ class DirectoryResource(
     }
 
     override fun getChildren(): List<Resource> {
-        val children = directoryChildren ?: getChildren(directory).toMutableList()
+        var children = directoryChildren ?: getChildren(directory).toMutableList()
+        
+        val directoryPath = directory.fileSystemPath()
+        
+        // If this is the root directory, filter out WebDAV mapped folders when the feature is disabled
+        // or when the specific mapping is disabled
+        if (directoryPath == "/" && webDavFolderMappingRepository != null) {
+            val allMappings = webDavFolderMappingRepository.findAll()
+            val disabledMappingPaths = allMappings
+                .filter { !it.enabled }
+                .mapNotNull { it.internalPath?.removePrefix("/")?.split("/")?.firstOrNull() }
+                .toSet()
+            
+            // Also hide paths for mappings that exist but WebDAV feature is disabled
+            // (all mappings would be disabled in that case via WebDavFolderMappingConfigurationService)
+            if (disabledMappingPaths.isNotEmpty()) {
+                children = children.filterNot { resource ->
+                    resource.name in disabledMappingPaths
+                }.toMutableList()
+            }
+        }
         
         // If this is the root directory and STRM is enabled, add STRM folders
-        val directoryPath = directory.fileSystemPath()
         if (directoryPath == "/" && resourceFactory.debridavConfigurationProperties.isStrmEnabled()) {
             val strmMappings = resourceFactory.debridavConfigurationProperties.parseStrmFolderMappings()
             
@@ -111,6 +133,27 @@ class DirectoryResource(
                         resourceFactory.debridavConfigurationProperties
                     )
                     children.add(strmDirResource)
+                }
+            }
+        }
+        
+        // If this is the root directory and WebDAV folder mapping is enabled, add mapped folders
+        if (directoryPath == "/" && webDavFolderMappingRepository != null && webDavSyncedFileRepository != null) {
+            val mappings = webDavFolderMappingRepository.findByEnabled(true)
+            
+            mappings.forEach { mapping ->
+                val internalPath = mapping.internalPath ?: return@forEach
+                // Only add mappings that are at the root level (no subdirectories)
+                val pathParts = internalPath.removePrefix("/").split("/")
+                if (pathParts.size == 1) {
+                    // This is a root-level mapping
+                    val folderDirResource = WebDavDirectoryResource(
+                        mapping,
+                        resourceFactory,
+                        fileService,
+                        webDavSyncedFileRepository
+                    )
+                    children.add(folderDirResource)
                 }
             }
         }
@@ -176,7 +219,9 @@ class DirectoryResource(
             resourceFactory,
             localContentsService,
             fileService,
-            arrRequestDetector
+            arrRequestDetector,
+            webDavFolderMappingRepository,
+            webDavSyncedFileRepository
         )
     }
 
@@ -192,7 +237,7 @@ class DirectoryResource(
 
     private fun toResource(file: DbEntity): Resource? {
         return if (file is DbDirectory)
-            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector)
+            DirectoryResource(file, resourceFactory, localContentsService, fileService, arrRequestDetector, webDavFolderMappingRepository, webDavSyncedFileRepository)
         else resourceFactory.toFileResource(file)
     }
 }

@@ -19,6 +19,8 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.util.ByteFormatUtil
 import java.net.InetAddress
 import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import io.skjaere.debridav.debrid.client.DebridCachedContentClient
 import io.skjaere.debridav.debrid.client.DefaultStreamableLinkPreparer
 import io.skjaere.debridav.debrid.DebridLinkService
@@ -360,18 +362,18 @@ class StreamingService(
             
             if (isConnectTimeout) {
                 // Reduced logging for handled ConnectTimeoutException - fallback will handle it
-                logger.debug("STREAMING_IO_EXCEPTION: Connect timeout during streaming: path={}, link={}, provider={}, exceptionClass={}", 
-                    debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName)
+                logger.debug("STREAMING_IO_EXCEPTION: Connect timeout during streaming: path={}, link={}, provider={}, exceptionClass={}",
+                    urlDecode(debridLink.path), debridLink.link?.take(100), debridLink.provider, e::class.simpleName)
                 result = StreamResult.IO_ERROR
             } else if (isClientAbort) {
                 // Client disconnect is expected behavior, log at DEBUG level
-                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}", 
-                    debridLink.path, e::class.simpleName)
+                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}",
+                    urlDecode(debridLink.path), e::class.simpleName)
                 result = StreamResult.OK
             } else {
                 // TRACE level logging for other streaming IO exceptions with full stack trace
-                logger.trace("STREAMING_IO_EXCEPTION: IOException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
-                    debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+                logger.trace("STREAMING_IO_EXCEPTION: IOException during streaming: path={}, link={}, provider={}, exceptionClass={}",
+                    urlDecode(debridLink.path), debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
                 // Explicitly log stack trace to ensure it appears
                 logger.trace("STREAMING_IO_EXCEPTION_STACK_TRACE", e)
                 logger.error("IOError occurred during streaming", e)
@@ -389,16 +391,16 @@ class StreamingService(
                 e.cause?.message?.contains("Connection reset") == true ||
                 e.cause?.message?.contains("Connection reset by peer") == true ||
                 e.cause?.message?.contains("Broken pipe") == true) {
-                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}", 
-                    debridLink.path, e::class.simpleName)
+                logger.debug("Client disconnected during streaming (expected): path={}, exceptionClass={}",
+                    urlDecode(debridLink.path), e::class.simpleName)
                 result = StreamResult.OK
             } else {
                 // TRACE level logging for streaming runtime exceptions with full stack trace
-                logger.trace("STREAMING_RUNTIME_EXCEPTION: RuntimeException during streaming: path={}, link={}, provider={}, exceptionClass={}", 
-                    debridLink.path, debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
+                logger.trace("STREAMING_RUNTIME_EXCEPTION: RuntimeException during streaming: path={}, link={}, provider={}, exceptionClass={}",
+                    urlDecode(debridLink.path), debridLink.link?.take(100), debridLink.provider, e::class.simpleName, e)
                 // Explicitly log stack trace to ensure it appears
                 logger.trace("STREAMING_RUNTIME_EXCEPTION_STACK_TRACE", e)
-                logger.error("An error occurred during streaming ${debridLink.path}", e)
+                logger.error("An error occurred during streaming ${urlDecode(debridLink.path)}", e)
                 result = StreamResult.UNKNOWN_ERROR
             }
         }
@@ -493,7 +495,7 @@ class StreamingService(
                     logId, fileNameForCompletion, requestedSize, requestedSizeMB, actualBytesDownloaded, actualBytesDownloadedMB, status, httpRequestInfo.isInternal, isSmallRange)
             }
         }
-        logger.debug("done streaming ${debridLink.path}: $result")
+        logger.debug("done streaming ${urlDecode(debridLink.path)}: $result")
         result
     }
     
@@ -1301,7 +1303,7 @@ class StreamingService(
     }
 
     fun handleLinkNotFound(debridLink: CachedFile, remotelyCachedEntity: RemotelyCachedEntity, range: Range, outputStream: OutputStream): StreamResult {
-        logger.warn("Link not found for ${debridLink.path}")
+        logger.warn("Link not found for ${urlDecode(debridLink.path)}")
         return StreamResult.DEAD_LINK
     }
 
@@ -1315,9 +1317,9 @@ class StreamingService(
         }
         
         if (isIptvContent && iptvProviderName != null) {
-            logger.warn("EOF reached while streaming IPTV content ${debridLink.path} from provider $iptvProviderName - provider may be unavailable or stream ended early")
+            logger.warn("EOF reached while streaming IPTV content ${urlDecode(debridLink.path)} from provider $iptvProviderName - provider may be unavailable or stream ended early")
         } else {
-            logger.info("EOF reached while streaming ${debridLink.path}")
+            logger.info("EOF reached while streaming ${urlDecode(debridLink.path)}")
         }
         return StreamResult.OK
     }
@@ -1613,5 +1615,18 @@ class StreamingService(
         }
         
         return false
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original path if decoding fails.
+     */
+    private fun urlDecode(path: String?): String {
+        if (path == null) return "null"
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            path // Return original path if decoding fails
+        }
     }
 }

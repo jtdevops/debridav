@@ -15,7 +15,10 @@ import io.skjaere.debridav.fs.DbDirectory
 import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridIptvContent
 import io.skjaere.debridav.fs.LocalContentsService
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingRepository
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository
 import io.skjaere.debridav.fs.LocalEntity
+import kotlinx.coroutines.runBlocking
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.stream.StreamingService
 import org.springframework.boot.autoconfigure.web.ServerProperties
@@ -32,7 +35,9 @@ class StreamableResourceFactory(
     private val arrRequestDetector: ArrRequestDetector,
     internal val serverProperties: ServerProperties,
     internal val environment: Environment,
-    internal val hostnameDetectionService: HostnameDetectionService
+    internal val hostnameDetectionService: HostnameDetectionService,
+    private val webDavFolderMappingRepository: WebDavFolderMappingRepository?,
+    private val webDavSyncedFileRepository: WebDavSyncedFileRepository?
 ) : ResourceFactory {
     private val logger = LoggerFactory.getLogger(StreamableResourceFactory::class.java)
 
@@ -115,7 +120,78 @@ class StreamableResourceFactory(
                 }
             }
             
-            // Not a STRM path, handle normally
+            // Check if this is a mapped WebDAV folder path
+            if (webDavFolderMappingRepository != null && webDavSyncedFileRepository != null) {
+                val mappings = webDavFolderMappingRepository.findByEnabled(true)
+                val matchingMapping = mappings.firstOrNull { mapping ->
+                    val internalPath = mapping.internalPath ?: ""
+                    path == internalPath || path.startsWith("$internalPath/")
+                }
+                
+                if (matchingMapping != null) {
+                    // This is a mapped folder path
+                    val internalPath = matchingMapping.internalPath ?: ""
+                    if (path == internalPath) {
+                        // Root of mapped folder - return directory resource
+                        return WebDavDirectoryResource(
+                            matchingMapping,
+                            this,
+                            fileService,
+                            webDavSyncedFileRepository
+                        )
+                    } else {
+                        // Subdirectory or file within mapped folder
+                        val relativePath = path.removePrefix(internalPath).removePrefix("/")
+                        val syncedFiles = kotlinx.coroutines.runBlocking {
+                            webDavSyncedFileRepository.findByFolderMappingAndIsDeleted(matchingMapping, false)
+                        }
+                        
+                        // Check if it's a file by constructing full path from vfsPath + vfsFileName
+                        val matchingFile = syncedFiles.firstOrNull { syncedFile ->
+                            val vfsPath = syncedFile.vfsPath ?: return@firstOrNull false
+                            val vfsFileName = syncedFile.vfsFileName ?: return@firstOrNull false
+                            val fullFilePath = if (vfsPath.endsWith("/")) {
+                                "$vfsPath$vfsFileName"
+                            } else {
+                                "$vfsPath/$vfsFileName"
+                            }
+                            fullFilePath == path
+                        }
+                        
+                        if (matchingFile != null) {
+                            // Return the actual VFS file
+                            val fileEntity = fileService.getFileAtPath(path)
+                            return fileEntity?.let { toFileResource(it) }
+                        } else {
+                            // Check if it's a subdirectory by looking for files whose full path starts with this path
+                            val subdirFiles = syncedFiles.filter { syncedFile ->
+                                val vfsPath = syncedFile.vfsPath ?: return@filter false
+                                val vfsFileName = syncedFile.vfsFileName ?: return@filter false
+                                val fullFilePath = if (vfsPath.endsWith("/")) {
+                                    "$vfsPath$vfsFileName"
+                                } else {
+                                    "$vfsPath/$vfsFileName"
+                                }
+                                fullFilePath.startsWith("$path/")
+                            }
+                            
+                            if (subdirFiles.isNotEmpty()) {
+                                val dirName = path.substringAfterLast("/")
+                                return WebDavDirectoryResource(
+                                    path,
+                                    dirName,
+                                    subdirFiles,
+                                    this,
+                                    fileService,
+                                    webDavSyncedFileRepository
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Not a STRM path or mapped folder path, handle normally
             fileService.getFileAtPath(path)
                 ?.let {
                     if (it is DbDirectory) {
@@ -135,7 +211,15 @@ class StreamableResourceFactory(
         if (dbItem !is DbDirectory) {
             error("Not a directory")
         }
-        return DirectoryResource(dbItem, this, localContentsService, fileService, arrRequestDetector)
+        return DirectoryResource(
+            dbItem, 
+            this, 
+            localContentsService, 
+            fileService, 
+            arrRequestDetector,
+            webDavFolderMappingRepository,
+            webDavSyncedFileRepository
+        )
     }
 
     fun toFileResource(dbItem: DbEntity): Resource? {
