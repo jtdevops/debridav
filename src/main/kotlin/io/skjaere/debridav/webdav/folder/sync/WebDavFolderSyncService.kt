@@ -1,9 +1,12 @@
 package io.skjaere.debridav.webdav.folder.sync
 
+import io.ipfs.multibase.Base58
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.DebridProvider
 import io.skjaere.debridav.fs.CachedFile
 import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.DbDirectory
+import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
@@ -150,6 +153,13 @@ class WebDavFolderSyncService(
                 deleteMissingFiles(mapping, providerFileIds.toList())
             } catch (e: Exception) {
                 logger.error("Error deleting missing files for mapping ${mapping.id}", e)
+            }
+
+            // Clean up orphaned directories and optionally create empty directories
+            try {
+                cleanupDirectories(mapping, directories, filteredFiles)
+            } catch (e: Exception) {
+                logger.error("Error cleaning up directories for mapping ${mapping.id}", e)
             }
         } catch (e: Exception) {
             logger.error("Error syncing WebDAV mapping ${mapping.id}", e)
@@ -485,6 +495,190 @@ class WebDavFolderSyncService(
             logger.info("Deleted $deletedCount synced files and $dbEntityDeletedCount linked db_items for mapping ${mapping.id}")
         } catch (e: Exception) {
             logger.error("Error deleting missing files for mapping ${mapping.id}", e)
+        }
+    }
+
+    /**
+     * Cleans up directories using a top-down approach:
+     * - Maps all WebDAV directories to VFS paths
+     * - Finds directories in VFS that don't exist in WebDAV
+     * - Deletes orphaned directories (and their children) starting from the top level
+     * - Creates empty directories that exist in WebDAV
+     */
+    private suspend fun cleanupDirectories(
+        mapping: WebDavFolderMappingEntity,
+        webDavDirectories: List<WebDavFile>,
+        syncedFiles: List<WebDavFile>
+    ) {
+        try {
+            val internalPath = mapping.internalPath ?: return
+            if (internalPath.isBlank()) return
+
+            // Map all WebDAV directories to VFS paths
+            val webDavVfsPaths = webDavDirectories.mapNotNull { webDavDir ->
+                try {
+                    val vfsPath = fileMappingService.mapToVfsPath(mapping, webDavDir.path)
+                    val normalizedPath = vfsPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+                    normalizedPath
+                } catch (e: Exception) {
+                    logger.warn("Failed to map WebDAV directory path ${urlDecode(webDavDir.path)} to VFS path", e)
+                    null
+                }
+            }.toSet()
+
+            // Also include directories that contain synced files (they should exist even if not explicitly listed in WebDAV)
+            val directoriesFromFiles = syncedFiles.mapNotNull { file ->
+                try {
+                    val vfsPath = fileMappingService.mapToVfsPath(mapping, file.path)
+                    val dirPath = vfsPath.substringBeforeLast("/").let {
+                        if (it.isEmpty() || it == vfsPath) {
+                            internalPath.trimEnd('/').let { p -> if (p.isEmpty()) "/" else p }
+                        } else {
+                            it.trimEnd('/').let { p -> if (p.isEmpty()) "/" else p }
+                        }
+                    }
+                    dirPath
+                } catch (e: Exception) {
+                    null
+                }
+            }.toSet()
+
+            val normalizedInternalPath = internalPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+            
+            // Always include the internal path itself as valid (it's the root of the mapping)
+            val allValidVfsPaths = (webDavVfsPaths + directoriesFromFiles + setOf(normalizedInternalPath)).toSet()
+            logger.debug("Valid VFS directory paths for mapping ${mapping.id}: ${allValidVfsPaths.size} directories (including internal path)")
+
+            // Find all directories in db_item under the internal path
+            val internalPathLtree = internalPath.pathToLtree()
+            val allDbDirectories = debridFileRepository.findAllDirectoriesUnderPath(internalPathLtree)
+            logger.debug("Found ${allDbDirectories.size} directories in db_item under ${internalPath}")
+
+            // Find directories that exist in VFS but not in WebDAV (orphaned directories)
+            // Sort by depth (shallowest first) to delete parents first, which will handle children
+            val sortedByDepth = allDbDirectories.sortedBy { dir ->
+                dir.path?.split(".")?.size ?: 0
+            }
+
+            val directoriesToDelete = sortedByDepth.filter { dbDir ->
+                val dbDirVfsPath = dbDir.fileSystemPath() ?: return@filter true
+                
+                // Ensure we only process directories under the internal path (safety check)
+                if (!dbDirVfsPath.startsWith(normalizedInternalPath)) {
+                    logger.warn("Directory ${dbDirVfsPath} is outside mapping internal path ${internalPath}, skipping")
+                    return@filter false
+                }
+                
+                // Simple rule: if directory doesn't exist in WebDAV, delete it
+                // This handles all cases:
+                // - Empty folder deleted from WebDAV -> not in allValidVfsPaths -> deleted
+                // - Parent folder deleted -> children not in allValidVfsPaths -> deleted (when we process them)
+                // - Since we process shallowest first, parent directories are deleted before children
+                val existsInWebDav = allValidVfsPaths.contains(dbDirVfsPath)
+                
+                if (existsInWebDav) {
+                    false // Keep it - exists in WebDAV
+                } else {
+                    true // Delete it - doesn't exist in WebDAV
+                }
+            }
+
+            if (directoriesToDelete.isNotEmpty()) {
+                logger.info("Found ${directoriesToDelete.size} orphaned directories to delete for mapping ${mapping.id}")
+                
+                // Delete directories starting from top level (shallowest first)
+                // Delete parent directories - this will cascade to children via bulk delete
+                directoriesToDelete.forEach { directory ->
+                    try {
+                        val dirPath = directory.path ?: return@forEach
+                        val dirVfsPath = directory.fileSystemPath() ?: return@forEach
+                        
+                        // Delete all files in this directory tree first
+                        val filesInTree = debridFileRepository.findFilesInDirectoryTree(dirPath)
+                        filesInTree.forEach { file ->
+                            try {
+                                databaseFileService.deleteFile(file)
+                            } catch (e: Exception) {
+                                logger.error("Error deleting file ${file.id} in directory tree ${dirPath}", e)
+                            }
+                        }
+                        
+                        // Delete all child directories using bulk delete (more efficient)
+                        val childDirsDeleted = debridFileRepository.deleteChildDirectoriesByPath(dirPath)
+                        logger.debug("Deleted $childDirsDeleted child directories under ${dirVfsPath}")
+                        
+                        // Finally delete the parent directory itself
+                        debridFileRepository.delete(directory)
+                        logger.debug("Deleted orphaned directory: $dirVfsPath")
+                    } catch (e: Exception) {
+                        logger.error("Error deleting directory ${directory.path}", e)
+                    }
+                }
+            }
+
+            // Create empty directories that exist in WebDAV but don't exist in VFS
+            // This ensures the folder structure matches WebDAV exactly
+            webDavVfsPaths.forEach { vfsPath ->
+                try {
+                    val ltreePath = vfsPath.pathToLtree()
+                    val existingDir = debridFileRepository.getDirectoryByPath(ltreePath)
+                    if (existingDir == null) {
+                        // Create the directory (and parent directories if needed)
+                        databaseFileService.getOrCreateDirectory(vfsPath)
+                        logger.debug("Created empty directory from WebDAV: $vfsPath")
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to create directory from WebDAV path $vfsPath", e)
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("Error cleaning up directories for mapping ${mapping.id}", e)
+        }
+    }
+
+
+
+    /**
+     * Generates all parent paths for a given directory path, up to the internal path.
+     * For example: /pm_movies/testing/movieA/files -> [/pm_movies/testing/movieA, /pm_movies/testing, /pm_movies]
+     */
+    private fun generateParentPaths(dirPath: String, internalPath: String): List<String> {
+        val normalizedInternalPath = internalPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+        val normalizedDirPath = dirPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+        
+        if (normalizedDirPath == normalizedInternalPath) {
+            return listOf(normalizedInternalPath)
+        }
+        
+        val parents = mutableListOf<String>()
+        var currentPath = normalizedDirPath
+        
+        while (currentPath != normalizedInternalPath && currentPath != "/") {
+            val parent = currentPath.substringBeforeLast("/").let {
+                if (it.isEmpty() || it == currentPath) "/" else it.trimEnd('/').let { p -> if (p.isEmpty()) "/" else p }
+            }
+            if (parent.startsWith(normalizedInternalPath) || parent == normalizedInternalPath) {
+                parents.add(parent)
+                currentPath = parent
+            } else {
+                break
+            }
+        }
+        
+        return parents
+    }
+
+    /**
+     * Converts a VFS path to ltree format (used for database queries)
+     * Matches the logic in DatabaseFileService.pathToLtree()
+     */
+    private fun String.pathToLtree(): String {
+        val ROOT_NODE = "ROOT"
+        return if (this == "/") ROOT_NODE else {
+            this.split("/").filter { it.isNotBlank() }
+                .joinToString(separator = ".") { 
+                    Base58.encode(it.encodeToByteArray()) 
+                }.let { "$ROOT_NODE.$it" }
         }
     }
 
