@@ -22,10 +22,15 @@ abstract class AbstractResource(
     }
 
     override fun moveTo(rDest: CollectionResource, name: String) {
-        fileService.moveResource(
-            dbItem,
-            (rDest as DirectoryResource).directory.fileSystemPath()!!,
-            name
-        )
+        // Get the destination path based on the resource type
+        val destinationPath = when (rDest) {
+            is DirectoryResource -> rDest.directory.fileSystemPath()!!
+            is WebDavDirectoryResource -> rDest.getFullPath()
+            else -> throw IllegalArgumentException(
+                "Cannot move to resource of type ${rDest.javaClass.simpleName}"
+            )
+        }
+        
+        fileService.moveResource(dbItem, destinationPath, name)
     }
 }

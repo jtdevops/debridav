@@ -8,6 +8,8 @@ import io.milton.resource.GetableResource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.util.ByteFormatUtil
 import java.net.InetAddress
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import io.skjaere.debridav.debrid.DebridClient
 import io.skjaere.debridav.debrid.DebridLinkService
 import io.skjaere.debridav.debrid.DebridProvider
@@ -94,7 +96,7 @@ class DebridFileResource(
             
             var currentCachedFile = debridService.getCachedFileCached(file)
             if (currentCachedFile != null) {
-                logger.debug("streaming: {} range {} from {}", currentCachedFile.path, range, currentCachedFile.provider)
+                logger.debug("streaming: {} range {} from {}", urlDecode(currentCachedFile.path), range, currentCachedFile.provider)
 
                 val result = try {
                     streamingService.streamContents(
@@ -401,5 +403,18 @@ class DebridFileResource(
             file.name ?: "unknown", range?.start, range?.finish, ByteFormatUtil.byteCountToDisplaySize(requestedSize), requestedSize, sourceInfo, httpHeaders.size)
 
         return HttpRequestInfo(httpHeaders, sourceIpAddress, sourceHostname)
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original path if decoding fails.
+     */
+    private fun urlDecode(path: String?): String {
+        if (path == null) return "null"
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            path // Return original path if decoding fails
+        }
     }
 }

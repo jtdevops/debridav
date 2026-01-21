@@ -696,5 +696,102 @@ class IptvContentService(
         
         return contentToDelete.size
     }
+    
+    /**
+     * Deletes inactive Movies and Series categories and their associated content for a specific provider.
+     * Only deletes categories/content that are not linked to VFS files (those with linked files remain as inactive).
+     * 
+     * Returns the number of deleted categories and content items.
+     */
+    @Transactional
+    fun deleteInactiveMoviesAndSeriesCategoriesAndContentForProvider(providerName: String): Pair<Int, Int> {
+        // Find inactive VOD and Series categories for this provider
+        val inactiveVodCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, "vod")
+            .filter { !it.isActive }
+        val inactiveSeriesCategories = iptvCategoryRepository.findByProviderNameAndCategoryType(providerName, "series")
+            .filter { !it.isActive }
+        
+        val allInactiveCategories = inactiveVodCategories + inactiveSeriesCategories
+        
+        if (allInactiveCategories.isEmpty()) {
+            logger.debug("No inactive Movies/Series categories to delete for provider $providerName")
+            return Pair(0, 0)
+        }
+        
+        logger.info("Found ${allInactiveCategories.size} inactive Movies/Series categories for provider $providerName, checking for deletion")
+        
+        // Find all Movies and Series content linked to these inactive categories
+        val categoryIds = allInactiveCategories.map { it.id!! }.toSet()
+        val contentToCheck = iptvContentRepository.findByProviderName(providerName)
+            .filter { 
+                (it.contentType == ContentType.MOVIE || it.contentType == ContentType.SERIES) && 
+                it.category?.id in categoryIds
+            }
+        
+        // Separate content with and without linked files
+        val contentToDelete = mutableListOf<IptvContentEntity>()
+        val contentToKeep = mutableListOf<IptvContentEntity>()
+        
+        contentToCheck.forEach { content ->
+            val files = debridFileContentsRepository.findByIptvContentRefId(content.id!!)
+            if (files.isEmpty()) {
+                contentToDelete.add(content)
+            } else {
+                contentToKeep.add(content)
+                logger.debug("Keeping inactive content ${content.title} (id: ${content.id}) for provider $providerName - has ${files.size} linked files")
+            }
+        }
+        
+        // Delete content without linked files
+        if (contentToDelete.isNotEmpty()) {
+            logger.info("Deleting ${contentToDelete.size} Movies/Series content items linked to inactive categories for provider $providerName")
+            
+            // Separate movies and series for metadata deletion
+            val movieIds = contentToDelete.filter { it.contentType == ContentType.MOVIE }.map { it.contentId }
+            val seriesIds = contentToDelete.filter { it.contentType == ContentType.SERIES }.map { it.contentId }
+            
+            // Delete movie metadata
+            if (movieIds.isNotEmpty()) {
+                val deletedMovieMetadata = iptvMovieMetadataRepository.deleteByProviderNameAndMovieIds(providerName, movieIds)
+                logger.debug("Deleted $deletedMovieMetadata movie metadata entries for provider $providerName")
+            }
+            
+            // Delete series metadata
+            if (seriesIds.isNotEmpty()) {
+                val deletedSeriesMetadata = iptvSeriesMetadataRepository.deleteByProviderNameAndSeriesIds(providerName, seriesIds)
+                logger.debug("Deleted $deletedSeriesMetadata series metadata entries for provider $providerName")
+            }
+            
+            iptvContentRepository.deleteAll(contentToDelete)
+        }
+        
+        if (contentToKeep.isNotEmpty()) {
+            logger.info("Keeping ${contentToKeep.size} inactive Movies/Series content items (they have linked files) for provider $providerName")
+        }
+        
+        // Only delete categories that have no content left (all content was deleted or category has no content)
+        val categoriesToDelete = allInactiveCategories.filter { category ->
+            val remainingContent = iptvContentRepository.findByProviderName(providerName)
+                .any { 
+                    (it.contentType == ContentType.MOVIE || it.contentType == ContentType.SERIES) && 
+                    it.category?.id == category.id
+                }
+            !remainingContent
+        }
+        
+        if (categoriesToDelete.isNotEmpty()) {
+            iptvCategoryRepository.deleteAll(categoriesToDelete)
+            logger.info("Deleted ${categoriesToDelete.size} inactive Movies/Series categories for provider $providerName")
+        }
+        
+        val totalDeletedCategories = categoriesToDelete.size
+        val totalDeletedContent = contentToDelete.size
+        
+        if (totalDeletedCategories > 0 || totalDeletedContent > 0) {
+            logger.info("Deleted $totalDeletedCategories inactive Movies/Series categories and $totalDeletedContent associated content items for provider $providerName")
+        }
+        
+        return Pair(totalDeletedCategories, totalDeletedContent)
+    }
 }
 

@@ -1,0 +1,697 @@
+package io.skjaere.debridav.webdav.folder.sync
+
+import io.ipfs.multibase.Base58
+import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.debrid.DebridProvider
+import io.skjaere.debridav.fs.CachedFile
+import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.DbDirectory
+import io.skjaere.debridav.fs.DbEntity
+import io.skjaere.debridav.fs.LocalEntity
+import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingEntity
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingProperties
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingRepository
+import io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileEntity
+import io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository
+import io.skjaere.debridav.webdav.folder.webdav.WebDavFile
+import io.skjaere.debridav.webdav.folder.webdav.WebDavFolderService
+import io.skjaere.debridav.repository.DebridFileContentsRepository
+import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import java.time.Instant
+
+@Service
+@ConditionalOnProperty(
+    prefix = "debridav.webdav-folder-mapping",
+    name = ["enabled"],
+    havingValue = "true",
+    matchIfMissing = false
+)
+class WebDavFolderSyncService(
+    private val folderMappingRepository: WebDavFolderMappingRepository,
+    private val syncedFileRepository: WebDavSyncedFileRepository,
+    private val webDavFolderService: WebDavFolderService,
+    private val fileMappingService: FileMappingService,
+    private val syncedFileContentService: SyncedFileContentService,
+    private val databaseFileService: DatabaseFileService,
+    private val folderMappingProperties: WebDavFolderMappingProperties,
+    private val debridavConfigurationProperties: DebridavConfigurationProperties,
+    private val webDavProviderConfigService: WebDavProviderConfigurationService,
+    private val debridFileRepository: DebridFileContentsRepository
+) {
+    private val logger = LoggerFactory.getLogger(WebDavFolderSyncService::class.java)
+
+    @Transactional
+    suspend fun syncAllMappings() {
+        val mappings = folderMappingRepository.findByEnabled(true)
+        logger.info("Starting sync for ${mappings.size} folder mappings")
+
+        mappings.forEach { mapping ->
+            try {
+                syncMappingWithRetry(mapping)
+            } catch (e: Exception) {
+                logger.error("Error syncing mapping ${mapping.id} (${mapping.providerName}:${mapping.externalPath})", e)
+                // Continue with other mappings even if one fails
+            }
+        }
+    }
+
+    private suspend fun syncMappingWithRetry(mapping: WebDavFolderMappingEntity, maxRetries: Int = 3) {
+        var lastException: Exception? = null
+        repeat(maxRetries) { attempt ->
+            try {
+                syncMapping(mapping)
+                return // Success, exit retry loop
+            } catch (e: Exception) {
+                lastException = e
+                if (attempt < maxRetries - 1) {
+                    logger.warn("Sync attempt ${attempt + 1} failed for mapping ${mapping.id}, retrying...", e)
+                    kotlinx.coroutines.delay(1000L * (attempt + 1)) // Exponential backoff
+                }
+            }
+        }
+        // All retries failed
+        throw lastException ?: Exception("Unknown error during sync")
+    }
+
+    @Transactional
+    suspend fun syncMapping(mapping: WebDavFolderMappingEntity) {
+        logger.debug("Syncing mapping ${mapping.id}: ${mapping.providerName} -> ${urlDecode(mapping.internalPath)}")
+
+        // Log root folders if enabled for this provider
+        val providerName = mapping.providerName
+        if (providerName != null && providerName in folderMappingProperties.getLogRootFoldersList()) {
+            webDavFolderService.logRootFolders(providerName)
+        }
+
+        syncWebDavMapping(mapping)
+
+        // Update last synced timestamp
+        mapping.lastSynced = Instant.now()
+        folderMappingRepository.save(mapping)
+    }
+
+    private suspend fun syncWebDavMapping(mapping: WebDavFolderMappingEntity) {
+        try {
+            val files = webDavFolderService.listFiles(mapping)
+            logger.info("WebDAV sync found ${files.size} total items for mapping ${mapping.id}")
+            
+            val actualFiles = files.filter { !it.isDirectory }
+            val directories = files.filter { it.isDirectory }
+            logger.info("WebDAV sync: ${actualFiles.size} files, ${directories.size} directories")
+            
+            // Filter files by allowed extensions
+            val filteredFiles = actualFiles.filter { file ->
+                val fileName = fileMappingService.getVfsFileName(file.path)
+                val shouldSync = folderMappingProperties.shouldSyncFile(fileName)
+                if (!shouldSync) {
+                    logger.trace("Skipping file (extension not allowed): {}", fileName)
+                }
+                shouldSync
+            }
+            logger.info("After extension filtering: ${filteredFiles.size} files to sync")
+            
+            val existingFiles = syncedFileRepository.findByFolderMapping(mapping)
+                .associateBy { it.providerFileId }
+
+            val providerFileIds = mutableSetOf<String>()
+            var newFilesCount = 0
+            var updatedFilesCount = 0
+
+            filteredFiles.forEach { webDavFile ->
+                try {
+                    val fileId = generateFileId(webDavFile.path, webDavFile.name)
+                    providerFileIds.add(fileId)
+
+                    val existingFile = existingFiles[fileId]
+                    if (existingFile == null) {
+                        // Create new synced file
+                        createSyncedFileFromWebDav(mapping, webDavFile, fileId)
+                        newFilesCount++
+                        logger.trace("Created new synced file: ${urlDecode(webDavFile.path)}")
+                    } else {
+                        // Update existing file
+                        updateSyncedFileFromWebDav(existingFile, webDavFile)
+                        updatedFilesCount++
+                    }
+                } catch (e: Exception) {
+                    logger.error("Error processing WebDAV file ${urlDecode(webDavFile.path)} for mapping ${mapping.id}", e)
+                    // Continue with other files
+                }
+            }
+            
+            logger.info("WebDAV sync completed for mapping ${mapping.id}: $newFilesCount new, $updatedFilesCount updated")
+
+            // Delete files that are no longer in provider (more efficient than mark-then-delete)
+            try {
+                deleteMissingFiles(mapping, providerFileIds.toList())
+            } catch (e: Exception) {
+                logger.error("Error deleting missing files for mapping ${mapping.id}", e)
+            }
+
+            // Clean up orphaned directories and optionally create empty directories
+            try {
+                cleanupDirectories(mapping, directories, filteredFiles)
+            } catch (e: Exception) {
+                logger.error("Error cleaning up directories for mapping ${mapping.id}", e)
+            }
+        } catch (e: Exception) {
+            logger.error("Error syncing WebDAV mapping ${mapping.id}", e)
+            throw e
+        }
+    }
+
+    private suspend fun createSyncedFileFromWebDav(
+        mapping: WebDavFolderMappingEntity,
+        webDavFile: WebDavFile,
+        fileId: String
+    ) {
+        val vfsPath = fileMappingService.mapToVfsPath(mapping, webDavFile.path)
+        val vfsFileName = fileMappingService.getVfsFileName(webDavFile.path)
+
+        logger.info("Creating synced file: vfsPath='{}', vfsFileName='{}', providerPath='{}'", 
+            vfsPath, vfsFileName, webDavFile.path)
+
+        val syncedFile = WebDavSyncedFileEntity().apply {
+            folderMapping = mapping
+            providerFileId = fileId
+            providerFilePath = webDavFile.path
+            this.vfsPath = vfsPath
+            this.vfsFileName = vfsFileName
+            fileSize = webDavFile.size
+            mimeType = webDavFile.mimeType
+            providerLink = webDavFile.downloadLink
+            lastChecked = Instant.now()
+            isDeleted = false
+        }
+
+        val savedFile = syncedFileRepository.save(syncedFile)
+        logger.info("Saved synced file with id: {}", savedFile.id)
+
+        // Create VFS entry - convert providerName to DebridProvider
+        val provider = mapProviderNameToDebridProvider(mapping.providerName ?: "")
+        if (provider != null) {
+            createVfsEntry(savedFile, provider)
+        } else {
+            logger.warn("Cannot create VFS entry: unknown provider name '${mapping.providerName}'")
+        }
+    }
+
+    private suspend fun updateSyncedFileFromWebDav(
+        existingFile: WebDavSyncedFileEntity,
+        webDavFile: WebDavFile
+    ) {
+        // Check if anything meaningful has changed
+        val sizeChanged = existingFile.fileSize != webDavFile.size
+        val mimeTypeChanged = existingFile.mimeType != webDavFile.mimeType
+        val linkChanged = existingFile.providerLink != webDavFile.downloadLink
+        val pathChanged = existingFile.providerFilePath != webDavFile.path
+        
+        val hasChanges = sizeChanged || mimeTypeChanged || linkChanged || pathChanged
+        
+        if (!hasChanges) {
+            // Only update lastChecked timestamp if nothing else changed
+            existingFile.lastChecked = Instant.now()
+            syncedFileRepository.save(existingFile)
+            return // No need to update VFS entry if nothing changed
+        }
+
+        // Update file metadata
+        existingFile.providerFilePath = webDavFile.path
+        existingFile.fileSize = webDavFile.size
+        existingFile.mimeType = webDavFile.mimeType
+        existingFile.providerLink = webDavFile.downloadLink
+        existingFile.lastChecked = Instant.now()
+        existingFile.isDeleted = false
+
+        syncedFileRepository.save(existingFile)
+
+        // Update VFS entry only if something meaningful changed
+        updateVfsEntry(existingFile)
+    }
+
+    private suspend fun createVfsEntry(syncedFile: WebDavSyncedFileEntity, provider: DebridProvider) {
+        try {
+            val vfsPath = syncedFile.vfsPath
+            if (vfsPath.isNullOrBlank()) {
+                logger.warn("Cannot create VFS entry: vfsPath is null or blank for synced file ${syncedFile.id}")
+                return
+            }
+            
+            val vfsFileName = syncedFile.vfsFileName ?: syncedFile.providerFilePath?.substringAfterLast("/")
+            if (vfsFileName.isNullOrBlank()) {
+                logger.warn("Cannot create VFS entry: vfsFileName is null or blank for synced file ${syncedFile.id}")
+                return
+            }
+
+            val fullVfsPath = if (vfsPath.endsWith("/")) {
+                "$vfsPath$vfsFileName"
+            } else {
+                "$vfsPath/$vfsFileName"
+            }
+
+            logger.info("Creating VFS entry at path: {}", fullVfsPath)
+
+            val contents = syncedFileContentService.createDebridFileContents(syncedFile, provider)
+            val hash = syncedFile.providerFileId ?: generateHash(fullVfsPath)
+
+            logger.debug("VFS entry contents: size={}, mimeType={}, link={}", 
+                contents.size, contents.mimeType, 
+                (contents.debridLinks.firstOrNull() as? CachedFile)?.link?.take(50))
+
+            // Check if this is a subtitle file that should be stored as LocalEntity
+            val isSubtitleFile = debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(vfsFileName)
+            
+            if (isSubtitleFile) {
+                // Download and store as LocalEntity for subtitle files (following same pattern as debrid/IPTV files)
+                logger.info("Downloading subtitle file as LocalEntity: {}", urlDecode(fullVfsPath))
+                val authHeader = getWebDavAuthHeader(syncedFile, syncedFile.providerLink ?: "")
+                try {
+                    // Delete existing file if it exists (same pattern as createDebridFile)
+                    val directory = databaseFileService.getOrCreateDirectory(fullVfsPath.substringBeforeLast("/"))
+                    val fileName = fullVfsPath.substringAfterLast("/")
+                    debridFileRepository.findByDirectoryAndName(directory, fileName)?.let { existingFile ->
+                        databaseFileService.deleteFile(existingFile)
+                    }
+                    // Use the existing downloadAndStoreAsLocalEntity method with WebDAV auth
+                    val createdFile = databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
+                    // Store the db_entity_id to link this synced file to the VFS entity
+                    syncedFile.dbEntityId = createdFile.id
+                    syncedFileRepository.save(syncedFile)
+                    logger.info("Successfully downloaded and stored subtitle file as LocalEntity: {} (id: {})", urlDecode(fullVfsPath), createdFile.id)
+                } catch (e: Exception) {
+                    logger.warn("Failed to download subtitle file {}, falling back to RemotelyCachedEntity: {}", 
+                        urlDecode(fullVfsPath), e.message)
+                    // Fall through to create RemotelyCachedEntity as normal (same pattern as createDebridFile)
+                    val createdFile = databaseFileService.createDebridFile(fullVfsPath, hash, contents, skipLocalEntityConversion = true)
+                    // Store the db_entity_id to link this synced file to the VFS entity
+                    syncedFile.dbEntityId = createdFile.id
+                    syncedFileRepository.save(syncedFile)
+                    logger.info("Successfully created VFS entry: {} (id: {})", fullVfsPath, createdFile.id)
+                }
+            } else {
+                // Skip LocalEntity conversion for non-subtitle files - keep as RemotelyCachedEntity
+                // pointing to the provider's WebDAV URL for direct streaming
+                val createdFile = databaseFileService.createDebridFile(fullVfsPath, hash, contents, skipLocalEntityConversion = true)
+                // Store the db_entity_id to link this synced file to the VFS entity
+                syncedFile.dbEntityId = createdFile.id
+                syncedFileRepository.save(syncedFile)
+                logger.info("Successfully created VFS entry: {} (id: {})", fullVfsPath, createdFile.id)
+            }
+        } catch (e: Exception) {
+            logger.error("Error creating VFS entry for synced file ${syncedFile.id}: ${e.message}", e)
+        }
+    }
+
+    private suspend fun updateVfsEntry(syncedFile: WebDavSyncedFileEntity) {
+        try {
+            val vfsPath = syncedFile.vfsPath ?: return
+            val vfsFileName = syncedFile.vfsFileName ?: syncedFile.providerFilePath?.substringAfterLast("/") ?: return
+
+            val fullVfsPath = if (vfsPath.endsWith("/")) {
+                "$vfsPath$vfsFileName"
+            } else {
+                "$vfsPath/$vfsFileName"
+            }
+
+            // Look up by dbEntityId first (works for both RemotelyCachedEntity and LocalEntity, even after rename)
+            // Fall back to hash lookup for backward compatibility with entries created before dbEntityId was added
+            val existingFile = syncedFile.dbEntityId?.let { databaseFileService.getFileById(it) }
+                ?: run {
+                    val hash = syncedFile.providerFileId ?: return
+                    debridFileRepository.getByHash(hash).firstOrNull()
+                }
+            
+            val provider = mapProviderNameToDebridProvider(syncedFile.folderMapping?.providerName ?: "")
+            if (provider == null) return
+
+            // Check if this is a subtitle file that should be stored as LocalEntity
+            val isSubtitleFile = debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(vfsFileName)
+
+            if (isSubtitleFile) {
+                // Handle subtitle files - convert to LocalEntity or update if size changed
+                if (existingFile is RemotelyCachedEntity) {
+                    // Convert from RemotelyCachedEntity to LocalEntity (same pattern as LocalEntityStartupScanService)
+                    logger.info("Converting subtitle file from RemotelyCachedEntity to LocalEntity: {}", urlDecode(fullVfsPath))
+                    val contents = syncedFileContentService.updateDebridFileContents(
+                        existingFile.contents ?: return,
+                        syncedFile,
+                        provider
+                    )
+                    val authHeader = getWebDavAuthHeader(syncedFile, syncedFile.providerLink ?: "")
+                    try {
+                        // Delete the old RemotelyCachedEntity first (same pattern as startup scan)
+                        databaseFileService.deleteFile(existingFile)
+                        // Then download and store as LocalEntity using existing method
+                        val newLocalEntity = databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
+                        // Update dbEntityId to point to the new LocalEntity
+                        syncedFile.dbEntityId = newLocalEntity.id
+                        syncedFileRepository.save(syncedFile)
+                        logger.info("Successfully converted subtitle file to LocalEntity: {} (id: {})", urlDecode(fullVfsPath), newLocalEntity.id)
+                    } catch (e: Exception) {
+                        logger.error("Failed to convert subtitle file to LocalEntity: {}", urlDecode(fullVfsPath), e)
+                        throw e
+                    }
+                } else if (existingFile is LocalEntity) {
+                    // Check if file size changed - if so, re-download
+                    val remoteSize = syncedFile.fileSize ?: 0L
+                    val localSize = existingFile.size ?: 0L
+                    
+                    if (remoteSize != localSize && remoteSize > 0) {
+                        logger.info("Subtitle file size changed (remote: {} bytes, local: {} bytes), re-downloading: {}", 
+                            remoteSize, localSize, urlDecode(fullVfsPath))
+                        val contents = syncedFileContentService.createDebridFileContents(syncedFile, provider)
+                        val authHeader = getWebDavAuthHeader(syncedFile, syncedFile.providerLink ?: "")
+                        try {
+                            // Delete the old LocalEntity first
+                            databaseFileService.deleteFile(existingFile)
+                            // Then download and store new LocalEntity using existing method
+                            val newLocalEntity = databaseFileService.downloadAndStoreAsLocalEntity(fullVfsPath, contents, authHeader)
+                            // Update dbEntityId to point to the new LocalEntity
+                            syncedFile.dbEntityId = newLocalEntity.id
+                            syncedFileRepository.save(syncedFile)
+                            logger.info("Successfully re-downloaded subtitle file: {} (id: {})", urlDecode(fullVfsPath), newLocalEntity.id)
+                        } catch (e: Exception) {
+                            logger.error("Failed to re-download subtitle file: {}", urlDecode(fullVfsPath), e)
+                            throw e
+                        }
+                    } else {
+                        logger.trace("Subtitle file unchanged, skipping update: {}", urlDecode(fullVfsPath))
+                    }
+                }
+            } else {
+                // Non-subtitle files - update RemotelyCachedEntity as before
+                if (existingFile is RemotelyCachedEntity) {
+                    val updatedContents = syncedFileContentService.updateDebridFileContents(
+                        existingFile.contents ?: return,
+                        syncedFile,
+                        provider
+                    )
+                    databaseFileService.writeDebridFileContentsToFile(existingFile, updatedContents)
+                    logger.trace("Updated VFS entry: ${urlDecode(fullVfsPath)}")
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("Error updating VFS entry for synced file ${syncedFile.id}", e)
+        }
+    }
+
+    private fun generateFileId(path: String, name: String): String {
+        // Generate a file ID from path and name
+        // For WebDAV, we use path as ID since there's no UUID
+        return path
+    }
+
+    private fun generateHash(path: String): String {
+        // Generate a hash from path for use as file hash
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(path.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Map provider name (string) to DebridProvider enum
+     * Returns null for custom providers that don't map to a DebridProvider
+     */
+    private fun mapProviderNameToDebridProvider(providerName: String): DebridProvider? {
+        return when (providerName.lowercase().trim()) {
+            "premiumize" -> DebridProvider.PREMIUMIZE
+            "real_debrid", "realdebrid" -> DebridProvider.REAL_DEBRID
+            "torbox" -> DebridProvider.TORBOX
+            else -> null // Custom provider - we'll need to handle this differently
+        }
+    }
+
+    /**
+     * Gets WebDAV auth header for downloading files
+     */
+    private fun getWebDavAuthHeader(syncedFile: WebDavSyncedFileEntity, downloadUrl: String): String? {
+        val providerName = syncedFile.folderMapping?.providerName ?: return null
+        val config = webDavProviderConfigService.getConfiguration(providerName) ?: return null
+        
+        return when (config.authType) {
+            io.skjaere.debridav.webdav.folder.WebDavAuthType.BASIC -> {
+                if (config.hasCredentials()) {
+                    val credentials = "${config.username}:${config.password}"
+                    "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                } else null
+            }
+            io.skjaere.debridav.webdav.folder.WebDavAuthType.BEARER -> {
+                if (config.hasCredentials()) {
+                    "Bearer ${config.bearerToken}"
+                } else null
+            }
+        }
+    }
+
+    /**
+     * Deletes WebDAV synced files that are no longer in the provider, along with their linked db_items.
+     * This ensures that when folders are renamed, the old items are actually removed from the database.
+     * More efficient than mark-then-delete approach as it does everything in one pass.
+     */
+    private suspend fun deleteMissingFiles(mapping: WebDavFolderMappingEntity, providerFileIds: List<String>) {
+        try {
+            // Find files that should be deleted (not in the current provider file list)
+            val filesToDelete = syncedFileRepository.findByFolderMappingAndProviderFileIdNotIn(mapping, providerFileIds)
+            logger.info("Found ${filesToDelete.size} files to delete for mapping ${mapping.id}")
+            
+            if (filesToDelete.isEmpty()) {
+                return
+            }
+            
+            var deletedCount = 0
+            var dbEntityDeletedCount = 0
+            
+            filesToDelete.forEach { syncedFile ->
+                try {
+                    // Delete the linked db_item if it exists
+                    syncedFile.dbEntityId?.let { dbEntityId ->
+                        val dbEntity = databaseFileService.getFileById(dbEntityId)
+                        if (dbEntity != null) {
+                            databaseFileService.deleteFile(dbEntity)
+                            dbEntityDeletedCount++
+                            logger.debug("Deleted db_item with id $dbEntityId for synced file ${syncedFile.id}")
+                        } else {
+                            logger.warn("dbEntityId $dbEntityId referenced by synced file ${syncedFile.id} not found")
+                        }
+                    }
+                    
+                    // Delete the synced file entity itself
+                    syncedFileRepository.delete(syncedFile)
+                    deletedCount++
+                    logger.debug("Deleted synced file ${syncedFile.id} (providerFileId: ${syncedFile.providerFileId})")
+                } catch (e: Exception) {
+                    logger.error("Error deleting synced file ${syncedFile.id} for mapping ${mapping.id}", e)
+                    // Continue with other files even if one fails
+                }
+            }
+            
+            logger.info("Deleted $deletedCount synced files and $dbEntityDeletedCount linked db_items for mapping ${mapping.id}")
+        } catch (e: Exception) {
+            logger.error("Error deleting missing files for mapping ${mapping.id}", e)
+        }
+    }
+
+    /**
+     * Cleans up directories using a top-down approach:
+     * - Maps all WebDAV directories to VFS paths
+     * - Finds directories in VFS that don't exist in WebDAV
+     * - Deletes orphaned directories (and their children) starting from the top level
+     * - Creates empty directories that exist in WebDAV
+     */
+    private suspend fun cleanupDirectories(
+        mapping: WebDavFolderMappingEntity,
+        webDavDirectories: List<WebDavFile>,
+        syncedFiles: List<WebDavFile>
+    ) {
+        try {
+            val internalPath = mapping.internalPath ?: return
+            if (internalPath.isBlank()) return
+
+            // Map all WebDAV directories to VFS paths
+            val webDavVfsPaths = webDavDirectories.mapNotNull { webDavDir ->
+                try {
+                    val vfsPath = fileMappingService.mapToVfsPath(mapping, webDavDir.path)
+                    val normalizedPath = vfsPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+                    normalizedPath
+                } catch (e: Exception) {
+                    logger.warn("Failed to map WebDAV directory path ${urlDecode(webDavDir.path)} to VFS path", e)
+                    null
+                }
+            }.toSet()
+
+            // Also include directories that contain synced files (they should exist even if not explicitly listed in WebDAV)
+            val directoriesFromFiles = syncedFiles.mapNotNull { file ->
+                try {
+                    val vfsPath = fileMappingService.mapToVfsPath(mapping, file.path)
+                    val dirPath = vfsPath.substringBeforeLast("/").let {
+                        if (it.isEmpty() || it == vfsPath) {
+                            internalPath.trimEnd('/').let { p -> if (p.isEmpty()) "/" else p }
+                        } else {
+                            it.trimEnd('/').let { p -> if (p.isEmpty()) "/" else p }
+                        }
+                    }
+                    dirPath
+                } catch (e: Exception) {
+                    null
+                }
+            }.toSet()
+
+            val normalizedInternalPath = internalPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+            
+            // Always include the internal path itself as valid (it's the root of the mapping)
+            val allValidVfsPaths = (webDavVfsPaths + directoriesFromFiles + setOf(normalizedInternalPath)).toSet()
+            logger.debug("Valid VFS directory paths for mapping ${mapping.id}: ${allValidVfsPaths.size} directories (including internal path)")
+
+            // Find all directories in db_item under the internal path
+            val internalPathLtree = internalPath.pathToLtree()
+            val allDbDirectories = debridFileRepository.findAllDirectoriesUnderPath(internalPathLtree)
+            logger.debug("Found ${allDbDirectories.size} directories in db_item under ${internalPath}")
+
+            // Find directories that exist in VFS but not in WebDAV (orphaned directories)
+            // Sort by depth (shallowest first) to delete parents first, which will handle children
+            val sortedByDepth = allDbDirectories.sortedBy { dir ->
+                dir.path?.split(".")?.size ?: 0
+            }
+
+            val directoriesToDelete = sortedByDepth.filter { dbDir ->
+                val dbDirVfsPath = dbDir.fileSystemPath() ?: return@filter true
+                
+                // Ensure we only process directories under the internal path (safety check)
+                if (!dbDirVfsPath.startsWith(normalizedInternalPath)) {
+                    logger.warn("Directory ${dbDirVfsPath} is outside mapping internal path ${internalPath}, skipping")
+                    return@filter false
+                }
+                
+                // Simple rule: if directory doesn't exist in WebDAV, delete it
+                // This handles all cases:
+                // - Empty folder deleted from WebDAV -> not in allValidVfsPaths -> deleted
+                // - Parent folder deleted -> children not in allValidVfsPaths -> deleted (when we process them)
+                // - Since we process shallowest first, parent directories are deleted before children
+                val existsInWebDav = allValidVfsPaths.contains(dbDirVfsPath)
+                
+                if (existsInWebDav) {
+                    false // Keep it - exists in WebDAV
+                } else {
+                    true // Delete it - doesn't exist in WebDAV
+                }
+            }
+
+            if (directoriesToDelete.isNotEmpty()) {
+                logger.info("Found ${directoriesToDelete.size} orphaned directories to delete for mapping ${mapping.id}")
+                
+                // Delete directories starting from top level (shallowest first)
+                // Delete parent directories - this will cascade to children via bulk delete
+                directoriesToDelete.forEach { directory ->
+                    try {
+                        val dirPath = directory.path ?: return@forEach
+                        val dirVfsPath = directory.fileSystemPath() ?: return@forEach
+                        
+                        // Delete all files in this directory tree first
+                        val filesInTree = debridFileRepository.findFilesInDirectoryTree(dirPath)
+                        filesInTree.forEach { file ->
+                            try {
+                                databaseFileService.deleteFile(file)
+                            } catch (e: Exception) {
+                                logger.error("Error deleting file ${file.id} in directory tree ${dirPath}", e)
+                            }
+                        }
+                        
+                        // Delete all child directories using bulk delete (more efficient)
+                        val childDirsDeleted = debridFileRepository.deleteChildDirectoriesByPath(dirPath)
+                        logger.debug("Deleted $childDirsDeleted child directories under ${dirVfsPath}")
+                        
+                        // Finally delete the parent directory itself
+                        debridFileRepository.delete(directory)
+                        logger.debug("Deleted orphaned directory: $dirVfsPath")
+                    } catch (e: Exception) {
+                        logger.error("Error deleting directory ${directory.path}", e)
+                    }
+                }
+            }
+
+            // Create empty directories that exist in WebDAV but don't exist in VFS
+            // This ensures the folder structure matches WebDAV exactly
+            webDavVfsPaths.forEach { vfsPath ->
+                try {
+                    val ltreePath = vfsPath.pathToLtree()
+                    val existingDir = debridFileRepository.getDirectoryByPath(ltreePath)
+                    if (existingDir == null) {
+                        // Create the directory (and parent directories if needed)
+                        databaseFileService.getOrCreateDirectory(vfsPath)
+                        logger.debug("Created empty directory from WebDAV: $vfsPath")
+                    }
+                } catch (e: Exception) {
+                    logger.warn("Failed to create directory from WebDAV path $vfsPath", e)
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("Error cleaning up directories for mapping ${mapping.id}", e)
+        }
+    }
+
+
+
+    /**
+     * Generates all parent paths for a given directory path, up to the internal path.
+     * For example: /pm_movies/testing/movieA/files -> [/pm_movies/testing/movieA, /pm_movies/testing, /pm_movies]
+     */
+    private fun generateParentPaths(dirPath: String, internalPath: String): List<String> {
+        val normalizedInternalPath = internalPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+        val normalizedDirPath = dirPath.trimEnd('/').let { if (it.isEmpty()) "/" else it }
+        
+        if (normalizedDirPath == normalizedInternalPath) {
+            return listOf(normalizedInternalPath)
+        }
+        
+        val parents = mutableListOf<String>()
+        var currentPath = normalizedDirPath
+        
+        while (currentPath != normalizedInternalPath && currentPath != "/") {
+            val parent = currentPath.substringBeforeLast("/").let {
+                if (it.isEmpty() || it == currentPath) "/" else it.trimEnd('/').let { p -> if (p.isEmpty()) "/" else p }
+            }
+            if (parent.startsWith(normalizedInternalPath) || parent == normalizedInternalPath) {
+                parents.add(parent)
+                currentPath = parent
+            } else {
+                break
+            }
+        }
+        
+        return parents
+    }
+
+    /**
+     * Converts a VFS path to ltree format (used for database queries)
+     * Matches the logic in DatabaseFileService.pathToLtree()
+     */
+    private fun String.pathToLtree(): String {
+        val ROOT_NODE = "ROOT"
+        return if (this == "/") ROOT_NODE else {
+            this.split("/").filter { it.isNotBlank() }
+                .joinToString(separator = ".") { 
+                    Base58.encode(it.encodeToByteArray()) 
+                }.let { "$ROOT_NODE.$it" }
+        }
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original path if decoding fails, or "null" if path is null.
+     */
+    private fun urlDecode(path: String?): String {
+        if (path == null) return "null"
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            path // Return original path if decoding fails
+        }
+    }
+}

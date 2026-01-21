@@ -68,11 +68,16 @@ class RealDebridClient(
     private val realDebridTorrentService: RealDebridTorrentService,
     private val realDebridDownloadService: RealDebridDownloadService,
     //private val realDebridRateLimiter: TimeWindowRateLimiter,
-    private val realDebridRateLimiter: RateLimiter
+    private val realDebridRateLimiter: RateLimiter,
+    webDavProviderConfigService: io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService?
 ) : DebridCachedTorrentClient, StreamableLinkPreparable by DefaultStreamableLinkPreparer(
     httpClient,
     debridavConfigurationProperties,
-    realDebridRateLimiter
+    realDebridRateLimiter,
+    null,
+    null,
+    realDebridConfigurationProperties,
+    webDavProviderConfigService
 ) {
     private val logger = LoggerFactory.getLogger(RealDebridClient::class.java)
 

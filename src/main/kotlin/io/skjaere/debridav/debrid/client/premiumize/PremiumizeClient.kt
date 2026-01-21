@@ -33,12 +33,17 @@ class PremiumizeClient(
     override val httpClient: HttpClient,
     private val clock: Clock,
     debridavConfigurationProperties: DebridavConfigurationProperties,
-    premiumizeRateLimiter: RateLimiter
+    premiumizeRateLimiter: RateLimiter,
+    webDavProviderConfigService: io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService?
 ) : DebridCachedTorrentClient,
     StreamableLinkPreparable by DefaultStreamableLinkPreparer(
         httpClient,
         debridavConfigurationProperties,
-        premiumizeRateLimiter
+        premiumizeRateLimiter,
+        null,
+        premiumizeConfiguration,
+        null,
+        webDavProviderConfigService
     ) {
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
 

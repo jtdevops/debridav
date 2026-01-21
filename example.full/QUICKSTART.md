@@ -71,6 +71,70 @@ If you want to disable this feature, set `DEBRIDAV_ENABLE_RCLONE_ARRS_LOCAL_VIDE
 
 If you want to use IPTV integration, you can configure IPTV providers in the docker-compose.yml file. See the [README](../README.md#iptv-moviestv-shows-integration) for detailed IPTV configuration options.
 
+### WebDAV Folder Mapping Configuration (Optional)
+
+The WebDAV folder mapping feature allows you to sync folders from WebDAV providers (Premiumize, Real-Debrid, TorBox, or custom WebDAV servers) directly into your VFS. Files are automatically synced and kept in sync with the WebDAV server.
+
+**To enable WebDAV folder mapping:**
+
+1. **Set WebDAV credentials** for your debrid providers (separate from REST API keys):
+   ```yaml
+   # Premiumize WebDAV credentials
+   PREMIUMIZE_WEBDAV_USERNAME=your_webdav_username
+   PREMIUMIZE_WEBDAV_PASSWORD=your_webdav_password
+   
+   # Real-Debrid WebDAV credentials
+   REAL_DEBRID_WEBDAV_USERNAME=your_webdav_username
+   REAL_DEBRID_WEBDAV_PASSWORD=your_webdav_password
+   
+   # TorBox WebDAV credentials
+   TORBOX_WEBDAV_USERNAME=your_webdav_username
+   TORBOX_WEBDAV_PASSWORD=your_webdav_password
+   ```
+
+2. **Enable the feature and configure mappings** in your `.env` or `docker-compose.yml`:
+   ```yaml
+   # Enable WebDAV folder mapping
+   DEBRIDAV_WEBDAV_FOLDER_MAPPING_ENABLED=true
+   
+   # List of providers to enable (comma-separated)
+   DEBRIDAV_WEBDAV_FOLDER_MAPPING_PROVIDERS=premiumize,real_debrid
+   
+   # Folder mappings (provider:externalPath=internalPath)
+   # Example: Map Premiumize /pm_movies folder to /pm_movies in VFS
+   DEBRIDAV_WEBDAV_FOLDER_MAPPING_MAPPINGS=premiumize:/pm_movies=/pm_movies,real_debrid:/rd_tv=/rd_tv
+   ```
+
+3. **Optional: Discover available folders** by enabling root folder logging:
+   ```yaml
+   DEBRIDAV_WEBDAV_FOLDER_MAPPING_LOG_ROOT_FOLDERS=premiumize,real_debrid
+   ```
+   This will log available root folders at INFO level during sync, helping you discover what folders are available on your WebDAV server.
+
+**How It Works:**
+- Files are synced automatically at configurable intervals (default: 1 hour)
+- When files are deleted from WebDAV, they are automatically removed from VFS and database
+- When folders are deleted from WebDAV, they and all their contents are automatically removed
+- Empty folders from WebDAV are created in VFS to maintain folder structure
+- Only directories under your configured `internalPath` are processed (scope safety)
+
+**Manual Sync:**
+You can manually trigger a sync via API:
+```bash
+# Sync all mappings
+curl -X POST http://localhost:8888/api/webdav-folder-mapping/sync
+
+# Sync specific provider
+curl -X POST http://localhost:8888/api/webdav-folder-mapping/provider/premiumize/sync
+```
+
+**Example Use Cases:**
+- **Premiumize Cloud Storage**: Map your Premiumize cloud folders to VFS for easy access
+- **Real-Debrid Downloads**: Sync your Real-Debrid download folders to VFS
+- **Custom WebDAV Server**: Map folders from any WebDAV-compatible server
+
+For detailed configuration options, see the [README](../README.md#webdav-folder-mapping) section.
+
 **FFprobe Metadata Enhancement:**
 
 For enhanced metadata extraction (resolution, codec, and file size) from IPTV media files, you can enable FFprobe metadata enhancement via the Prowlarr indexer configuration:

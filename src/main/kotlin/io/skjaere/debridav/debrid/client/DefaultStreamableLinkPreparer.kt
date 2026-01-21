@@ -13,17 +13,27 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.milton.http.Range
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.debrid.DebridProvider
+import io.skjaere.debridav.debrid.client.premiumize.PremiumizeConfigurationProperties
 import io.skjaere.debridav.debrid.client.realdebrid.RealDebridClient
+import io.skjaere.debridav.debrid.client.realdebrid.RealDebridConfigurationProperties
 import io.skjaere.debridav.fs.CachedFile
+import io.skjaere.debridav.webdav.folder.WebDavProviderConfigurationService
+import io.skjaere.debridav.webdav.folder.WebDavAuthType
 import kotlinx.coroutines.delay
 import io.skjaere.debridav.util.ByteFormatUtil
 import org.slf4j.LoggerFactory
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 class DefaultStreamableLinkPreparer(
     override val httpClient: HttpClient,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val rateLimiter: RateLimiter,
-    private val userAgent: String?
+    private val userAgent: String?,
+    private val premiumizeConfig: PremiumizeConfigurationProperties?,
+    private val realDebridConfig: RealDebridConfigurationProperties?,
+    private val webDavProviderConfigService: WebDavProviderConfigurationService?
 ) : StreamableLinkPreparable {
     private val logger = LoggerFactory.getLogger(DefaultStreamableLinkPreparer::class.java)
 
@@ -38,7 +48,14 @@ class DefaultStreamableLinkPreparer(
         httpClient: HttpClient,
         debridavConfigurationProperties: DebridavConfigurationProperties,
         rateLimiter: RateLimiter
-    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null)
+    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, null, null, null, null)
+
+    constructor(
+        httpClient: HttpClient,
+        debridavConfigurationProperties: DebridavConfigurationProperties,
+        rateLimiter: RateLimiter,
+        userAgent: String?
+    ) : this(httpClient, debridavConfigurationProperties, rateLimiter, userAgent, null, null, null)
 
     /**
      * Calculates dynamic socket timeout based on chunk size.
@@ -103,18 +120,84 @@ class DefaultStreamableLinkPreparer(
         return false
     }
 
+    /**
+     * Gets WebDAV auth header for folder-mapped files.
+     * Returns null if not a WebDAV URL or credentials not configured.
+     * Supports both built-in providers and generic WebDAV providers.
+     */
+    private fun getWebDavAuthHeader(debridLink: CachedFile): String? {
+        val link = debridLink.link ?: return null
+        val isFolderMapped = debridLink.params?.containsKey("synced_file_id") == true
+        
+        if (!isFolderMapped) return null
+        
+        // Try built-in providers first
+        when {
+            link.contains("webdav.premiumize.me") && premiumizeConfig != null -> {
+                val username = premiumizeConfig.webdavUsername
+                val password = premiumizeConfig.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    val credentials = "$username:$password"
+                    return "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                }
+            }
+            link.contains("dav.real-debrid.com") && realDebridConfig != null -> {
+                val username = realDebridConfig.webdavUsername
+                val password = realDebridConfig.webdavPassword
+                if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
+                    val credentials = "$username:$password"
+                    return "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                }
+            }
+            link.contains("webdav.torbox.app") -> {
+                // TorBox uses Bearer token - handled via provider config service
+            }
+        }
+        
+        // Try generic WebDAV providers by matching URL
+        webDavProviderConfigService?.let { configService ->
+            val allConfigs = configService.getAllConfigurations()
+            for ((_, config) in allConfigs) {
+                if (link.startsWith(config.url)) {
+                    return when (config.authType) {
+                        WebDavAuthType.BASIC -> {
+                            if (config.hasCredentials()) {
+                                val credentials = "${config.username}:${config.password}"
+                                "Basic ${java.util.Base64.getEncoder().encodeToString(credentials.toByteArray())}"
+                            } else null
+                        }
+                        WebDavAuthType.BEARER -> {
+                            if (config.hasCredentials()) {
+                                "Bearer ${config.bearerToken}"
+                            } else null
+                        }
+                    }
+                }
+            }
+        }
+        
+        return null
+    }
+
     @Suppress("MagicNumber")
     override suspend fun prepareStreamUrl(debridLink: CachedFile, range: Range?): HttpStatement {
         val isIptv = isIptvUrl(debridLink.link ?: "")
         val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
         val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
         val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
+        val webDavAuthHeader = getWebDavAuthHeader(debridLink)
         
         for (attempt in 0..maxRetries) {
             try {
                 return rateLimiter.executeSuspendFunction {
                     httpClient.prepareGet(debridLink.link!!) {
                     headers {
+                        // Add WebDAV authentication if this is a folder-mapped file
+                        webDavAuthHeader?.let {
+                            logger.debug("Adding WebDAV auth header for folder-mapped file: {}", urlDecode(debridLink.path))
+                            append(HttpHeaders.Authorization, it)
+                        }
+                        
                         // Apply Range headers to the original URL (including IPTV URLs)
                         // Range headers will be re-applied to redirect URLs in StreamingService to ensure providers honor the requested range
                         range?.let { range ->
@@ -204,6 +287,7 @@ class DefaultStreamableLinkPreparer(
         val maxRetries = debridavConfigurationProperties.streamingRetriesOnProviderError.toInt()
         val delayBetweenRetries = debridavConfigurationProperties.streamingDelayBetweenRetries
         val waitAfterNetworkError = debridavConfigurationProperties.streamingWaitAfterNetworkError
+        val webDavAuthHeader = getWebDavAuthHeader(debridLink)
         
         for (attempt in 0..maxRetries) {
             try {
@@ -216,6 +300,10 @@ class DefaultStreamableLinkPreparer(
                     // HEAD requests are not supported by all servers, but byte range requests are more universally supported
                     val result = httpClient.get(debridLink.link!!) {
                         headers {
+                            // Add WebDAV authentication if this is a folder-mapped file
+                            webDavAuthHeader?.let {
+                                append(HttpHeaders.Authorization, it)
+                            }
                             append(io.ktor.http.HttpHeaders.Range, "bytes=0-0")
                         }
                         timeout {
@@ -250,5 +338,18 @@ class DefaultStreamableLinkPreparer(
         
         // Should never reach here, but return false as fallback
         return false
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original path if decoding fails, or "null" if path is null.
+     */
+    private fun urlDecode(path: String?): String {
+        if (path == null) return "null"
+        return try {
+            URLDecoder.decode(path, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            path // Return original path if decoding fails
+        }
     }
 }

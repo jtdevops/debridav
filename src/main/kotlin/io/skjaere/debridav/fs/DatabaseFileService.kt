@@ -4,6 +4,7 @@ import io.ipfs.multibase.Base58
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.skjaere.debridav.cache.FileChunkCachingService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.fs.CachedFile
@@ -27,6 +28,8 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionTemplate
 import java.io.InputStream
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 private const val ROOT_NODE = "ROOT"
@@ -66,12 +69,24 @@ class DatabaseFileService(
     @Transactional
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents
+    ): RemotelyCachedEntity = createDebridFile(path, hash, debridFileContents, skipLocalEntityConversion = false)
+
+    /**
+     * Creates a debrid file entry in the database.
+     * @param skipLocalEntityConversion If true, skips the LocalEntity conversion even if the file
+     *        extension is whitelisted. Useful for folder mapping sync where we want to keep files
+     *        as RemotelyCachedEntity pointing to the provider's WebDAV URL.
+     */
+    @Transactional
+    fun createDebridFile(
+        path: String, hash: String, debridFileContents: DebridFileContents, skipLocalEntityConversion: Boolean
     ): RemotelyCachedEntity = runBlocking {
         val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
         val name = path.substringAfterLast("/")
         
-        // Check if file extension is whitelisted for local storage
-        val shouldStoreAsLocal = debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(name)
+        // Check if file extension is whitelisted for local storage (unless skipped)
+        val shouldStoreAsLocal = !skipLocalEntityConversion && 
+            debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(name)
         
         if (shouldStoreAsLocal) {
             // Check if we have debrid links available for download
@@ -357,13 +372,15 @@ class DatabaseFileService(
      * 
      * @param path The file path where the LocalEntity should be created
      * @param debridFileContents The DebridFileContents containing the download URL
+     * @param authHeader Optional authentication header (e.g., "Basic ..." or "Bearer ...") for WebDAV or other authenticated sources
      * @return The created LocalEntity with downloaded content
      * @throws Exception If download fails, the exception is logged and rethrown
      */
     @Transactional
     suspend fun downloadAndStoreAsLocalEntity(
         path: String,
-        debridFileContents: DebridFileContents
+        debridFileContents: DebridFileContents,
+        authHeader: String? = null
     ): LocalEntity = withContext(Dispatchers.IO) {
         val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
         val fileName = path.substringAfterLast("/")
@@ -396,11 +413,17 @@ class DatabaseFileService(
             }
         }
         
-        logger.debug("Downloading content from {} for file {}", downloadUrl, fileName)
+        logger.debug("Downloading content from {} for file {}", urlDecode(downloadUrl), fileName)
         
         try {
-            // Download the content
-            val bytes = httpClient.get(downloadUrl).body<ByteArray>()
+            // Download the content with optional authentication
+            val bytes = if (authHeader != null) {
+                httpClient.get(downloadUrl) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }.body<ByteArray>()
+            } else {
+                httpClient.get(downloadUrl).body<ByteArray>()
+            }
             val contentSize = bytes.size.toLong()
             
             // Create LocalEntity with downloaded content
@@ -428,7 +451,7 @@ class DatabaseFileService(
             logger.info("Successfully downloaded and stored {} as LocalEntity (size: {} bytes)", fileName, contentSize)
             debridFileRepository.save(localFile)
         } catch (e: Exception) {
-            logger.error("Failed to download content from {} for file {}: {}", downloadUrl, fileName, e.message, e)
+            logger.error("Failed to download content from {} for file {}: {}", urlDecode(downloadUrl), fileName, e.message, e)
             throw e
         }
     }
@@ -440,6 +463,14 @@ class DatabaseFileService(
             return debridFileRepository.findByDirectoryAndName(directory, path.substringAfterLast("/"))
         }
 
+    }
+
+    /**
+     * Get a file by its database ID.
+     * Used to find files that may have been renamed by the user.
+     */
+    fun getFileById(id: Long): DbEntity? {
+        return debridFileRepository.findById(id).orElse(null)
     }
 
     @Transactional
@@ -523,6 +554,19 @@ class DatabaseFileService(
                 contents.iptvUrlTemplate?.baseUrl
             }
             mergedEntity
+        }
+    }
+
+    /**
+     * URL decode a path for logging purposes, handling URL-encoded characters like %20, %5b, etc.
+     * Returns the original string if decoding fails.
+     */
+    private fun urlDecode(url: String?): String {
+        if (url == null) return "null"
+        return try {
+            URLDecoder.decode(url, StandardCharsets.UTF_8.name())
+        } catch (e: Exception) {
+            url // Return original if decoding fails
         }
     }
 }

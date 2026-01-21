@@ -1,6 +1,7 @@
 package io.skjaere.debridav
 
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
+import io.skjaere.debridav.webdav.folder.WebDavFolderMappingProperties
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import org.slf4j.LoggerFactory
 import org.springframework.boot.CommandLineRunner
@@ -82,7 +83,8 @@ class DebriDavApplication : SpringBootServletInitializer() {
     fun logMaintenanceEndpoints(
         serverProperties: ServerProperties,
         environment: Environment,
-        iptvConfigurationService: IptvConfigurationService
+        iptvConfigurationService: IptvConfigurationService,
+        webDavFolderMappingProperties: WebDavFolderMappingProperties
     ): CommandLineRunner {
         return CommandLineRunner {
             // Check DEBRIDAV_PORT environment variable first (for Docker containers)
@@ -160,6 +162,16 @@ class DebriDavApplication : SpringBootServletInitializer() {
             logger.info("  GET     $baseUrl/api/cleanup/downloads/diagnose?filePath=/downloads/folder-name")
             logger.info("          (Diagnose why a specific file/folder isn't being cleaned up)")
             logger.info("")
+            if (webDavFolderMappingProperties.enabled) {
+                logger.info("WebDAV Folder Mapping Endpoints:")
+                logger.info("  POST    $baseUrl/api/webdav-folder-mapping/sync")
+                logger.info("          (Manually trigger sync for all folder mappings)")
+                logger.info("  POST    $baseUrl/api/webdav-folder-mapping/provider/{provider}/sync")
+                logger.info("          (Sync all mappings for a provider: premiumize, real_debrid, torbox, or custom provider name)")
+                logger.info("  GET     $baseUrl/api/webdav-folder-mapping")
+                logger.info("          (List all folder mappings)")
+                logger.info("")
+            }
             logger.info("=== End Maintenance Endpoints ===")
             logger.info("")
         }

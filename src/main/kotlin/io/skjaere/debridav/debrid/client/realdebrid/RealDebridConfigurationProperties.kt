@@ -7,4 +7,6 @@ class RealDebridConfigurationProperties(
     val apiKey: String,
     var baseUrl: String,
     val syncEnabled: Boolean,
+    val webdavUsername: String? = null,
+    val webdavPassword: String? = null
 )
