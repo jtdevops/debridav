@@ -16,6 +16,7 @@
 > **Quick links to new features:**
 > - [Fork Enhancements Overview](#fork-enhancements)
 > - [IPTV Movies/TV Shows Integration](#iptv-moviestv-shows-integration)
+> - [WebDAV Folder Mapping](#webdav-folder-mapping)
 > - [Enhanced Caching & Performance Options](#enhanced-caching--performance-options)
 > - [Streaming & Retry Configuration](#streaming--retry-configuration)
 > - [Download Tracking & Monitoring](#download-tracking--monitoring)
@@ -489,7 +490,21 @@ For detailed IPTV configuration and troubleshooting, see [IPTV_CONFIGURATION_GUI
 
 ### WebDAV Folder Mapping
 
-Map folders from WebDAV providers (built-in debrid providers or custom WebDAV servers) to your VFS. Files are synced periodically and appear as virtual directories in your file system.
+Map folders from WebDAV providers (built-in debrid providers or custom WebDAV servers) to your VFS. Files are synced periodically and appear as virtual directories in your file system. This feature automatically keeps your VFS in sync with your WebDAV server, including automatic cleanup of deleted files and folders.
+
+**Key Features:**
+- **Automatic File Syncing**: Files from WebDAV folders are automatically synced to your VFS at configurable intervals
+- **Automatic Cleanup**: When files or folders are deleted from WebDAV, they are automatically removed from the VFS and database
+- **Directory Structure Preservation**: Empty directories from WebDAV are created in VFS to maintain folder structure
+- **Built-in Provider Support**: Seamless integration with Premiumize, Real-Debrid, and TorBox WebDAV
+- **Custom Provider Support**: Configure any WebDAV server with custom authentication
+
+**How It Works:**
+1. DebriDav periodically scans configured WebDAV folders (default: every hour)
+2. New files are added to the VFS as virtual files pointing to WebDAV URLs
+3. Files deleted from WebDAV are automatically removed from VFS and database
+4. Folders deleted from WebDAV are removed along with all their contents
+5. Empty directories from WebDAV are created in VFS to match the folder structure
 
 **Built-in Providers:**
 - **Premiumize**: Uses `https://webdav.premiumize.me` (auto-configured)
@@ -542,6 +557,16 @@ DEBRIDAV_WEBDAV_FOLDER_MAPPING_MAPPINGS=premiumize:/pm_movies=/pm_movies,mywebda
 - `POST /api/webdav-folder-mapping/sync` - Manually trigger sync for all mappings
 - `POST /api/webdav-folder-mapping/provider/{provider}/sync` - Sync all mappings for a specific provider
 - `GET /api/webdav-folder-mapping` - List all folder mappings
+
+**Important Notes:**
+- **Automatic Cleanup**: When you delete a file or folder from WebDAV, it will be automatically removed from DebriDav's VFS and database on the next sync. This includes:
+  - Files deleted from WebDAV → removed from VFS and database
+  - Folders deleted from WebDAV → removed from VFS along with all child files and subdirectories
+  - Empty folders → created in VFS if they exist in WebDAV (to maintain folder structure)
+- **Scope Safety**: Only directories under the configured `internalPath` are processed. Sibling folders outside the mapping are never affected.
+- **File Extensions**: By default, only common media and subtitle file extensions are synced. Configure `DEBRIDAV_WEBDAV_FOLDER_MAPPING_ALLOWED_EXTENSIONS` to customize.
+- **Sync Frequency**: Files are synced periodically (default: 1 hour). You can trigger manual syncs via the API endpoints or adjust the sync interval per provider.
+- **Subtitle Files**: Subtitle files (`.srt`, `.sub`, `.ass`, etc.) are automatically downloaded and stored locally for better performance.
 
 ### STRM File Support
 
