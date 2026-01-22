@@ -28,4 +28,10 @@ interface WebDavSyncedFileRepository : JpaRepository<WebDavSyncedFileEntity, Lon
         @Param("folderMapping") folderMapping: WebDavFolderMappingEntity,
         @Param("providerFileIds") providerFileIds: List<String>
     )
+
+    @Query("SELECT e FROM WebDavSyncedFileEntity e WHERE e.folderMapping = :folderMapping AND e.providerFileId NOT IN :providerFileIds")
+    fun findByFolderMappingAndProviderFileIdNotIn(
+        @Param("folderMapping") folderMapping: WebDavFolderMappingEntity,
+        @Param("providerFileIds") providerFileIds: List<String>
+    ): List<WebDavSyncedFileEntity>
 }

@@ -145,13 +145,11 @@ class WebDavFolderSyncService(
             
             logger.info("WebDAV sync completed for mapping ${mapping.id}: $newFilesCount new, $updatedFilesCount updated")
 
-            // Mark files as deleted if they're no longer in provider
+            // Delete files that are no longer in provider (more efficient than mark-then-delete)
             try {
-                syncedFileRepository.markAsDeletedForMissingFiles(mapping, providerFileIds.toList())
-                // Now actually delete the files and their linked db_items
-                deleteMarkedAsDeletedFiles(mapping)
+                deleteMissingFiles(mapping, providerFileIds.toList())
             } catch (e: Exception) {
-                logger.error("Error marking files as deleted for mapping ${mapping.id}", e)
+                logger.error("Error deleting missing files for mapping ${mapping.id}", e)
             }
         } catch (e: Exception) {
             logger.error("Error syncing WebDAV mapping ${mapping.id}", e)
@@ -443,18 +441,24 @@ class WebDavFolderSyncService(
     }
 
     /**
-     * Deletes WebDAV synced files that are marked as deleted, along with their linked db_items.
+     * Deletes WebDAV synced files that are no longer in the provider, along with their linked db_items.
      * This ensures that when folders are renamed, the old items are actually removed from the database.
+     * More efficient than mark-then-delete approach as it does everything in one pass.
      */
-    private suspend fun deleteMarkedAsDeletedFiles(mapping: WebDavFolderMappingEntity) {
+    private suspend fun deleteMissingFiles(mapping: WebDavFolderMappingEntity, providerFileIds: List<String>) {
         try {
-            val deletedFiles = syncedFileRepository.findByFolderMappingAndIsDeleted(mapping, true)
-            logger.info("Found ${deletedFiles.size} files marked as deleted for mapping ${mapping.id}")
+            // Find files that should be deleted (not in the current provider file list)
+            val filesToDelete = syncedFileRepository.findByFolderMappingAndProviderFileIdNotIn(mapping, providerFileIds)
+            logger.info("Found ${filesToDelete.size} files to delete for mapping ${mapping.id}")
+            
+            if (filesToDelete.isEmpty()) {
+                return
+            }
             
             var deletedCount = 0
             var dbEntityDeletedCount = 0
             
-            deletedFiles.forEach { syncedFile ->
+            filesToDelete.forEach { syncedFile ->
                 try {
                     // Delete the linked db_item if it exists
                     syncedFile.dbEntityId?.let { dbEntityId ->
@@ -480,7 +484,7 @@ class WebDavFolderSyncService(
             
             logger.info("Deleted $deletedCount synced files and $dbEntityDeletedCount linked db_items for mapping ${mapping.id}")
         } catch (e: Exception) {
-            logger.error("Error deleting marked files for mapping ${mapping.id}", e)
+            logger.error("Error deleting missing files for mapping ${mapping.id}", e)
         }
     }
 
