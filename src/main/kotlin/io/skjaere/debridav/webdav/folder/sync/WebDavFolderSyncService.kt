@@ -148,6 +148,8 @@ class WebDavFolderSyncService(
             // Mark files as deleted if they're no longer in provider
             try {
                 syncedFileRepository.markAsDeletedForMissingFiles(mapping, providerFileIds.toList())
+                // Now actually delete the files and their linked db_items
+                deleteMarkedAsDeletedFiles(mapping)
             } catch (e: Exception) {
                 logger.error("Error marking files as deleted for mapping ${mapping.id}", e)
             }
@@ -437,6 +439,48 @@ class WebDavFolderSyncService(
                     "Bearer ${config.bearerToken}"
                 } else null
             }
+        }
+    }
+
+    /**
+     * Deletes WebDAV synced files that are marked as deleted, along with their linked db_items.
+     * This ensures that when folders are renamed, the old items are actually removed from the database.
+     */
+    private suspend fun deleteMarkedAsDeletedFiles(mapping: WebDavFolderMappingEntity) {
+        try {
+            val deletedFiles = syncedFileRepository.findByFolderMappingAndIsDeleted(mapping, true)
+            logger.info("Found ${deletedFiles.size} files marked as deleted for mapping ${mapping.id}")
+            
+            var deletedCount = 0
+            var dbEntityDeletedCount = 0
+            
+            deletedFiles.forEach { syncedFile ->
+                try {
+                    // Delete the linked db_item if it exists
+                    syncedFile.dbEntityId?.let { dbEntityId ->
+                        val dbEntity = databaseFileService.getFileById(dbEntityId)
+                        if (dbEntity != null) {
+                            databaseFileService.deleteFile(dbEntity)
+                            dbEntityDeletedCount++
+                            logger.debug("Deleted db_item with id $dbEntityId for synced file ${syncedFile.id}")
+                        } else {
+                            logger.warn("dbEntityId $dbEntityId referenced by synced file ${syncedFile.id} not found")
+                        }
+                    }
+                    
+                    // Delete the synced file entity itself
+                    syncedFileRepository.delete(syncedFile)
+                    deletedCount++
+                    logger.debug("Deleted synced file ${syncedFile.id} (providerFileId: ${syncedFile.providerFileId})")
+                } catch (e: Exception) {
+                    logger.error("Error deleting synced file ${syncedFile.id} for mapping ${mapping.id}", e)
+                    // Continue with other files even if one fails
+                }
+            }
+            
+            logger.info("Deleted $deletedCount synced files and $dbEntityDeletedCount linked db_items for mapping ${mapping.id}")
+        } catch (e: Exception) {
+            logger.error("Error deleting marked files for mapping ${mapping.id}", e)
         }
     }
 
