@@ -1630,6 +1630,14 @@ class IptvRequestService(
         // STEP 4: Extract year from title if not provided
         val titleYear = year ?: extractYearFromTitle(cleanTitle)
         
+        // STEP 4b: Normalize to a single year - remove duplicate years (e.g. "(1994).(1984)" -> keep one)
+        // Radarr fails to identify the movie when the magnet title contains multiple years
+        cleanTitle = removeDuplicateYearsFromTitle(cleanTitle, titleYear)
+        
+        // STEP 4c: When we have a preferred year (from Radarr/OMDB), replace any existing year in the title with it.
+        // Entity may have wrong year (e.g. "(1994)") while request has correct year (1984); we must output only the preferred year.
+        cleanTitle = replaceYearInTitleWithPreferred(cleanTitle, titleYear)
+        
         // STEP 5: Remove standalone year from title to avoid duplication (keep year in brackets if present)
         // This removes standalone "1986" if "(1986)" exists in the title
         cleanTitle = removeStandaloneYearFromTitle(cleanTitle, titleYear)
@@ -1645,14 +1653,10 @@ class IptvRequestService(
             .trim('.')
         parts.add(sanitizedTitle)
         
-        // STEP 8: Conditionally add year - only if not already present in the sanitized title
-        // Check if year already exists in sanitized title (could be in brackets like "(1986)" or as standalone)
-        val yearAlreadyInTitle = if (titleYear != null) {
-            val yearPattern = Regex("(?:^|[.\\(-])$titleYear(?:$|[.)-])")
-            yearPattern.containsMatchIn(sanitizedTitle)
-        } else {
-            true // No year to add
-        }
+        // STEP 8: Conditionally add year - only if no year is already present in the sanitized title.
+        // If any year is present (even wrong one), we don't add - we've already normalized to preferred in step 4c.
+        val anyYearInTitle = Regex("""\((19[0-9]{2}|20[0-9]{2})\)""").containsMatchIn(sanitizedTitle)
+        val yearAlreadyInTitle = titleYear == null || anyYearInTitle
         
         if (titleYear != null && !yearAlreadyInTitle) {
             // Year not found in sanitized title, add it in round brackets
@@ -1747,6 +1751,46 @@ class IptvRequestService(
         return match?.groupValues?.get(1)?.uppercase()
     }
     
+    /**
+     * Replaces any year in parentheses in the title with the preferred year (from Radarr/OMDB).
+     * E.g. "Romancing the Stone (1994)" with preferredYear=1984 -> "Romancing the Stone (1984)".
+     * This ensures we output the request year when the entity title has a different (wrong) year.
+     */
+    private fun replaceYearInTitleWithPreferred(title: String, preferredYear: Int?): String {
+        if (preferredYear == null) return title
+        val yearInParensPattern = Regex("""\((19[0-9]{2}|20[0-9]{2})\)""")
+        return yearInParensPattern.replace(title) { "($preferredYear)" }
+    }
+
+    /**
+     * Removes duplicate years from title so only one year remains.
+     * E.g. "Romancing.the.Stone.(1994).(1984).1080p..." -> "Romancing.the.Stone.(1984).1080p..." when preferredYear=1984.
+     * Keeps the preferred year (from Radarr/OMDB) if it appears in the title; otherwise keeps the first year found.
+     * This prevents Radarr from failing to identify the movie when the magnet title contains multiple years.
+     */
+    private fun removeDuplicateYearsFromTitle(title: String, preferredYear: Int?): String {
+        // Match any 4-digit year in parentheses (1900-2099); use [0-9] for explicit digit matching
+        val yearInParensPattern = Regex("""\((19[0-9]{2}|20[0-9]{2})\)""")
+        val yearsFound = yearInParensPattern.findAll(title).map { it.groupValues[1].toInt() }.toList()
+        val distinctYears = yearsFound.distinct()
+        if (distinctYears.size <= 1) return title
+        val yearToKeep = when {
+            preferredYear != null && distinctYears.contains(preferredYear) -> preferredYear
+            else -> distinctYears.first()
+        }
+        // Single pass: keep only (yearToKeep), remove all other (YYYY)
+        var result = yearInParensPattern.replace(title) { mr ->
+            if (mr.groupValues[1].toInt() == yearToKeep) mr.value else ""
+        }
+        // Remove standalone 4-digit years that are not yearToKeep (e.g. ".1994." or " 1994 ")
+        val standalonePattern = Regex("""(?:^|[.\s-])(19[0-9]{2}|20[0-9]{2})(?=$|[.\s-])""")
+        result = standalonePattern.replace(result) { mr ->
+            if (mr.groupValues[1].toInt() == yearToKeep) mr.value else "."
+        }
+        result = result.replace(Regex("""\.{2,}"""), ".").replace(Regex("""\s{2,}"""), " ").trim('.', ' ')
+        return result
+    }
+
     /**
      * Removes standalone year from title if year is already present in brackets.
      * Example: "Movie (1986) 1986" -> "Movie (1986)"
@@ -2475,10 +2519,11 @@ class IptvRequestService(
             // STEP 3: Format title for Radarr compatibility (includes quality, codec, etc.)
             // This will remove language code from beginning and handle duplicate years
             // Include episode info (e.g., "S08" or "S08E01") in title if provided (for series)
-            // Use series year from info if available, otherwise fall back to year parameter
+            // For movies: prefer request year (from Radarr/OMDB) so duplicate-year removal keeps the correct year
+            // For series: use series year from info if available, otherwise fall back to year parameter
             val yearForTitle = when (entity.contentType) {
                 ContentType.SERIES -> entitySeriesYears["${entity.providerName}_${entity.contentId}"] ?: year
-                ContentType.MOVIE -> entityMovieYears["${entity.providerName}_${entity.contentId}"] ?: year
+                ContentType.MOVIE -> year ?: entityMovieYears["${entity.providerName}_${entity.contentId}"]
                 else -> year
             }
             // Get codec from metadata if available
