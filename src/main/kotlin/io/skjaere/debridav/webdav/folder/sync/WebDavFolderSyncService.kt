@@ -21,7 +21,6 @@ import io.skjaere.debridav.repository.DebridFileContentsRepository
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.stereotype.Service
-import org.springframework.transaction.annotation.Transactional
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.time.Instant
@@ -47,7 +46,10 @@ class WebDavFolderSyncService(
 ) {
     private val logger = LoggerFactory.getLogger(WebDavFolderSyncService::class.java)
 
-    @Transactional
+    /**
+     * Syncs all enabled mappings. Intentionally not @Transactional so the DB connection
+     * is not held during WebDAV HTTP calls (listFiles, etc.) per mapping.
+     */
     suspend fun syncAllMappings() {
         val mappings = folderMappingRepository.findByEnabled(true)
         logger.info("Starting sync for ${mappings.size} folder mappings")
@@ -80,7 +82,10 @@ class WebDavFolderSyncService(
         throw lastException ?: Exception("Unknown error during sync")
     }
 
-    @Transactional
+    /**
+     * Syncs a single mapping. Intentionally not @Transactional so the DB connection
+     * is not held during WebDAV HTTP calls (listFiles, etc.).
+     */
     suspend fun syncMapping(mapping: WebDavFolderMappingEntity) {
         logger.debug("Syncing mapping ${mapping.id}: ${mapping.providerName} -> ${urlDecode(mapping.internalPath)}")
 

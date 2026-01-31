@@ -78,11 +78,14 @@ class IptvRequestService(
             }
         })
 
-    @Transactional
+    /**
+     * Adds IPTV content (movie/series). Intentionally not @Transactional so the DB connection
+     * is not held during HTTP calls (Xtream API, resolve URL, fetch file size, etc.).
+     */
     fun addIptvContent(
-        contentId: String, 
-        providerName: String, 
-        category: String, 
+        contentId: String,
+        providerName: String,
+        category: String,
         magnetTitle: String? = null,
         season: Int? = null, // Season number for series filtering
         episode: Int? = null // Episode number within season (optional)
@@ -1354,17 +1357,17 @@ class IptvRequestService(
     /**
      * Attempts to refetch the actual file size from the IPTV provider and update it in the database.
      * This is useful when a file has a default file size assigned and we need the actual size for byte range headers.
-     * 
+     * Intentionally not @Transactional so the DB connection is not held during the HTTP fetch.
+     *
      * @param iptvContent The IPTV content entity to update
      * @param remotelyCachedEntity The remotely cached entity containing the file
      * @return The new file size if successfully fetched, null otherwise
      */
-    @Transactional
     suspend fun refetchAndUpdateFileSize(
         iptvContent: DebridIptvContent,
         remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity
     ): Long? {
-        // Reconstruct full URL from template + suffix
+        // Reconstruct full URL from template + suffix (short DB read if needed)
         val iptvUrl = try {
             reconstructFullUrl(iptvContent)
         } catch (e: IllegalStateException) {
@@ -1372,13 +1375,13 @@ class IptvRequestService(
             return null
         }
         val providerName = iptvContent.iptvProviderName
-        
+
         if (providerName == null) {
             logger.debug("Cannot refetch file size: missing provider name")
             return null
         }
-        
-        // Determine content type from the IPTV content entity
+
+        // Determine content type from the IPTV content entity (short DB read)
         val contentType = try {
             val iptvContentRefId = iptvContent.iptvContentRefId
             if (iptvContentRefId == null) {
@@ -1398,54 +1401,58 @@ class IptvRequestService(
             // Default to MOVIE if we can't determine
             ContentType.MOVIE
         }
-        
-        logger.info("Refetching file size for IPTV content: url={}, iptvProvider={}, contentType={}", 
+
+        logger.info("Refetching file size for IPTV content: url={}, iptvProvider={}, contentType={}",
             iptvUrl.take(100), providerName, contentType)
-        
+
         try {
             val oldFileSize = iptvContent.size
-            
+
             // If size is already set and not a default value, don't update it - IPTV sizes are stable
             if (oldFileSize != null && !isDefaultFileSize(oldFileSize, contentType)) {
-                logger.debug("File size already set to non-default value, skipping update: size={}, url={}", 
+                logger.debug("File size already set to non-default value, skipping update: size={}, url={}",
                     oldFileSize, iptvUrl.take(100))
                 return oldFileSize
             }
-            
+
+            // HTTP fetch outside any transaction
             val (newFileSize, _) = fetchActualFileSize(iptvUrl, contentType, providerName)
-            
-            // Only update if we got a different size
+
+            // Only update if we got a different size - use short transaction for DB write only
             if (newFileSize != oldFileSize) {
-                // Update the DebridIptvContent entity
-                iptvContent.size = newFileSize
-                
-                // Update the RemotelyCachedEntity size
-                remotelyCachedEntity.size = newFileSize
-                
-                // Update IptvFile link size if present
-                iptvContent.debridLinks.firstOrNull()?.let { link ->
-                    if (link is IptvFile) {
-                        link.size = newFileSize
-                    }
-                }
-                
-                // Save the updated entity
-                databaseFileService.saveDbEntity(remotelyCachedEntity)
-                
-                logger.info("Successfully updated file size: oldSize={}, newSize={}, url={}", 
+                persistRefetchedFileSize(iptvContent, remotelyCachedEntity, newFileSize)
+                logger.info("Successfully updated file size: oldSize={}, newSize={}, url={}",
                     oldFileSize, newFileSize, iptvUrl.take(100))
-                
                 return newFileSize
             } else {
-                logger.debug("File size unchanged or still default: oldSize={}, newSize={}, url={}", 
+                logger.debug("File size unchanged or still default: oldSize={}, newSize={}, url={}",
                     oldFileSize, newFileSize, iptvUrl.take(100))
                 return newFileSize
             }
         } catch (e: Exception) {
-            logger.warn("Failed to refetch file size from IPTV provider: url={}, iptvProvider={}, error={}", 
+            logger.warn("Failed to refetch file size from IPTV provider: url={}, iptvProvider={}, error={}",
                 iptvUrl.take(100), providerName, e.message, e)
             return null
         }
+    }
+
+    /**
+     * Persists refetched file size to the database. Short transaction for write only.
+     */
+    @Transactional
+    private fun persistRefetchedFileSize(
+        iptvContent: DebridIptvContent,
+        remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity,
+        newFileSize: Long
+    ) {
+        iptvContent.size = newFileSize
+        remotelyCachedEntity.size = newFileSize
+        iptvContent.debridLinks.firstOrNull()?.let { link ->
+            if (link is IptvFile) {
+                link.size = newFileSize
+            }
+        }
+        databaseFileService.saveDbEntity(remotelyCachedEntity)
     }
     
     /**

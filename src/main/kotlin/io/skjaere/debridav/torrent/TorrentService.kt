@@ -43,14 +43,20 @@ class TorrentService(
 ) {
     private val logger = LoggerFactory.getLogger(TorrentService::class.java)
 
-    @Transactional
+    /**
+     * Adds a torrent from a file. No transaction is held across the entire operation;
+     * DB connection is only used for short reads and for the final write (createTorrent).
+     */
     fun addTorrent(category: String, torrent: MultipartFile): Boolean {
         return addMagnet(
             category, torrentToMagnetConverter.convertTorrentToMagnet(torrent.bytes)
         )
     }
 
-    @Transactional
+    /**
+     * Adds a magnet (URL). Avoids holding a DB connection during the long debrid API call
+     * (isCached, getCachedFiles); only short transactions for initial reads and final write.
+     */
     fun addMagnet(category: String, magnet: TorrentMagnet): Boolean = runBlocking {
         // Check if this is an IPTV magnet URI
         // Format: magnet:?xt=urn:btih:{hash}&dn={title}&tr={iptv://...}
@@ -261,6 +267,11 @@ class TorrentService(
         return true
     }
 
+    /**
+     * Persists the torrent and its files. Uses a single short transaction so the DB
+     * connection is not held during external debrid API calls in addMagnet.
+     */
+    @Transactional
     fun createTorrent(
         cachedFiles: List<DebridFileContents>,
         categoryName: String,

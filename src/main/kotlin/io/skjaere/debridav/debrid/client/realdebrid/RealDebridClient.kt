@@ -49,7 +49,6 @@ import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
-import org.springframework.transaction.annotation.Transactional
 import java.time.Duration
 import java.time.Instant
 
@@ -117,7 +116,10 @@ class RealDebridClient(
         true
     }
 
-    @Transactional
+    /**
+     * Gets cached files for a magnet. Intentionally not @Transactional so the DB connection
+     * is not held during Real-Debrid API calls (addMagnet, getTorrentInfo, unrestrictLink, etc.).
+     */
     override suspend fun getCachedFiles(magnet: TorrentMagnet, params: Map<String, String>): List<CachedFile> {
         logger.info("getting cached files from real debrid")
         return realDebridTorrentService.getTorrentsByHash(magnet.getHash()!!)

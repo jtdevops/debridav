@@ -30,13 +30,20 @@ class RealDebridDownloadService(
     private val httpClient: HttpClient,
     private val realDebridRateLimiter: RateLimiter
 ) {
-    @Transactional
+    /**
+     * Syncs downloads list from Real-Debrid API to DB. Fetches via HTTP outside a transaction,
+     * then persists in a short transaction so the DB connection is not held during API calls.
+     */
     fun syncDownloadsToDatabase(): Unit = runBlocking {
+        val downloads = getListOfDownloads()
+        val entities = downloads.map { mapDownloadToRdtEntity(it) }
+        persistDownloadsList(entities)
+    }
+
+    @Transactional
+    private fun persistDownloadsList(entities: List<RealDebridDownloadEntity>) {
         realDebridDownloadRepository.deleteAll()
-        getListOfDownloads().asSequence()
-            .map { mapDownloadToRdtEntity(it) }
-            .toList()
-            .let { realDebridDownloadRepository.saveAll(it) }
+        realDebridDownloadRepository.saveAll(entities)
     }
 
     suspend fun saveDownload(realDebridDownload: RealDebridDownload): RealDebridDownloadEntity {
