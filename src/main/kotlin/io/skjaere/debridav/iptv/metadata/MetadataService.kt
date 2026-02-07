@@ -13,7 +13,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
-import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Service
@@ -27,17 +26,19 @@ class MetadataService(
 
     /**
      * Fetches metadata for a movie or TV show by IMDB ID
-     * First checks the database cache, then fetches from OMDB API if not cached
+     * First checks the database cache, then fetches from OMDB API if not cached.
+     * Intentionally not @Transactional so the DB connection is not held during the OMDB HTTP call
+     * (used by /api/iptv/search when resolving imdbid/qTest to a title).
+     *
      * @param imdbId The IMDB ID (e.g., "tt12584954")
      * @return Metadata containing title and year, or null if not found or error occurred
      */
-    @Transactional
     suspend fun getMetadataByImdbId(imdbId: String): MediaMetadata? {
-        // Check cache first
+        // Check cache first (short DB read)
         val cachedEntity = iptvImdbMetadataRepository.findByImdbId(imdbId)
         if (cachedEntity != null) {
             logger.debug("Found cached IMDB metadata for IMDB ID: $imdbId")
-            // Update last accessed timestamp
+            // Update last accessed timestamp; repository method is @Transactional so call goes through proxy
             iptvImdbMetadataRepository.updateLastAccessed(imdbId, Instant.now())
             // Parse cached response JSON to extract metadata
             return parseMetadataFromJson(cachedEntity.responseJson, imdbId)

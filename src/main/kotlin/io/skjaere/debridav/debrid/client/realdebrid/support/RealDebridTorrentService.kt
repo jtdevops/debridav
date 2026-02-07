@@ -58,13 +58,20 @@ class RealDebridTorrentService(
         return realDebridTorrentRepository.findTorrentsByHashIgnoreCase(hash.hash)
     }
 
-    @Transactional
+    /**
+     * Syncs torrent list from Real-Debrid API to DB. Fetches via HTTP outside a transaction,
+     * then persists in a short transaction so the DB connection is not held during API calls.
+     */
     fun syncTorrentListToDatabase(): Unit = runBlocking {
+        val torrents = getListOfTorrents()
+        val entities = torrents.map { mapTorrentInfoToRdtEntity(it) }
+        persistTorrentList(entities)
+    }
+
+    @Transactional
+    private fun persistTorrentList(entities: List<RealDebridTorrentEntity>) {
         realDebridTorrentRepository.deleteAll()
-        getListOfTorrents().asSequence()
-            .map { mapTorrentInfoToRdtEntity(it) }
-            .toList()
-            .let { realDebridTorrentRepository.saveAll(it) }
+        realDebridTorrentRepository.saveAll(entities)
     }
 
     private fun mapTorrentInfoToRdtEntity(info: TorrentsResponseItem): RealDebridTorrentEntity {

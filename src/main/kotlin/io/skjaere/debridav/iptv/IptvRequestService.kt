@@ -78,11 +78,14 @@ class IptvRequestService(
             }
         })
 
-    @Transactional
+    /**
+     * Adds IPTV content (movie/series). Intentionally not @Transactional so the DB connection
+     * is not held during HTTP calls (Xtream API, resolve URL, fetch file size, etc.).
+     */
     fun addIptvContent(
-        contentId: String, 
-        providerName: String, 
-        category: String, 
+        contentId: String,
+        providerName: String,
+        category: String,
         magnetTitle: String? = null,
         season: Int? = null, // Season number for series filtering
         episode: Int? = null // Episode number within season (optional)
@@ -1354,17 +1357,17 @@ class IptvRequestService(
     /**
      * Attempts to refetch the actual file size from the IPTV provider and update it in the database.
      * This is useful when a file has a default file size assigned and we need the actual size for byte range headers.
-     * 
+     * Intentionally not @Transactional so the DB connection is not held during the HTTP fetch.
+     *
      * @param iptvContent The IPTV content entity to update
      * @param remotelyCachedEntity The remotely cached entity containing the file
      * @return The new file size if successfully fetched, null otherwise
      */
-    @Transactional
     suspend fun refetchAndUpdateFileSize(
         iptvContent: DebridIptvContent,
         remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity
     ): Long? {
-        // Reconstruct full URL from template + suffix
+        // Reconstruct full URL from template + suffix (short DB read if needed)
         val iptvUrl = try {
             reconstructFullUrl(iptvContent)
         } catch (e: IllegalStateException) {
@@ -1372,13 +1375,13 @@ class IptvRequestService(
             return null
         }
         val providerName = iptvContent.iptvProviderName
-        
+
         if (providerName == null) {
             logger.debug("Cannot refetch file size: missing provider name")
             return null
         }
-        
-        // Determine content type from the IPTV content entity
+
+        // Determine content type from the IPTV content entity (short DB read)
         val contentType = try {
             val iptvContentRefId = iptvContent.iptvContentRefId
             if (iptvContentRefId == null) {
@@ -1398,54 +1401,58 @@ class IptvRequestService(
             // Default to MOVIE if we can't determine
             ContentType.MOVIE
         }
-        
-        logger.info("Refetching file size for IPTV content: url={}, iptvProvider={}, contentType={}", 
+
+        logger.info("Refetching file size for IPTV content: url={}, iptvProvider={}, contentType={}",
             iptvUrl.take(100), providerName, contentType)
-        
+
         try {
             val oldFileSize = iptvContent.size
-            
+
             // If size is already set and not a default value, don't update it - IPTV sizes are stable
             if (oldFileSize != null && !isDefaultFileSize(oldFileSize, contentType)) {
-                logger.debug("File size already set to non-default value, skipping update: size={}, url={}", 
+                logger.debug("File size already set to non-default value, skipping update: size={}, url={}",
                     oldFileSize, iptvUrl.take(100))
                 return oldFileSize
             }
-            
+
+            // HTTP fetch outside any transaction
             val (newFileSize, _) = fetchActualFileSize(iptvUrl, contentType, providerName)
-            
-            // Only update if we got a different size
+
+            // Only update if we got a different size - use short transaction for DB write only
             if (newFileSize != oldFileSize) {
-                // Update the DebridIptvContent entity
-                iptvContent.size = newFileSize
-                
-                // Update the RemotelyCachedEntity size
-                remotelyCachedEntity.size = newFileSize
-                
-                // Update IptvFile link size if present
-                iptvContent.debridLinks.firstOrNull()?.let { link ->
-                    if (link is IptvFile) {
-                        link.size = newFileSize
-                    }
-                }
-                
-                // Save the updated entity
-                databaseFileService.saveDbEntity(remotelyCachedEntity)
-                
-                logger.info("Successfully updated file size: oldSize={}, newSize={}, url={}", 
+                persistRefetchedFileSize(iptvContent, remotelyCachedEntity, newFileSize)
+                logger.info("Successfully updated file size: oldSize={}, newSize={}, url={}",
                     oldFileSize, newFileSize, iptvUrl.take(100))
-                
                 return newFileSize
             } else {
-                logger.debug("File size unchanged or still default: oldSize={}, newSize={}, url={}", 
+                logger.debug("File size unchanged or still default: oldSize={}, newSize={}, url={}",
                     oldFileSize, newFileSize, iptvUrl.take(100))
                 return newFileSize
             }
         } catch (e: Exception) {
-            logger.warn("Failed to refetch file size from IPTV provider: url={}, iptvProvider={}, error={}", 
+            logger.warn("Failed to refetch file size from IPTV provider: url={}, iptvProvider={}, error={}",
                 iptvUrl.take(100), providerName, e.message, e)
             return null
         }
+    }
+
+    /**
+     * Persists refetched file size to the database. Short transaction for write only.
+     */
+    @Transactional
+    private fun persistRefetchedFileSize(
+        iptvContent: DebridIptvContent,
+        remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity,
+        newFileSize: Long
+    ) {
+        iptvContent.size = newFileSize
+        remotelyCachedEntity.size = newFileSize
+        iptvContent.debridLinks.firstOrNull()?.let { link ->
+            if (link is IptvFile) {
+                link.size = newFileSize
+            }
+        }
+        databaseFileService.saveDbEntity(remotelyCachedEntity)
     }
     
     /**
@@ -1623,6 +1630,14 @@ class IptvRequestService(
         // STEP 4: Extract year from title if not provided
         val titleYear = year ?: extractYearFromTitle(cleanTitle)
         
+        // STEP 4b: Normalize to a single year - remove duplicate years (e.g. "(1994).(1984)" -> keep one)
+        // Radarr fails to identify the movie when the magnet title contains multiple years
+        cleanTitle = removeDuplicateYearsFromTitle(cleanTitle, titleYear)
+        
+        // STEP 4c: When we have a preferred year (from Radarr/OMDB), replace any existing year in the title with it.
+        // Entity may have wrong year (e.g. "(1994)") while request has correct year (1984); we must output only the preferred year.
+        cleanTitle = replaceYearInTitleWithPreferred(cleanTitle, titleYear)
+        
         // STEP 5: Remove standalone year from title to avoid duplication (keep year in brackets if present)
         // This removes standalone "1986" if "(1986)" exists in the title
         cleanTitle = removeStandaloneYearFromTitle(cleanTitle, titleYear)
@@ -1638,14 +1653,10 @@ class IptvRequestService(
             .trim('.')
         parts.add(sanitizedTitle)
         
-        // STEP 8: Conditionally add year - only if not already present in the sanitized title
-        // Check if year already exists in sanitized title (could be in brackets like "(1986)" or as standalone)
-        val yearAlreadyInTitle = if (titleYear != null) {
-            val yearPattern = Regex("(?:^|[.\\(-])$titleYear(?:$|[.)-])")
-            yearPattern.containsMatchIn(sanitizedTitle)
-        } else {
-            true // No year to add
-        }
+        // STEP 8: Conditionally add year - only if no year is already present in the sanitized title.
+        // If any year is present (even wrong one), we don't add - we've already normalized to preferred in step 4c.
+        val anyYearInTitle = Regex("""\((19[0-9]{2}|20[0-9]{2})\)""").containsMatchIn(sanitizedTitle)
+        val yearAlreadyInTitle = titleYear == null || anyYearInTitle
         
         if (titleYear != null && !yearAlreadyInTitle) {
             // Year not found in sanitized title, add it in round brackets
@@ -1740,6 +1751,46 @@ class IptvRequestService(
         return match?.groupValues?.get(1)?.uppercase()
     }
     
+    /**
+     * Replaces any year in parentheses in the title with the preferred year (from Radarr/OMDB).
+     * E.g. "Romancing the Stone (1994)" with preferredYear=1984 -> "Romancing the Stone (1984)".
+     * This ensures we output the request year when the entity title has a different (wrong) year.
+     */
+    private fun replaceYearInTitleWithPreferred(title: String, preferredYear: Int?): String {
+        if (preferredYear == null) return title
+        val yearInParensPattern = Regex("""\((19[0-9]{2}|20[0-9]{2})\)""")
+        return yearInParensPattern.replace(title) { "($preferredYear)" }
+    }
+
+    /**
+     * Removes duplicate years from title so only one year remains.
+     * E.g. "Romancing.the.Stone.(1994).(1984).1080p..." -> "Romancing.the.Stone.(1984).1080p..." when preferredYear=1984.
+     * Keeps the preferred year (from Radarr/OMDB) if it appears in the title; otherwise keeps the first year found.
+     * This prevents Radarr from failing to identify the movie when the magnet title contains multiple years.
+     */
+    private fun removeDuplicateYearsFromTitle(title: String, preferredYear: Int?): String {
+        // Match any 4-digit year in parentheses (1900-2099); use [0-9] for explicit digit matching
+        val yearInParensPattern = Regex("""\((19[0-9]{2}|20[0-9]{2})\)""")
+        val yearsFound = yearInParensPattern.findAll(title).map { it.groupValues[1].toInt() }.toList()
+        val distinctYears = yearsFound.distinct()
+        if (distinctYears.size <= 1) return title
+        val yearToKeep = when {
+            preferredYear != null && distinctYears.contains(preferredYear) -> preferredYear
+            else -> distinctYears.first()
+        }
+        // Single pass: keep only (yearToKeep), remove all other (YYYY)
+        var result = yearInParensPattern.replace(title) { mr ->
+            if (mr.groupValues[1].toInt() == yearToKeep) mr.value else ""
+        }
+        // Remove standalone 4-digit years that are not yearToKeep (e.g. ".1994." or " 1994 ")
+        val standalonePattern = Regex("""(?:^|[.\s-])(19[0-9]{2}|20[0-9]{2})(?=$|[.\s-])""")
+        result = standalonePattern.replace(result) { mr ->
+            if (mr.groupValues[1].toInt() == yearToKeep) mr.value else "."
+        }
+        result = result.replace(Regex("""\.{2,}"""), ".").replace(Regex("""\s{2,}"""), " ").trim('.', ' ')
+        return result
+    }
+
     /**
      * Removes standalone year from title if year is already present in brackets.
      * Example: "Movie (1986) 1986" -> "Movie (1986)"
@@ -2468,10 +2519,11 @@ class IptvRequestService(
             // STEP 3: Format title for Radarr compatibility (includes quality, codec, etc.)
             // This will remove language code from beginning and handle duplicate years
             // Include episode info (e.g., "S08" or "S08E01") in title if provided (for series)
-            // Use series year from info if available, otherwise fall back to year parameter
+            // For movies: prefer request year (from Radarr/OMDB) so duplicate-year removal keeps the correct year
+            // For series: use series year from info if available, otherwise fall back to year parameter
             val yearForTitle = when (entity.contentType) {
                 ContentType.SERIES -> entitySeriesYears["${entity.providerName}_${entity.contentId}"] ?: year
-                ContentType.MOVIE -> entityMovieYears["${entity.providerName}_${entity.contentId}"] ?: year
+                ContentType.MOVIE -> year ?: entityMovieYears["${entity.providerName}_${entity.contentId}"]
                 else -> year
             }
             // Get codec from metadata if available

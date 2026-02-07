@@ -11,11 +11,13 @@ import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.torrent.Status
 import io.skjaere.debridav.torrent.Torrent
 import io.skjaere.debridav.torrent.TorrentRepository
+import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.transaction.annotation.Transactional
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -34,6 +36,25 @@ class DownloadsCleanupService(
     
     // Mutex to prevent concurrent cleanup operations
     private val cleanupLock = ReentrantLock()
+
+    /**
+     * Scheduled orphan cleanup. Runs periodically instead of on each add-torrent request
+     * to avoid DB connection pool exhaustion when Radarr/Sonarr send multiple add requests concurrently.
+     * Interval is controlled by debridav.downloads-cleanup-time-based-threshold-minutes (default: 10).
+     */
+    @Scheduled(
+        fixedRateString = "\${debridav.downloads-cleanup-time-based-threshold-minutes:10}",
+        timeUnit = TimeUnit.MINUTES
+    )
+    fun scheduledOrphanCleanup() {
+        try {
+            logger.trace("Scheduled orphan cleanup starting")
+            cleanupOrphanedTorrentsAndFiles(dryRun = false)
+            logger.trace("Scheduled orphan cleanup completed")
+        } catch (e: Exception) {
+            logger.warn("Scheduled orphan cleanup failed: ${e.message}", e)
+        }
+    }
 
     /**
      * Finds abandoned files in the downloads folder.

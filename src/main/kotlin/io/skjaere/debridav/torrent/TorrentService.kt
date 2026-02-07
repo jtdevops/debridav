@@ -16,9 +16,6 @@ import io.skjaere.debridav.iptv.model.ContentType
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.util.VideoFileExtensions
 import jakarta.transaction.Transactional
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
@@ -43,25 +40,24 @@ class TorrentService(
     private val iptvContentRepository: IptvContentRepository,
     private val iptvConfigurationProperties: IptvConfigurationProperties,
     private val iptvContentService: IptvContentService?,
-    private val downloadsCleanupService: io.skjaere.debridav.cleanup.DownloadsCleanupService?
 ) {
     private val logger = LoggerFactory.getLogger(TorrentService::class.java)
-    private val cleanupScope = CoroutineScope(Dispatchers.IO)
 
-    @Transactional
+    /**
+     * Adds a torrent from a file. No transaction is held across the entire operation;
+     * DB connection is only used for short reads and for the final write (createTorrent).
+     */
     fun addTorrent(category: String, torrent: MultipartFile): Boolean {
         return addMagnet(
             category, torrentToMagnetConverter.convertTorrentToMagnet(torrent.bytes)
         )
     }
 
-    @Transactional
+    /**
+     * Adds a magnet (URL). Avoids holding a DB connection during the long debrid API call
+     * (isCached, getCachedFiles); only short transactions for initial reads and final write.
+     */
     fun addMagnet(category: String, magnet: TorrentMagnet): Boolean = runBlocking {
-        // Trigger automatic cleanup of orphaned torrents/files BEFORE adding new torrent
-        // This prevents race conditions where a newly added torrent might be immediately cleaned up
-        // Run in separate thread so it doesn't block the torrent add operation
-        triggerAutomaticCleanupAsync()
-        
         // Check if this is an IPTV magnet URI
         // Format: magnet:?xt=urn:btih:{hash}&dn={title}&tr={iptv://...}
         // We detect IPTV by checking if the tracker (tr) parameter contains iptv://
@@ -107,38 +103,7 @@ class TorrentService(
         }
     }
     
-    /**
-     * Triggers automatic cleanup of orphaned torrents/files in a separate thread.
-     * This runs BEFORE adding a new torrent to prevent race conditions where
-     * a newly added torrent might be immediately cleaned up if cleanup runs after
-     * the torrent is added but before all database records are fully committed.
-     */
-    private fun triggerAutomaticCleanupAsync() {
-        downloadsCleanupService?.let { cleanupService ->
-            logger.debug("Triggering automatic cleanup of orphaned torrents/files in background thread")
-            cleanupScope.launch {
-                try {
-                    logger.trace("Automatic cleanup thread started")
-                    // Automatic cleanup uses configuration settings (default: immediate cleanup)
-                    // This runs in a separate thread and doesn't block the torrent add operation
-                    cleanupService.cleanupOrphanedTorrentsAndFiles(dryRun = false)
-                    logger.trace("Automatic cleanup thread completed")
-                } catch (e: Exception) {
-                    // Log but don't fail the torrent add operation if cleanup fails
-                    logger.warn("Automatic cleanup failed: ${e.message}", e)
-                }
-            }
-        } ?: run {
-            logger.trace("DownloadsCleanupService not available, skipping automatic cleanup")
-        }
-    }
-    
     private fun handleIptvLink(iptvLink: String, category: String, magnet: TorrentMagnet? = null): Boolean {
-        // Trigger automatic cleanup of orphaned torrents/files BEFORE adding new IPTV torrent
-        // This prevents race conditions where a newly added torrent might be immediately cleaned up
-        // Run in separate thread so it doesn't block the torrent add operation
-        triggerAutomaticCleanupAsync()
-        
         logger.info("Processing IPTV link: $iptvLink")
         
         // Parse IPTV link format: iptv://{hash}/{providerName}/{contentId}
@@ -302,6 +267,11 @@ class TorrentService(
         return true
     }
 
+    /**
+     * Persists the torrent and its files. Uses a single short transaction so the DB
+     * connection is not held during external debrid API calls in addMagnet.
+     */
+    @Transactional
     fun createTorrent(
         cachedFiles: List<DebridFileContents>,
         categoryName: String,
