@@ -177,6 +177,8 @@ class DebriDavApplication : SpringBootServletInitializer() {
             logger.info("          (List all content by provider - JSON pretty-printed)")
             logger.info("  GET     $baseUrl/api/maintenance/content/{provider}")
             logger.info("          (List content for specific non-IPTV provider, e.g. PREMIUMIZE, REAL_DEBRID)")
+            logger.info("  GET     $baseUrl/api/maintenance/content/IPTV")
+            logger.info("          (List all IPTV content grouped by iptvProvider)")
             logger.info("  GET     $baseUrl/api/maintenance/content/IPTV/{iptvProvider}")
             logger.info("          (List content for specific IPTV provider, e.g. provider1, mega)")
             logger.info("  DELETE  $baseUrl/api/maintenance/content/{provider}")

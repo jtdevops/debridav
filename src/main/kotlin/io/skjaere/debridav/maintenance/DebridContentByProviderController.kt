@@ -1,6 +1,8 @@
 package io.skjaere.debridav.maintenance
 
+import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import io.skjaere.debridav.debrid.DebridProvider
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
@@ -29,17 +31,29 @@ class DebridContentByProviderController(
     private val logger = LoggerFactory.getLogger(DebridContentByProviderController::class.java)
     
     /**
+     * Creates a JSON writer configured for pretty-printed output.
+     * Both verbose and non-verbose modes use the same writer since the service
+     * already handles the different return types (List<FileEntry> vs List<String>).
+     */
+    private fun createJsonWriter(): com.fasterxml.jackson.databind.ObjectWriter {
+        return objectMapper.writerWithDefaultPrettyPrinter()
+    }
+    
+    /**
      * Lists all debrid content grouped by provider.
      * Returns pretty-printed JSON.
+     * 
+     * @param verbose If true, returns full file details. If false (default), returns only path.
      */
     @GetMapping(produces = [MediaType.APPLICATION_JSON_VALUE])
-    fun listAllContentByProvider(): ResponseEntity<String> {
-        logger.info("Listing all content by provider")
-        val content = debridContentByProviderService.listContentByProvider()
+    fun listAllContentByProvider(
+        @RequestParam(name = "verbose", defaultValue = "false") verbose: Boolean
+    ): ResponseEntity<String> {
+        logger.info("Listing all content by provider (verbose=$verbose)")
+        val content = debridContentByProviderService.listContentByProvider(verbose)
         
         return try {
-            // Use writerWithDefaultPrettyPrinter for pretty-printed JSON
-            val json = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(content)
+            val json = createJsonWriter().writeValueAsString(content)
             ResponseEntity.ok(json)
         } catch (e: Exception) {
             logger.error("Error serializing content to JSON", e)
@@ -49,16 +63,43 @@ class DebridContentByProviderController(
     }
     
     /**
+     * Lists all IPTV content grouped by iptvProvider.
+     * Returns pretty-printed JSON.
+     * This endpoint must be defined before the generic /{provider} endpoint to ensure correct routing.
+     * 
+     * @param verbose If true, returns full file details. If false (default), returns only path.
+     */
+    @GetMapping("/IPTV", produces = [MediaType.APPLICATION_JSON_VALUE])
+    fun listAllIptvContent(
+        @RequestParam(name = "verbose", defaultValue = "false") verbose: Boolean
+    ): ResponseEntity<String> {
+        logger.info("Listing all IPTV content (verbose=$verbose)")
+        val content = debridContentByProviderService.listAllIptvContent(verbose)
+        
+        return try {
+            val json = createJsonWriter().writeValueAsString(content)
+            ResponseEntity.ok(json)
+        } catch (e: Exception) {
+            logger.error("Error serializing IPTV content to JSON", e)
+            ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body("""{"error": "Failed to serialize content"}""")
+        }
+    }
+    
+    /**
      * Lists content for a specific IPTV provider.
      * Returns pretty-printed JSON.
      * This endpoint must be defined before the generic /{provider} endpoint to ensure correct routing.
+     * 
+     * @param verbose If true, returns full file details. If false (default), returns only path.
      */
     @GetMapping("/IPTV/{iptvProvider}", produces = [MediaType.APPLICATION_JSON_VALUE])
     fun listContentForIptvProvider(
-        @PathVariable iptvProvider: String
+        @PathVariable iptvProvider: String,
+        @RequestParam(name = "verbose", defaultValue = "false") verbose: Boolean
     ): ResponseEntity<String> {
-        logger.info("Listing content for IPTV provider: $iptvProvider")
-        val content = debridContentByProviderService.listContentByProvider(DebridProvider.IPTV.name, iptvProvider)
+        logger.info("Listing content for IPTV provider: $iptvProvider (verbose=$verbose)")
+        val content = debridContentByProviderService.listContentByProvider(DebridProvider.IPTV.name, iptvProvider, verbose)
         
         return if (content == null) {
             ResponseEntity.status(HttpStatus.NOT_FOUND).body(
@@ -68,7 +109,7 @@ class DebridContentByProviderController(
             )
         } else {
             try {
-                val json = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(content)
+                val json = createJsonWriter().writeValueAsString(content)
                 ResponseEntity.ok(json)
             } catch (e: Exception) {
                 logger.error("Error serializing content to JSON", e)
@@ -81,22 +122,25 @@ class DebridContentByProviderController(
     /**
      * Lists content for a specific non-IPTV provider (e.g. PREMIUMIZE, REAL_DEBRID).
      * Returns pretty-printed JSON.
+     * 
+     * @param verbose If true, returns full file details. If false (default), returns only path.
      */
     @GetMapping("/{provider}", produces = [MediaType.APPLICATION_JSON_VALUE])
     fun listContentForProvider(
-        @PathVariable provider: String
+        @PathVariable provider: String,
+        @RequestParam(name = "verbose", defaultValue = "false") verbose: Boolean
     ): ResponseEntity<String> {
         // Check if this is an IPTV provider without iptvProvider specified
         if (provider.uppercase() == DebridProvider.IPTV.name) {
             return ResponseEntity.badRequest().body(
                 objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
-                    mapOf("error" to "IPTV provider requires iptvProvider path segment. Use: GET /api/maintenance/content/IPTV/{iptvProvider}")
+                    mapOf("error" to "IPTV provider requires iptvProvider path segment. Use: GET /api/maintenance/content/IPTV/{iptvProvider} or GET /api/maintenance/content/IPTV for all IPTV content")
                 )
             )
         }
         
-        logger.info("Listing content for provider: $provider")
-        val content = debridContentByProviderService.listContentByProvider(provider, null)
+        logger.info("Listing content for provider: $provider (verbose=$verbose)")
+        val content = debridContentByProviderService.listContentByProvider(provider, null, verbose)
         
         return if (content == null) {
             ResponseEntity.status(HttpStatus.NOT_FOUND).body(
@@ -106,7 +150,7 @@ class DebridContentByProviderController(
             )
         } else {
             try {
-                val json = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(content)
+                val json = createJsonWriter().writeValueAsString(content)
                 ResponseEntity.ok(json)
             } catch (e: Exception) {
                 logger.error("Error serializing content to JSON", e)
