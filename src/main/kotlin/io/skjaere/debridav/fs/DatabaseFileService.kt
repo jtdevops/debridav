@@ -367,16 +367,14 @@ class DatabaseFileService(
 
     /**
      * Downloads content from a debrid file and stores it as LocalEntity.
-     * This is used for whitelisted extensions (e.g., subtitle files) that should be stored locally
-     * instead of being linked to external sources.
-     * 
+     * Intentionally not @Transactional so the DB connection is not held during the HTTP download.
+     *
      * @param path The file path where the LocalEntity should be created
      * @param debridFileContents The DebridFileContents containing the download URL
      * @param authHeader Optional authentication header (e.g., "Basic ..." or "Bearer ...") for WebDAV or other authenticated sources
      * @return The created LocalEntity with downloaded content
      * @throws Exception If download fails, the exception is logged and rethrown
      */
-    @Transactional
     suspend fun downloadAndStoreAsLocalEntity(
         path: String,
         debridFileContents: DebridFileContents,
@@ -384,7 +382,7 @@ class DatabaseFileService(
     ): LocalEntity = withContext(Dispatchers.IO) {
         val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
         val fileName = path.substringAfterLast("/")
-        
+
         // Extract download URL from debrid links
         val downloadUrl = when {
             // For IPTV content, resolve template URL if needed
@@ -412,48 +410,57 @@ class DatabaseFileService(
                 cachedFile?.link ?: throw IllegalStateException("No download URL available in debrid links")
             }
         }
-        
+
         logger.debug("Downloading content from {} for file {}", urlDecode(downloadUrl), fileName)
-        
-        try {
-            // Download the content with optional authentication
-            val bytes = if (authHeader != null) {
+
+        val bytes = try {
+            if (authHeader != null) {
                 httpClient.get(downloadUrl) {
                     header(io.ktor.http.HttpHeaders.Authorization, authHeader)
                 }.body<ByteArray>()
             } else {
                 httpClient.get(downloadUrl).body<ByteArray>()
             }
-            val contentSize = bytes.size.toLong()
-            
-            // Create LocalEntity with downloaded content
-            // Note: shouldAlwaysStoreAsLocalEntity() bypasses size check, so we pass the actual size
-            val localFile = LocalEntity()
-            localFile.name = fileName
-            localFile.directory = directory
-            localFile.lastModified = System.currentTimeMillis()
-            localFile.size = contentSize
-            localFile.mimeType = debridFileContents.mimeType
-            
-            // Bypass size check for whitelisted extensions
-            val shouldBypassSizeCheck = debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(fileName)
-            if (!shouldBypassSizeCheck && contentSize / MEGABYTE > debridavConfigurationProperties.localEntityMaxSizeMb
-                && debridavConfigurationProperties.localEntityMaxSizeMb != 0
-            ) {
-                throw IllegalArgumentException(
-                    "Downloaded file size: ${contentSize / MEGABYTE} MB is greater than set maximum: " +
-                            "${debridavConfigurationProperties.localEntityMaxSizeMb}"
-                )
-            }
-            
-            localFile.blob = Blob(BlobProxy.generateProxy(bytes.inputStream(), contentSize), contentSize)
-            
-            logger.info("Successfully downloaded and stored {} as LocalEntity (size: {} bytes)", fileName, contentSize)
-            debridFileRepository.save(localFile)
         } catch (e: Exception) {
             logger.error("Failed to download content from {} for file {}: {}", urlDecode(downloadUrl), fileName, e.message, e)
             throw e
         }
+        val contentSize = bytes.size.toLong()
+
+        // Bypass size check for whitelisted extensions
+        val shouldBypassSizeCheck = debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(fileName)
+        if (!shouldBypassSizeCheck && contentSize / MEGABYTE > debridavConfigurationProperties.localEntityMaxSizeMb
+            && debridavConfigurationProperties.localEntityMaxSizeMb != 0
+        ) {
+            throw IllegalArgumentException(
+                "Downloaded file size: ${contentSize / MEGABYTE} MB is greater than set maximum: " +
+                        "${debridavConfigurationProperties.localEntityMaxSizeMb}"
+            )
+        }
+
+        logger.info("Successfully downloaded and stored {} as LocalEntity (size: {} bytes)", fileName, contentSize)
+        saveDownloadedLocalEntity(directory, fileName, bytes, contentSize, debridFileContents.mimeType)
+    }
+
+    /**
+     * Persists a downloaded file as LocalEntity. Short transaction for write only.
+     */
+    @Transactional
+    private fun saveDownloadedLocalEntity(
+        directory: DbDirectory,
+        fileName: String,
+        bytes: ByteArray,
+        contentSize: Long,
+        mimeType: String?
+    ): LocalEntity {
+        val localFile = LocalEntity()
+        localFile.name = fileName
+        localFile.directory = directory
+        localFile.lastModified = System.currentTimeMillis()
+        localFile.size = contentSize
+        localFile.mimeType = mimeType
+        localFile.blob = Blob(BlobProxy.generateProxy(bytes.inputStream(), contentSize), contentSize)
+        return debridFileRepository.save(localFile)
     }
 
     fun getFileAtPath(path: String): DbEntity? {
