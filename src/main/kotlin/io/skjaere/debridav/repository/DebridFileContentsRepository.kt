@@ -22,7 +22,12 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
     fun getByDirectory(directory: DbDirectory): List<DbEntity>
 
     @Query(
-        "select * from db_item directory where directory.path ~ CAST(CONCAT(:#{#directory.path},'.*{1}') AS lquery)",
+        """
+        select *
+        from db_item d
+        where d.path <@ CAST(:#{#directory.path} AS ltree)
+        and nlevel(d.path) = nlevel(CAST(:#{#directory.path} AS ltree)) + 1
+        """,
         nativeQuery = true
     )
     fun getChildrenByDirectory(directory: DbDirectory): List<DbDirectory>
