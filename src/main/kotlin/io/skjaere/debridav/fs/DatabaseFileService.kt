@@ -266,12 +266,45 @@ class DatabaseFileService(
     fun deleteFile(file: DbEntity) {
         when (file) {
             is RemotelyCachedEntity -> deleteRemotelyCachedEntity(file)
-            is DbDirectory -> debridFileRepository.delete(file)
+            is DbDirectory -> deleteDirectory(file)
             is LocalEntity -> {
                 deleteLargeObjectForLocalEntity(file)
                 debridFileRepository.delete(file)
             }
         }
+    }
+
+    /**
+     * Deletes a directory and all its path-descendants (subdirectories and files).
+     * This ensures ltree hierarchy integrity: we never delete a parent while leaving
+     * descendants with paths like ROOT.A.B.C when ROOT.A.B no longer exists.
+     *
+     * Order: 1) Delete files in tree, 2) Delete child directories by path, 3) Delete directory.
+     */
+    @Transactional
+    fun deleteDirectory(directory: DbDirectory) {
+        val path = directory.path ?: return
+        val dirId = directory.id ?: return
+
+        // Skip if already deleted (e.g. was a child of a parent we just deleted)
+        if (!debridFileRepository.findById(dirId).isPresent) {
+            return
+        }
+
+        // 1. Delete all files in this directory tree
+        debridFileRepository.findFilesInDirectoryTree(path).forEach { file ->
+            try {
+                deleteFile(file)
+            } catch (e: Exception) {
+                logger.warn("Error deleting file {} in directory tree {}", file.id, path, e)
+            }
+        }
+
+        // 2. Delete all path-descendant directories (children and deeper)
+        debridFileRepository.deleteChildDirectoriesByPath(path)
+
+        // 3. Delete the directory itself
+        debridFileRepository.delete(directory)
     }
 
     private fun deleteLargeObjectForLocalEntity(file: LocalEntity) {

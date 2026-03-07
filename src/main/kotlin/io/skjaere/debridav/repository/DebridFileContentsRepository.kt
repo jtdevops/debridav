@@ -176,6 +176,12 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
             SELECT 1 FROM db_item child
             WHERE child.directory_id = dir.id
         )
+        AND NOT EXISTS (
+            SELECT 1 FROM db_item subdir
+            WHERE subdir.db_item_type = 'DbDirectory'
+            AND subdir.path <@ dir.path
+            AND subdir.path != dir.path
+        )
         ORDER BY nlevel(dir.path) DESC
         """,
         nativeQuery = true
