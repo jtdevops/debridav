@@ -38,6 +38,26 @@ class DownloadsCleanupService(
     private val cleanupLock = ReentrantLock()
 
     /**
+     * Runs download cleanup once after a configurable delay on startup.
+     * Uses the same pattern as IPTV sync: @Scheduled with initialDelay.
+     * Default 15s ensures it completes before IPTV content sync (30s after start).
+     */
+    @Scheduled(
+        initialDelayString = "#{T(java.time.Duration).parse(@environment.getProperty('debridav.downloads-cleanup-startup-delay', 'PT15S')).toMillis()}",
+        fixedDelay = Long.MAX_VALUE
+    )
+    fun runCleanupOnStartup() {
+        try {
+            logger.info("Running download cleanup on startup")
+            cleanupAbandonedFiles(dryRun = false)
+            cleanupOrphanedTorrentsAndFiles(dryRun = false)
+            logger.info("Download cleanup on startup completed")
+        } catch (e: Exception) {
+            logger.warn("Download cleanup on startup failed: ${e.message}", e)
+        }
+    }
+
+    /**
      * Scheduled orphan cleanup. Runs periodically instead of on each add-torrent request
      * to avoid DB connection pool exhaustion when Radarr/Sonarr send multiple add requests concurrently.
      * Interval is controlled by debridav.downloads-cleanup-time-based-threshold-minutes (default: 10).
@@ -181,9 +201,15 @@ class DownloadsCleanupService(
             val path = it.fileSystemPath() ?: it.path ?: "unknown"
             "$path (id=${it.id}, name=${it.name})"
         }.joinToString(", "))
+        logger.trace("Querying database for orphaned torrent records (LIVE with no files)...")
+        val orphanedTorrentRecords = torrentRepository.findLiveTorrentsWithNoFiles(Status.LIVE)
+        logger.debug("Found {} orphaned torrent record(s) (LIVE with no files)", orphanedTorrentRecords.size)
+        logger.trace("Orphaned torrent records: {}", orphanedTorrentRecords.map {
+            "${it.name} (id=${it.id}, hash=${it.hash})"
+        }.joinToString(", "))
         
-        if (abandonedFiles.isEmpty() && emptyDirectories.isEmpty() && brokenTreeDirectories.isEmpty()) {
-            logger.info("No abandoned files, empty directories, or broken tree directories found to clean up")
+        if (abandonedFiles.isEmpty() && emptyDirectories.isEmpty() && brokenTreeDirectories.isEmpty() && orphanedTorrentRecords.isEmpty()) {
+            logger.info("No abandoned files, empty directories, broken tree directories, or orphaned torrent records found to clean up")
             return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, deletedDirectoriesCount = 0, dryRun = dryRun)
         }
 
@@ -342,20 +368,46 @@ class DownloadsCleanupService(
             logger.warn("Empty directory cleanup reached iteration limit (100), there may be circular references or other issues")
         }
 
+        // Delete orphaned torrent records (LIVE with no files)
+        var deletedTorrentsCount = 0
+        for (torrent in orphanedTorrentRecords) {
+            try {
+                if (dryRun) {
+                    logger.info("Would delete orphaned torrent record: {} (id={}, hash={})", torrent.name, torrent.id, torrent.hash)
+                    deletedTorrentsCount++
+                } else {
+                    val torrentId = torrent.id
+                    if (torrentId != null && torrentRepository.findById(torrentId).isPresent) {
+                        torrentRepository.delete(torrent)
+                        deletedTorrentsCount++
+                        logger.debug("Deleted orphaned torrent record: {} (id={})", torrent.name, torrent.id)
+                    }
+                }
+            } catch (e: Exception) {
+                val errorMsg = "Failed to delete torrent ${torrent.name}: ${e.message}"
+                logger.error(errorMsg, e)
+                errors.add(errorMsg)
+            }
+        }
+        if (orphanedTorrentRecords.isNotEmpty()) {
+            logger.info("Deleted {} orphaned torrent record(s) (LIVE with no files)", deletedTorrentsCount)
+        }
+
         val result = CleanupResult(
             deletedCount = deletedCount,
             totalSizeBytes = totalSizeBytes,
             deletedDirectoriesCount = deletedDirectoriesCount,
+            deletedTorrentsCount = deletedTorrentsCount,
             errors = errors,
             dryRun = dryRun
         )
 
         if (dryRun) {
-            logger.info("Dry run: Would delete {} abandoned file(s) and {} directory(ies) (empty + broken tree), total size: {} MB", 
-                deletedCount, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("Dry run: Would delete {} abandoned file(s), {} directory(ies) (empty + broken tree), {} orphaned torrent record(s), total size: {} MB", 
+                deletedCount, deletedDirectoriesCount, deletedTorrentsCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
         } else {
-            logger.info("Cleaned up {} abandoned file(s) and {} directory(ies) (empty + broken tree), total size: {} MB", 
-                deletedCount, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("Cleaned up {} abandoned file(s), {} directory(ies) (empty + broken tree), {} orphaned torrent record(s), total size: {} MB", 
+                deletedCount, deletedDirectoriesCount, deletedTorrentsCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
             if (errors.isNotEmpty()) {
                 logger.warn("Encountered {} error(s) during cleanup", errors.size)
             }
@@ -650,10 +702,9 @@ class DownloadsCleanupService(
                         }
                     }
                     
-                    // Mark torrent as deleted
-                    logger.trace("Marking torrent '{}' (id={}) as DELETED", torrentName, torrent.id)
-                    torrent.status = Status.DELETED
-                    torrentRepository.save(torrent)
+                    // Delete torrent record
+                    logger.trace("Deleting torrent record '{}' (id={})", torrentName, torrent.id)
+                    torrentRepository.delete(torrent)
                     
                     deletedCount += torrent.files.size
                     totalSizeBytes += torrentSize
@@ -770,11 +821,35 @@ class DownloadsCleanupService(
         if (iteration >= 100) {
             logger.warn("Empty directory cleanup reached iteration limit (100), there may be circular references or other issues")
         }
+
+        // Delete orphaned torrent records (LIVE with no files)
+        var deletedTorrentsCount = 0
+        val orphanedTorrents = torrentRepository.findLiveTorrentsWithNoFiles(Status.LIVE)
+        for (torrent in orphanedTorrents) {
+            try {
+                if (dryRun) {
+                    logger.info("Would delete orphaned torrent record: {} (id={}, hash={})", torrent.name, torrent.id, torrent.hash)
+                    deletedTorrentsCount++
+                } else {
+                    torrentRepository.delete(torrent)
+                    deletedTorrentsCount++
+                    logger.debug("Deleted orphaned torrent record: {} (id={})", torrent.name, torrent.id)
+                }
+            } catch (e: Exception) {
+                val errorMsg = "Failed to delete torrent ${torrent.name}: ${e.message}"
+                logger.error(errorMsg, e)
+                errors.add(errorMsg)
+            }
+        }
+        if (orphanedTorrents.isNotEmpty()) {
+            logger.info("Deleted {} orphaned torrent record(s) (LIVE with no files)", deletedTorrentsCount)
+        }
         
         val result = CleanupResult(
             deletedCount = deletedCount,
             totalSizeBytes = totalSizeBytes,
             deletedDirectoriesCount = deletedDirectoriesCount,
+            deletedTorrentsCount = deletedTorrentsCount,
             errors = errors,
             dryRun = dryRun
         )
@@ -789,12 +864,12 @@ class DownloadsCleanupService(
         
         if (dryRun) {
             logger.info("=== Cleanup dry run completed ({}) ===", cleanupMode)
-            logger.info("Would delete: {} orphaned file(s), {} orphaned torrent(s), {} directory(ies) (empty + broken tree), total size: {} MB", 
-                orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("Would delete: {} orphaned file(s), {} orphaned torrent(s), {} directory(ies) (empty + broken tree), {} orphaned torrent record(s), total size: {} MB", 
+                orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, deletedTorrentsCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
         } else {
             logger.info("=== Cleanup completed ({}) ===", cleanupMode)
-            logger.info("Deleted: {} orphaned file(s), {} orphaned torrent(s), {} directory(ies) (empty + broken tree), total size: {} MB", 
-                orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
+            logger.info("Deleted: {} orphaned file(s), {} orphaned torrent(s), {} directory(ies) (empty + broken tree), {} orphaned torrent record(s), total size: {} MB", 
+                orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, deletedTorrentsCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
             if (errors.isNotEmpty()) {
                 logger.warn("Encountered {} error(s) during orphaned cleanup", errors.size)
                 errors.forEach { error ->
@@ -947,6 +1022,7 @@ class DownloadsCleanupService(
         val deletedCount: Int,
         val totalSizeBytes: Long,
         val deletedDirectoriesCount: Int = 0,
+        val deletedTorrentsCount: Int = 0,
         val errors: List<String> = emptyList(),
         val dryRun: Boolean = false
     ) {

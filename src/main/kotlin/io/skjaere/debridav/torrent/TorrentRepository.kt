@@ -5,6 +5,7 @@ import io.skjaere.debridav.fs.DbEntity
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.CrudRepository
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 
 @Repository
@@ -34,4 +35,11 @@ interface TorrentRepository : CrudRepository<Torrent, Long> {
      */
     @Query("SELECT DISTINCT t FROM Torrent t LEFT JOIN FETCH t.category WHERE t.status = :status AND t.savePath LIKE :savePathPrefix%")
     fun findAllByStatusAndSavePathPrefixWithCategory(status: Status, savePathPrefix: String): List<Torrent>
+
+    /**
+     * Finds LIVE torrents that have no files linked in torrent_files.
+     * These are orphaned torrent records (e.g. after files were deleted by directory cleanup).
+     */
+    @Query("SELECT t FROM Torrent t WHERE t.status = :status AND SIZE(t.files) = 0")
+    fun findLiveTorrentsWithNoFiles(@Param("status") status: Status): List<Torrent>
 }
