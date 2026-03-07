@@ -165,18 +165,25 @@ class DownloadsCleanupService(
         logger.info("Found {} file(s) not linked to ARR categories (will use {} hour threshold) and {} other abandoned file(s) (will use {} hour threshold)", 
             arrAbandonedFiles.size, arrCleanupAgeHours, otherAbandonedFiles.size, cleanupAgeHours)
         
-        // Find empty directories in downloads folder
+        // Find empty directories and broken tree directories in downloads folder
         val downloadPathPrefix = convertPathToLtree(debridavConfigurationProperties.downloadPath)
         logger.trace("Querying database for empty directories in downloads folder...")
         val emptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
-        logger.debug("Found {} empty directory(ies) in downloads folder", emptyDirectories.size)
-        logger.trace("Empty directories: {}", emptyDirectories.map { 
+        logger.trace("Querying database for broken tree directories (missing parent path)...")
+        val brokenTreeDirectories = debridFileRepository.findDirectoriesWithMissingParentPath(downloadPathPrefix)
+        logger.debug("Found {} empty directory(ies) and {} broken tree directory(ies) in downloads folder",
+            emptyDirectories.size, brokenTreeDirectories.size)
+        logger.trace("Empty directories: {}", emptyDirectories.map {
+            val path = it.fileSystemPath() ?: it.path ?: "unknown"
+            "$path (id=${it.id}, name=${it.name})"
+        }.joinToString(", "))
+        logger.trace("Broken tree directories: {}", brokenTreeDirectories.map {
             val path = it.fileSystemPath() ?: it.path ?: "unknown"
             "$path (id=${it.id}, name=${it.name})"
         }.joinToString(", "))
         
-        if (abandonedFiles.isEmpty() && emptyDirectories.isEmpty()) {
-            logger.info("No abandoned files or empty directories found to clean up")
+        if (abandonedFiles.isEmpty() && emptyDirectories.isEmpty() && brokenTreeDirectories.isEmpty()) {
+            logger.info("No abandoned files, empty directories, or broken tree directories found to clean up")
             return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, deletedDirectoriesCount = 0, dryRun = dryRun)
         }
 
@@ -231,9 +238,44 @@ class DownloadsCleanupService(
             }
         }
         
+        // Clean up broken tree directories first (missing parent path - ltree integrity)
+        var deletedDirectoriesCount = 0
+        for (directory in brokenTreeDirectories) {
+            try {
+                val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
+                if (dryRun) {
+                    logger.info("Would delete broken tree directory: {} (id={}, parent path missing)", dirPath, directory.id)
+                    deletedDirectoriesCount++
+                } else {
+                    val dirId = directory.id
+                    if (dirId != null && debridFileRepository.findById(dirId).isPresent) {
+                        logger.info("Deleting broken tree directory: {} (id={})", dirPath, directory.id)
+                        try {
+                            databaseFileService.deleteDirectory(directory)
+                            deletedDirectoriesCount++
+                            logger.trace("Successfully deleted broken tree directory: {}", dirPath)
+                        } catch (e: org.hibernate.StaleStateException) {
+                            logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                        } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                            logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                        }
+                    } else {
+                        logger.debug("Directory {} (id={}) no longer exists in database, skipping", dirPath, dirId)
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                    logger.debug("Directory ${directory.name} (id=${directory.id}) was already deleted, skipping")
+                } else {
+                    val errorMsg = "Failed to delete broken tree directory ${directory.name}: ${e.message}"
+                    logger.error(errorMsg, e)
+                    errors.add(errorMsg)
+                }
+            }
+        }
+
         // Clean up empty directories after files are deleted
         // Use a loop to recursively clean up parent directories that become empty
-        var deletedDirectoriesCount = 0
         var iteration = 0
         var currentEmptyDirectories = emptyDirectories
         
@@ -309,10 +351,10 @@ class DownloadsCleanupService(
         )
 
         if (dryRun) {
-            logger.info("Dry run: Would delete {} abandoned file(s) and {} empty directory(ies), total size: {} MB", 
+            logger.info("Dry run: Would delete {} abandoned file(s) and {} directory(ies) (empty + broken tree), total size: {} MB", 
                 deletedCount, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
         } else {
-            logger.info("Cleaned up {} abandoned file(s) and {} empty directory(ies), total size: {} MB", 
+            logger.info("Cleaned up {} abandoned file(s) and {} directory(ies) (empty + broken tree), total size: {} MB", 
                 deletedCount, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
             if (errors.isNotEmpty()) {
                 logger.warn("Encountered {} error(s) during cleanup", errors.size)
@@ -366,15 +408,15 @@ class DownloadsCleanupService(
         logger.debug("=== Starting orphaned torrents/files cleanup (dryRun={}) ===", dryRun)
         
         // Read phase: Use read-only transaction to find orphaned content
-        val (orphanedFiles, orphanedTorrents, emptyDirectories) = findOrphanedContent()
+        val (orphanedFiles, orphanedTorrents, emptyDirectories, brokenTreeDirectories) = findOrphanedContent()
         
-        if (orphanedFiles.isEmpty() && orphanedTorrents.isEmpty() && emptyDirectories.isEmpty()) {
+        if (orphanedFiles.isEmpty() && orphanedTorrents.isEmpty() && emptyDirectories.isEmpty() && brokenTreeDirectories.isEmpty()) {
             logger.debug("No orphaned content found, skipping cleanup")
             return CleanupResult(deletedCount = 0, totalSizeBytes = 0L, dryRun = dryRun)
         }
         
         // Write phase: Use separate transactions for deletions
-        return deleteOrphanedContent(orphanedFiles, orphanedTorrents, emptyDirectories, dryRun)
+        return deleteOrphanedContent(orphanedFiles, orphanedTorrents, emptyDirectories, brokenTreeDirectories, dryRun)
     }
     
     /**
@@ -382,13 +424,13 @@ class DownloadsCleanupService(
      * This method performs all database queries in a single read-only transaction.
      */
     @Transactional(readOnly = true)
-    private fun findOrphanedContent(): Triple<List<RemotelyCachedEntity>, List<Torrent>, List<DbDirectory>> {
+    private fun findOrphanedContent(): OrphanedContentResult {
         val arrCategories = getArrCategories()
         logger.trace("ARR categories found: {}", arrCategories.joinToString(", "))
         
         if (arrCategories.isEmpty()) {
             logger.debug("No ARR categories found, skipping orphaned cleanup")
-            return Triple(emptyList(), emptyList(), emptyList())
+            return OrphanedContentResult(emptyList(), emptyList(), emptyList(), emptyList())
         }
 
         val useTimeBased = debridavConfigurationProperties.enableDownloadsCleanupTimeBased
@@ -412,11 +454,18 @@ class DownloadsCleanupService(
         logger.trace("Download path prefix (ltree): {}", downloadPathPrefix)
         logger.trace("Cutoff time: {} (useTimeBased={})", if (useTimeBased) Instant.ofEpochMilli(cutoffTime) else "N/A (immediate)", useTimeBased)
         
-        // Find empty directories in downloads folder (for cleanup after files are deleted)
+        // Find empty directories and broken tree directories in downloads folder
         logger.trace("Querying database for empty directories in downloads folder...")
         val emptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
-        logger.debug("Found {} empty directory(ies) in downloads folder", emptyDirectories.size)
+        logger.trace("Querying database for broken tree directories (missing parent path)...")
+        val brokenTreeDirectories = debridFileRepository.findDirectoriesWithMissingParentPath(downloadPathPrefix)
+        logger.debug("Found {} empty directory(ies) and {} broken tree directory(ies) in downloads folder",
+            emptyDirectories.size, brokenTreeDirectories.size)
         logger.trace("Empty directories: {}", emptyDirectories.map { 
+            val path = it.fileSystemPath() ?: it.path ?: "unknown"
+            "$path (id=${it.id}, name=${it.name})"
+        }.joinToString(", "))
+        logger.trace("Broken tree directories: {}", brokenTreeDirectories.map {
             val path = it.fileSystemPath() ?: it.path ?: "unknown"
             "$path (id=${it.id}, name=${it.name})"
         }.joinToString(", "))
@@ -473,7 +522,7 @@ class DownloadsCleanupService(
             "${it.name} (id=${it.id}, category=${it.category?.name ?: "null"}, files=${it.files.size}, created=${it.created})"
         }.joinToString(", "))
         
-        return Triple(orphanedFiles, orphanedTorrents, emptyDirectories)
+        return OrphanedContentResult(orphanedFiles, orphanedTorrents, emptyDirectories, brokenTreeDirectories)
     }
     
     /**
@@ -485,6 +534,7 @@ class DownloadsCleanupService(
         orphanedFiles: List<RemotelyCachedEntity>,
         orphanedTorrents: List<Torrent>,
         emptyDirectories: List<DbDirectory>,
+        brokenTreeDirectories: List<DbDirectory>,
         dryRun: Boolean
     ): CleanupResult {
         var deletedCount = 0
@@ -616,9 +666,44 @@ class DownloadsCleanupService(
             }
         }
         
+        // Clean up broken tree directories first (missing parent path - ltree integrity)
+        var deletedDirectoriesCount = 0
+        for (directory in brokenTreeDirectories) {
+            try {
+                val dirPath = directory.fileSystemPath() ?: directory.path ?: "unknown"
+                if (dryRun) {
+                    logger.info("Would delete broken tree directory: {} (id={}, parent path missing)", dirPath, directory.id)
+                    deletedDirectoriesCount++
+                } else {
+                    val dirId = directory.id
+                    if (dirId != null && debridFileRepository.findById(dirId).isPresent) {
+                        logger.info("Deleting broken tree directory: {} (id={})", dirPath, directory.id)
+                        try {
+                            databaseFileService.deleteDirectory(directory)
+                            deletedDirectoriesCount++
+                            logger.trace("Successfully deleted broken tree directory: {}", dirPath)
+                        } catch (e: org.hibernate.StaleStateException) {
+                            logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                        } catch (e: org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                            logger.debug("Directory {} (id={}) was already deleted by another thread, skipping", dirPath, dirId)
+                        }
+                    } else {
+                        logger.debug("Directory {} (id={}) no longer exists in database, skipping", dirPath, dirId)
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is org.hibernate.StaleStateException || e is org.springframework.orm.ObjectOptimisticLockingFailureException) {
+                    logger.debug("Directory ${directory.name} (id=${directory.id}) was already deleted, skipping")
+                } else {
+                    val errorMsg = "Failed to delete broken tree directory ${directory.name}: ${e.message}"
+                    logger.error(errorMsg, e)
+                    errors.add(errorMsg)
+                }
+            }
+        }
+
         // Clean up empty directories after files are deleted
         // Use a loop to recursively clean up parent directories that become empty
-        var deletedDirectoriesCount = 0
         var iteration = 0
         var currentEmptyDirectories = emptyDirectories
         
@@ -704,11 +789,11 @@ class DownloadsCleanupService(
         
         if (dryRun) {
             logger.info("=== Cleanup dry run completed ({}) ===", cleanupMode)
-            logger.info("Would delete: {} orphaned file(s), {} orphaned torrent(s), {} empty directory(ies), total size: {} MB", 
+            logger.info("Would delete: {} orphaned file(s), {} orphaned torrent(s), {} directory(ies) (empty + broken tree), total size: {} MB", 
                 orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
         } else {
             logger.info("=== Cleanup completed ({}) ===", cleanupMode)
-            logger.info("Deleted: {} orphaned file(s), {} orphaned torrent(s), {} empty directory(ies), total size: {} MB", 
+            logger.info("Deleted: {} orphaned file(s), {} orphaned torrent(s), {} directory(ies) (empty + broken tree), total size: {} MB", 
                 orphanedFiles.size, orphanedTorrents.size, deletedDirectoriesCount, String.format("%.2f", totalSizeBytes / 1_000_000.0))
             if (errors.isNotEmpty()) {
                 logger.warn("Encountered {} error(s) during orphaned cleanup", errors.size)
@@ -850,6 +935,13 @@ class DownloadsCleanupService(
         diagnostic.appendLine("=== End Diagnostic ===")
         return diagnostic.toString()
     }
+
+    private data class OrphanedContentResult(
+        val orphanedFiles: List<RemotelyCachedEntity>,
+        val orphanedTorrents: List<Torrent>,
+        val emptyDirectories: List<DbDirectory>,
+        val brokenTreeDirectories: List<DbDirectory>
+    )
 
     data class CleanupResult(
         val deletedCount: Int,

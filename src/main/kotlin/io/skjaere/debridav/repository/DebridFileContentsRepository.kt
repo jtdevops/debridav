@@ -190,6 +190,29 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
         downloadPathPrefix: String
     ): List<DbDirectory>
 
+    /**
+     * Finds directories whose parent path does not exist in the table (broken ltree hierarchy).
+     * These should be deleted to restore tree integrity.
+     * Ordered by depth ascending (shallowest first) so deleting a parent cascades to children.
+     */
+    @Query(
+        """
+        SELECT d.* FROM db_item d
+        WHERE d.db_item_type = 'DbDirectory'
+        AND d.path IS NOT NULL
+        AND nlevel(d.path) > 1
+        AND d.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND NOT EXISTS (
+            SELECT 1 FROM db_item p
+            WHERE p.db_item_type = 'DbDirectory'
+            AND p.path = subpath(d.path, 0, nlevel(d.path) - 1)
+        )
+        ORDER BY nlevel(d.path) ASC
+        """,
+        nativeQuery = true
+    )
+    fun findDirectoriesWithMissingParentPath(downloadPathPrefix: String): List<DbDirectory>
+
     @Query(
         """
         SELECT dir.* FROM db_item dir
