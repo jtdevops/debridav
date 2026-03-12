@@ -71,7 +71,7 @@ data class DebridavConfigurationProperties(
     val rcloneArrsLocalVideoFileIptvBypassProviders: String? = null, // Comma-separated list of IPTV provider names to bypass local video serving (use "*" for all providers)
     val debugArrTorrentInfoContentPathSuffix: String? = null, // Optional suffix to append to contentPath in ARR torrent info API responses (qBittorrent emulation /api/v2/torrents/info endpoint used by Sonarr/Radarr) for debugging purposes (e.g., "__DEBUG_TESTING")
     // Downloads cleanup configuration
-    val enableDownloadsCleanupTimeBased: Boolean = false, // If true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes. If false (default), cleanup is immediate (no age check).
+    val enableDownloadsCleanupTimeBased: Boolean = true, // If true (default), cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes. If false, cleanup is immediate (no age check).
     val downloadsCleanupTimeBasedThresholdMinutes: Long = 10, // Minutes: time-based cleanup threshold (when enableDownloadsCleanupTimeBased is true) and scheduled orphan cleanup interval
     // STRM file configuration
     val strmEnabled: Boolean = false, // Enable/disable STRM feature

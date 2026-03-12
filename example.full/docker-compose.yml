@@ -289,10 +289,10 @@ services:
       - DEBRIDAV_ENABLE_LOCAL_ENTITY_CONVERSION_STARTUP_SCAN=${DEBRIDAV_ENABLE_LOCAL_ENTITY_CONVERSION_STARTUP_SCAN:-false}
 
       # Downloads cleanup configuration
-      # Enable time-based cleanup for downloads folder (default: false = immediate cleanup, no age check)
-      # When true, cleanup only removes files/torrents older than downloadsCleanupTimeBasedThresholdMinutes
-      # When false (default), cleanup is immediate (no age check) - all orphaned content is removed immediately
-      - DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED=${DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED:-false}
+      # Enable time-based cleanup for downloads folder (default: true = only remove files older than threshold)
+      # When true (default), cleanup only removes files/torrents older than downloads-cleanup-time-based-threshold-minutes
+      # When false, cleanup is immediate (no age check) - all orphaned content is removed immediately
+      - DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED=${DEBRIDAV_ENABLE_DOWNLOADS_CLEANUP_TIME_BASED:-true}
       # Time threshold in minutes (default: 10). Used for:
       # - Time-based cleanup: only when enable-downloads-cleanup-time-based is true; files/torrents older than this are cleaned up
       # - Scheduled orphan cleanup: interval in minutes at which orphan cleanup runs (every N minutes)
