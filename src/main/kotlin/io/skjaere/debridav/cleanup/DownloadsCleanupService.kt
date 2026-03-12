@@ -516,23 +516,12 @@ class DownloadsCleanupService(
         logger.trace("Download path prefix (ltree): {}", downloadPathPrefix)
         logger.trace("Cutoff time: {} (useTimeBased={})", if (useTimeBased) Instant.ofEpochMilli(cutoffTime) else "N/A (immediate)", useTimeBased)
         
-        // Find empty directories and broken tree directories in downloads folder
-        // When time-based cleanup is enabled, only include empty dirs older than threshold
+        // Find empty directories and broken tree directories in downloads folder.
+        // Empty dirs are NOT filtered by age - we delete files first (using file last_modified),
+        // then clean up any empty folders. The folder's last_modified is irrelevant (e.g. shared
+        // parent can be older than subfolders when multiple torrents use same root folder name).
         logger.trace("Querying database for empty directories in downloads folder...")
-        val allEmptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
-        val emptyDirectories = if (useTimeBased) {
-            allEmptyDirectories.filter { dir ->
-                val lastMod = dir.lastModified
-                lastMod != null && lastMod < cutoffTime
-            }.also { filtered ->
-                if (allEmptyDirectories.size != filtered.size) {
-                    logger.trace("Filtered {} empty directory(ies) to {} based on age threshold (last_modified < cutoff)", 
-                        allEmptyDirectories.size, filtered.size)
-                }
-            }
-        } else {
-            allEmptyDirectories
-        }
+        val emptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
         logger.trace("Querying database for broken tree directories (missing parent path)...")
         val brokenTreeDirectories = debridFileRepository.findDirectoriesWithMissingParentPath(downloadPathPrefix)
         logger.debug("Found {} empty directory(ies) and {} broken tree directory(ies) in downloads folder",
