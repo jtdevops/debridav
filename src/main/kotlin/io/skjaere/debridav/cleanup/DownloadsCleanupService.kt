@@ -489,18 +489,19 @@ class DownloadsCleanupService(
     private fun findOrphanedContent(): OrphanedContentResult {
         val arrCategories = getArrCategories()
         logger.trace("ARR categories found: {}", arrCategories.joinToString(", "))
+
+        val useTimeBased = debridavConfigurationProperties.enableDownloadsCleanupTimeBased
         
-        if (arrCategories.isEmpty()) {
+        // When not time-based, we need ARR categories to determine orphaned content
+        if (!useTimeBased && arrCategories.isEmpty()) {
             logger.debug("No ARR categories found, skipping orphaned cleanup")
             return OrphanedContentResult(emptyList(), emptyList(), emptyList(), emptyList())
         }
-
-        val useTimeBased = debridavConfigurationProperties.enableDownloadsCleanupTimeBased
         val thresholdMinutes = debridavConfigurationProperties.downloadsCleanupTimeBasedThresholdMinutes
         
         if (useTimeBased) {
-            logger.debug("Cleaning up torrents/files not linked to active categories (time-based, threshold: {} minutes): {}", 
-                thresholdMinutes, arrCategories.joinToString(", "))
+            logger.debug("Cleaning up ALL files older than {} minutes (time-based: Radarr/Sonarr should process within ~1 min; stale files indicate something went wrong)", 
+                thresholdMinutes)
         } else {
             logger.debug("Cleaning up torrents/files not linked to active categories (immediate, no age check): {}", 
                 arrCategories.joinToString(", "))
@@ -535,14 +536,28 @@ class DownloadsCleanupService(
             "$path (id=${it.id}, name=${it.name})"
         }.joinToString(", "))
         
-        // Find files not linked to any active category
-        logger.trace("Querying database for orphaned files...")
-        val orphanedFiles = debridFileRepository.findAbandonedFilesNotLinkedToArrCategories(
-            downloadPathPrefix = downloadPathPrefix,
-            cutoffTime = cutoffTime,
-            arrCategories = arrCategories
-        )
-        logger.debug("Found {} orphaned file(s) not linked to ARR categories", orphanedFiles.size)
+        // When time-based: delete ALL files older than threshold (regardless of torrent linkage).
+        // Radarr/Sonarr should process within ~1 min; stale files indicate something went wrong.
+        // When not time-based: delete only orphaned files (not linked to ARR categories).
+        val orphanedFiles = if (useTimeBased) {
+            logger.trace("Querying database for ALL files in downloads older than threshold...")
+            debridFileRepository.findFilesInDownloadsOlderThan(
+                downloadPathPrefix = downloadPathPrefix,
+                cutoffTime = cutoffTime
+            ).also { files ->
+                logger.debug("Found {} file(s) in downloads older than {} minutes (will delete regardless of torrent linkage)", 
+                    files.size, thresholdMinutes)
+            }
+        } else {
+            logger.trace("Querying database for orphaned files (not linked to ARR categories)...")
+            debridFileRepository.findAbandonedFilesNotLinkedToArrCategories(
+                downloadPathPrefix = downloadPathPrefix,
+                cutoffTime = cutoffTime,
+                arrCategories = arrCategories
+            ).also { files ->
+                logger.debug("Found {} orphaned file(s) not linked to ARR categories", files.size)
+            }
+        }
         logger.trace("Orphaned files: {}", orphanedFiles.map { file ->
             val path = file.directory?.let { dir ->
                 dir.fileSystemPath()?.let { dirPath -> "$dirPath/${file.name}" } ?: file.name
@@ -550,39 +565,28 @@ class DownloadsCleanupService(
             "$path (id=${file.id}, size=${file.size}, lastModified=${file.lastModified})"
         }.joinToString(", "))
         
-        // Find torrents not linked to any active category
-        // Use optimized query that filters in database and loads category with JOIN FETCH
-        logger.trace("Querying database for LIVE torrents in downloads folder...")
-        val downloadPath = debridavConfigurationProperties.downloadPath
-        val allTorrents = torrentRepository.findAllByStatusAndSavePathPrefixWithCategory(
-            status = Status.LIVE,
-            savePathPrefix = downloadPath
-        )
-        logger.trace("Found {} LIVE torrent(s) in downloads folder", allTorrents.size)
-        
-        val orphanedTorrents = allTorrents.filter { torrent ->
-            val categoryName = torrent.category?.name
-            val isOrphaned = categoryName == null || categoryName !in arrCategories
-            logger.trace("Torrent '{}' (id={}, category={}, savePath={}): isOrphaned={}", 
-                torrent.name, torrent.id, categoryName ?: "null", torrent.savePath, isOrphaned)
-            isOrphaned
-        }.filter { torrent ->
-            // Age check (already filtered by savePath in database query)
-            val ageCheck = if (useTimeBased) {
-                val created = torrent.created?.toEpochMilli() ?: Long.MAX_VALUE
-                val passesAgeCheck = created < cutoffTime
-                logger.trace("Torrent '{}' age check: created={}, cutoff={}, passes={}", 
-                    torrent.name, if (created != Long.MAX_VALUE) Instant.ofEpochMilli(created) else "null", 
-                    Instant.ofEpochMilli(cutoffTime), passesAgeCheck)
-                passesAgeCheck
-            } else {
-                true
+        // When time-based: we delete files by age only; torrent records with no files are cleaned separately.
+        // When not time-based: find torrents not linked to any active category and delete them + their files.
+        val orphanedTorrents = if (useTimeBased) {
+            emptyList<Torrent>()
+        } else {
+            logger.trace("Querying database for LIVE torrents in downloads folder...")
+            val downloadPath = debridavConfigurationProperties.downloadPath
+            val allTorrents = torrentRepository.findAllByStatusAndSavePathPrefixWithCategory(
+                status = Status.LIVE,
+                savePathPrefix = downloadPath
+            )
+            logger.trace("Found {} LIVE torrent(s) in downloads folder", allTorrents.size)
+            allTorrents.filter { torrent ->
+                val categoryName = torrent.category?.name
+                val isOrphaned = categoryName == null || categoryName !in arrCategories
+                logger.trace("Torrent '{}' (id={}, category={}, savePath={}): isOrphaned={}", 
+                    torrent.name, torrent.id, categoryName ?: "null", torrent.savePath, isOrphaned)
+                isOrphaned
+            }.also { filtered ->
+                logger.debug("Found {} orphaned torrent(s) not linked to ARR categories", filtered.size)
             }
-            logger.trace("Torrent '{}' filter: ageCheck={}, shouldInclude={}", 
-                torrent.name, ageCheck, ageCheck)
-            ageCheck
         }
-        logger.debug("Found {} orphaned torrent(s) not linked to ARR categories", orphanedTorrents.size)
         logger.trace("Orphaned torrents: {}", orphanedTorrents.map { 
             "${it.name} (id=${it.id}, category=${it.category?.name ?: "null"}, files=${it.files.size}, created=${it.created})"
         }.joinToString(", "))

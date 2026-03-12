@@ -131,6 +131,28 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
         cutoffTime: Long
     ): List<RemotelyCachedEntity>
 
+    /**
+     * Finds ALL files in the downloads folder older than the cutoff time, regardless of torrent linkage.
+     * Used when time-based cleanup is enabled: Radarr/Sonarr should process torrents within ~1 minute;
+     * files older than threshold indicate something went wrong, so clean them up even if still linked.
+     */
+    @Query(
+        """
+        SELECT rce.* FROM db_item rce
+        INNER JOIN db_item dir ON rce.directory_id = dir.id
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND rce.db_item_type = 'RemotelyCachedEntity'
+        AND rce.last_modified < :cutoffTime
+        ORDER BY rce.last_modified ASC
+        """,
+        nativeQuery = true
+    )
+    fun findFilesInDownloadsOlderThan(
+        downloadPathPrefix: String,
+        cutoffTime: Long
+    ): List<RemotelyCachedEntity>
+
     @Query(
         """
         SELECT rce.* FROM db_item rce
