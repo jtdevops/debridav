@@ -280,8 +280,20 @@ class TorrentService(
         val hash = getHashFromMagnet(magnet) ?: error("could not get hash from magnet")
         val torrent = torrentRepository.getByHashIgnoreCase(hash.hash) ?: Torrent()
         
-        // If reusing an existing torrent, clean up old files first
+        // If reusing an existing torrent, only replace files if torrent is older than threshold.
+        // Radarr/Sonarr may send duplicate add requests; deleting files < threshold old causes
+        // the "immediate cleanup" issue when debridav.downloads-cleanup-time-based-threshold-minutes is set.
         if (torrent.id != null) {
+            val thresholdMinutes = debridavConfigurationProperties.downloadsCleanupTimeBasedThresholdMinutes
+            val createdMs = torrent.created?.toEpochMilli() ?: 0L
+            val ageMs = System.currentTimeMillis() - createdMs
+            if (ageMs < thresholdMinutes * 60 * 1000) {
+                logger.info(
+                    "Torrent '{}' (hash={}) was created {} min ago (< {} min threshold), skipping file replacement to avoid deleting recent files",
+                    torrent.name, hash.hash, ageMs / 60_000, thresholdMinutes
+                )
+                return torrent
+            }
             torrent.files.forEach { file ->
                 fileService.deleteFile(file)
             }

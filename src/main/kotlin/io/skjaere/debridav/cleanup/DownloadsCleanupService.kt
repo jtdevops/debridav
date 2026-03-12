@@ -128,12 +128,22 @@ class DownloadsCleanupService(
 
         logger.info("Searching for abandoned files not linked to ARR categories {} in downloads folder (older than {} hours)", 
             arrCategoriesList.joinToString(", "), cleanupAgeHours)
-        
-        val abandonedFiles = debridFileRepository.findAbandonedFilesNotLinkedToArrCategories(
-            downloadPathPrefix = downloadPathPrefix,
-            cutoffTime = cutoffTime,
-            arrCategories = arrCategoriesList
-        )
+
+        // When no ARR categories exist, IN (:arrCategories) with empty list can cause SQL issues.
+        // Fall back to findAbandonedFilesInDownloads (all abandoned files) with same cutoff.
+        val abandonedFiles = if (arrCategoriesList.isEmpty()) {
+            logger.debug("No ARR categories configured, using findAbandonedFilesInDownloads instead")
+            debridFileRepository.findAbandonedFilesInDownloads(
+                downloadPathPrefix = downloadPathPrefix,
+                cutoffTime = cutoffTime
+            )
+        } else {
+            debridFileRepository.findAbandonedFilesNotLinkedToArrCategories(
+                downloadPathPrefix = downloadPathPrefix,
+                cutoffTime = cutoffTime,
+                arrCategories = arrCategoriesList
+            )
+        }
 
         logger.info("Found {} abandoned file(s) not linked to ARR categories in downloads folder", abandonedFiles.size)
         return abandonedFiles
@@ -507,8 +517,22 @@ class DownloadsCleanupService(
         logger.trace("Cutoff time: {} (useTimeBased={})", if (useTimeBased) Instant.ofEpochMilli(cutoffTime) else "N/A (immediate)", useTimeBased)
         
         // Find empty directories and broken tree directories in downloads folder
+        // When time-based cleanup is enabled, only include empty dirs older than threshold
         logger.trace("Querying database for empty directories in downloads folder...")
-        val emptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
+        val allEmptyDirectories = debridFileRepository.findEmptyDirectoriesInDownloads(downloadPathPrefix)
+        val emptyDirectories = if (useTimeBased) {
+            allEmptyDirectories.filter { dir ->
+                val lastMod = dir.lastModified
+                lastMod != null && lastMod < cutoffTime
+            }.also { filtered ->
+                if (allEmptyDirectories.size != filtered.size) {
+                    logger.trace("Filtered {} empty directory(ies) to {} based on age threshold (last_modified < cutoff)", 
+                        allEmptyDirectories.size, filtered.size)
+                }
+            }
+        } else {
+            allEmptyDirectories
+        }
         logger.trace("Querying database for broken tree directories (missing parent path)...")
         val brokenTreeDirectories = debridFileRepository.findDirectoriesWithMissingParentPath(downloadPathPrefix)
         logger.debug("Found {} empty directory(ies) and {} broken tree directory(ies) in downloads folder",
