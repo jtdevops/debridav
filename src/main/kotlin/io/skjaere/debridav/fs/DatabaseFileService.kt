@@ -25,8 +25,10 @@ import org.hibernate.engine.jdbc.BlobProxy
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionTemplate
+import org.springframework.transaction.TransactionDefinition
 import java.io.InputStream
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -49,6 +51,9 @@ class DatabaseFileService(
     private val logger = LoggerFactory.getLogger(DatabaseFileService::class.java)
     private val lock = Mutex()
     private val transactionTemplate = TransactionTemplate(transactionManager)
+    private val transactionTemplateRequiresNew = TransactionTemplate(transactionManager).apply {
+        propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW
+    }
     private val defaultDirectories = listOf("/", "/downloads", "/tv", "/movies")
 
     init {
@@ -73,45 +78,45 @@ class DatabaseFileService(
 
     /**
      * Creates a debrid file entry in the database.
+     * For whitelisted files (e.g. subtitles), the HTTP download runs outside any transaction
+     * so the DB connection is not held during the download (avoids pool exhaustion when
+     * Radarr adds many videos with subtitles in parallel).
+     *
      * @param skipLocalEntityConversion If true, skips the LocalEntity conversion even if the file
      *        extension is whitelisted. Useful for folder mapping sync where we want to keep files
      *        as RemotelyCachedEntity pointing to the provider's WebDAV URL.
      */
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents, skipLocalEntityConversion: Boolean
     ): RemotelyCachedEntity = runBlocking {
-        val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
         val name = path.substringAfterLast("/")
-        
-        // Check if file extension is whitelisted for local storage (unless skipped)
-        val shouldStoreAsLocal = !skipLocalEntityConversion && 
+        val shouldStoreAsLocal = !skipLocalEntityConversion &&
             debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(name)
-        
-        if (shouldStoreAsLocal) {
-            // Check if we have debrid links available for download
-            val hasDownloadableLink = when {
-                debridFileContents is DebridIptvContent -> {
-                    val iptvFile = debridFileContents.debridLinks.firstOrNull { it is IptvFile } as? IptvFile
-                    iptvFile?.link != null
-                }
-                else -> {
-                    val cachedFile = debridFileContents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
-                    cachedFile?.link != null
-                }
+        val hasDownloadableLink = shouldStoreAsLocal && when {
+            debridFileContents is DebridIptvContent -> {
+                val iptvFile = debridFileContents.debridLinks.firstOrNull { it is IptvFile } as? IptvFile
+                iptvFile?.link != null
             }
-            
-            if (hasDownloadableLink) {
-                // Delete existing file if it exists (could be LocalEntity or RemotelyCachedEntity)
-                debridFileRepository.findByDirectoryAndName(directory, name)?.let { existingFile ->
+            else -> {
+                val cachedFile = debridFileContents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+                cachedFile?.link != null
+            }
+        }
+
+        if (shouldStoreAsLocal && hasDownloadableLink) {
+            // Setup in short tx, then download (no tx), then save (short tx).
+            // This avoids holding a DB connection during the HTTP download.
+            val directory = transactionTemplateRequiresNew.execute<DbDirectory?> {
+                val dir = getOrCreateDirectory(path.substringBeforeLast("/"))
+                debridFileRepository.findByDirectoryAndName(dir, name)?.let { existingFile ->
                     when (existingFile) {
                         is RemotelyCachedEntity -> {
                             when (existingFile.contents) {
                                 is DebridCachedTorrentContent -> debridFileRepository.unlinkFileFromTorrents(existingFile)
                                 is DebridCachedUsenetReleaseContent -> debridFileRepository.unlinkFileFromUsenet(existingFile)
-                                is io.skjaere.debridav.fs.DebridIptvContent -> {
+                                is io.skjaere.debridav.fs.DebridIptvContent ->
                                     debridFileRepository.unlinkFileFromTorrents(existingFile)
-                                }
                             }
                             fileChunkCachingService.deleteChunksForFile(existingFile)
                             debridFileRepository.deleteDbEntityByHash(existingFile.hash!!)
@@ -122,46 +127,43 @@ class DatabaseFileService(
                         }
                     }
                 }
-                
-                // Download and store as LocalEntity
-                try {
-                    logger.debug("File {} has whitelisted extension, downloading and storing as LocalEntity", name)
-                    downloadAndStoreAsLocalEntity(path, debridFileContents)
-                    // Return a dummy RemotelyCachedEntity for API compatibility (not saved to DB)
-                    // The actual file is stored as LocalEntity
-                    val fileEntity = RemotelyCachedEntity()
-                    fileEntity.name = name
-                    fileEntity.lastModified = Instant.now().toEpochMilli()
-                    fileEntity.size = debridFileContents.size
-                    fileEntity.mimeType = debridFileContents.mimeType
-                    fileEntity.directory = directory
-                    fileEntity.contents = debridFileContents
-                    fileEntity.hash = hash
-                    return@runBlocking fileEntity
-                } catch (e: Exception) {
-                    logger.warn("Failed to download whitelisted file {}, falling back to RemotelyCachedEntity: {}", name, e.message)
-                    // Fall through to create RemotelyCachedEntity as normal
-                }
-            } else {
-                logger.debug("File {} has whitelisted extension but no download link available yet, creating RemotelyCachedEntity", name)
-                // Fall through to create RemotelyCachedEntity - will be converted later when links are available
+                dir
+            } ?: return@runBlocking transactionTemplate.execute { createRemotelyCachedEntity(path, hash, debridFileContents) }!!
+
+            try {
+                logger.debug("File {} has whitelisted extension, downloading and storing as LocalEntity", name)
+                downloadAndStoreAsLocalEntity(path, debridFileContents)
+                val fileEntity = RemotelyCachedEntity()
+                fileEntity.name = name
+                fileEntity.lastModified = Instant.now().toEpochMilli()
+                fileEntity.size = debridFileContents.size
+                fileEntity.mimeType = debridFileContents.mimeType
+                fileEntity.directory = directory
+                fileEntity.contents = debridFileContents
+                fileEntity.hash = hash
+                return@runBlocking fileEntity
+            } catch (e: Exception) {
+                logger.warn("Failed to download whitelisted file {}, falling back to RemotelyCachedEntity: {}", name, e.message)
             }
+        } else if (shouldStoreAsLocal) {
+            logger.debug("File {} has whitelisted extension but no download link available yet, creating RemotelyCachedEntity", name)
         }
-        
-        // Default behavior: create RemotelyCachedEntity
-        // Overwrite file if it exists
+
+        return@runBlocking transactionTemplate.execute { createRemotelyCachedEntity(path, hash, debridFileContents) }!!
+    }
+
+    private fun createRemotelyCachedEntity(path: String, hash: String, debridFileContents: DebridFileContents): RemotelyCachedEntity {
+        val directory = getOrCreateDirectory(path.substringBeforeLast("/"))
+        val name = path.substringAfterLast("/")
         debridFileRepository.findByDirectoryAndName(directory, name)?.let {
             it as? RemotelyCachedEntity ?: error("type ${it.javaClass.simpleName} exists at path $path")
             when (it.contents) {
                 is DebridCachedTorrentContent -> debridFileRepository.unlinkFileFromTorrents(it)
                 is DebridCachedUsenetReleaseContent -> debridFileRepository.unlinkFileFromUsenet(it)
-                is io.skjaere.debridav.fs.DebridIptvContent -> {
-                    // IPTV content can also be linked to torrents, so unlink it before deletion
-                    debridFileRepository.unlinkFileFromTorrents(it)
-                }
+                is io.skjaere.debridav.fs.DebridIptvContent -> debridFileRepository.unlinkFileFromTorrents(it)
             }
             fileChunkCachingService.deleteChunksForFile(it)
-            debridFileRepository.deleteDbEntityByHash(it.hash!!) // TODO: why doesn't debridFileRepository.delete() work?
+            debridFileRepository.deleteDbEntityByHash(it.hash!!)
         }
         val fileEntity = RemotelyCachedEntity()
         fileEntity.name = path.substringAfterLast("/")
@@ -171,13 +173,8 @@ class DatabaseFileService(
         fileEntity.directory = directory
         fileEntity.contents = debridFileContents
         fileEntity.hash = hash
-
-        // Was originally
-        // debridFileRepository.getByHash("asd")
-        // logger.debug("Creating ${directory.path}/${fileEntity.name}")
-        // fileEntity
         logger.debug("Creating ${directory.path}/${fileEntity.name}")
-        debridFileRepository.save(fileEntity)
+        return debridFileRepository.save(fileEntity)
     }
 
     @Transactional

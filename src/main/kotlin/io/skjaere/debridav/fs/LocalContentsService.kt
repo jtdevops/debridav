@@ -40,7 +40,6 @@ class LocalContentsService(
                 } while (remainingBytesToTransfer > 0)
             }
         }
-
     }
 
     private fun openLobForReading(localEntity: LocalEntity): Int? {
@@ -55,6 +54,8 @@ class LocalContentsService(
     private fun seekToPosition(fd: Int, startPosition: Long) {
         entityManager
             .createNativeQuery("select lo_lseek($fd, $startPosition, $SEEK_SET)")
+            .resultList
+            .firstOrNull()
     }
 
     private fun read(fd: Int, size: Long): ByteArray {
