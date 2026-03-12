@@ -333,7 +333,7 @@ class DownloadsCleanupService(
                         if (dirId != null && debridFileRepository.findById(dirId).isPresent) {
                             logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
                             logger.trace("Directory details: path={}, name={}, lastModified={}", 
-                                directory.path, directory.name, directory.lastModified)
+                                directory.fileSystemPath() ?: directory.path, directory.name, directory.lastModified)
                             try {
                                 databaseFileService.deleteFile(directory)
                                 deletedDirectoriesCount++
@@ -500,7 +500,7 @@ class DownloadsCleanupService(
         val thresholdMinutes = debridavConfigurationProperties.downloadsCleanupTimeBasedThresholdMinutes
         
         if (useTimeBased) {
-            logger.debug("Cleaning up ALL files older than {} minutes (time-based: Radarr/Sonarr should process within ~1 min; stale files indicate something went wrong)", 
+            logger.debug("Cleaning up ALL files older than {} minutes", 
                 thresholdMinutes)
         } else {
             logger.debug("Cleaning up torrents/files not linked to active categories (immediate, no age check): {}", 
@@ -793,7 +793,7 @@ class DownloadsCleanupService(
                         if (dirId != null && debridFileRepository.findById(dirId).isPresent) {
                             logger.info("Deleting empty directory: {} (id={})", dirPath, directory.id)
                             logger.trace("Directory details: path={}, name={}, lastModified={}", 
-                                directory.path, directory.name, directory.lastModified)
+                                directory.fileSystemPath() ?: directory.path, directory.name, directory.lastModified)
                             try {
                                 databaseFileService.deleteFile(directory)
                                 deletedDirectoriesCount++
@@ -961,7 +961,7 @@ class DownloadsCleanupService(
             // Try to find the directory in the database
             val directory = debridFileRepository.getDirectoryByPath(folderPathLtree)
             if (directory != null) {
-                diagnostic.appendLine("Directory found in database: id=${directory.id}, path=${directory.path}")
+                diagnostic.appendLine("Directory found in database: id=${directory.id}, path=${directory.fileSystemPath() ?: directory.path}")
                 diagnostic.appendLine("Recursively checking directory and all subdirectories...")
                 diagnostic.appendLine("")
                 

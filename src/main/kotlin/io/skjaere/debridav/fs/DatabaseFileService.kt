@@ -173,7 +173,7 @@ class DatabaseFileService(
         fileEntity.directory = directory
         fileEntity.contents = debridFileContents
         fileEntity.hash = hash
-        logger.debug("Creating ${directory.path}/${fileEntity.name}")
+        logger.debug("Creating {}", path)
         return debridFileRepository.save(fileEntity)
     }
 
@@ -293,7 +293,7 @@ class DatabaseFileService(
             try {
                 deleteFile(file)
             } catch (e: Exception) {
-                logger.warn("Error deleting file {} in directory tree {}", file.id, path, e)
+                logger.warn("Error deleting file {} in directory tree {}", file.id, directory.fileSystemPath() ?: path, e)
             }
         }
 

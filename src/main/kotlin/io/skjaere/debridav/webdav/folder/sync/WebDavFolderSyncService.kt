@@ -599,7 +599,7 @@ class WebDavFolderSyncService(
                         databaseFileService.deleteDirectory(directory)
                         logger.debug("Deleted orphaned directory: $dirVfsPath")
                     } catch (e: Exception) {
-                        logger.error("Error deleting directory ${directory.path}", e)
+                        logger.error("Error deleting directory ${directory.fileSystemPath() ?: directory.path}", e)
                     }
                 }
             }
