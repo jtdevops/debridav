@@ -37,7 +37,9 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -57,9 +59,11 @@ class IptvRequestService(
     private val responseFileService: IptvResponseFileService,
     private val iptvLoginRateLimitService: IptvLoginRateLimitService,
     private val iptvUrlTemplateRepository: IptvUrlTemplateRepository,
-    private val metadataEnhancer: MetadataEnhancer
+    private val metadataEnhancer: MetadataEnhancer,
+    private val transactionManager: PlatformTransactionManager
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
+    private val transactionTemplate = TransactionTemplate(transactionManager)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     
@@ -1367,9 +1371,10 @@ class IptvRequestService(
         iptvContent: DebridIptvContent,
         remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity
     ): Long? {
-        // Reconstruct full URL from template + suffix (short DB read if needed)
+        // Reconstruct full URL from template + suffix. Must run in transaction because
+        // iptvContent.iptvUrlTemplate is a lazy proxy that requires an active Hibernate session.
         val iptvUrl = try {
-            reconstructFullUrl(iptvContent)
+            reconstructFullUrlInTransaction(iptvContent)
         } catch (e: IllegalStateException) {
             logger.debug("Cannot refetch file size: ${e.message}")
             return null
@@ -2988,29 +2993,61 @@ class IptvRequestService(
     
     /**
      * Reconstructs a full URL from the tokenized URL stored in debrid_links.
-     * Replaces {IPTV_TEMPLATE_URL} token with the actual base URL from template.
-     * 
+     * Fetches the base URL in a transaction to avoid LazyInitializationException when
+     * iptvContent comes from a detached entity (e.g. during streaming).
+     *
      * @throws IllegalStateException if template is missing or IptvFile.link doesn't contain token
      */
-    fun reconstructFullUrl(iptvContent: DebridIptvContent): String {
-        val template = iptvContent.iptvUrlTemplate
-        require(template != null) { 
-            "IPTV URL template is required but missing for content: ${iptvContent.iptvContentId}" 
+    private fun reconstructFullUrlInTransaction(iptvContent: DebridIptvContent): String {
+        val providerName = iptvContent.iptvProviderName
+        require(providerName != null) {
+            "IPTV provider name is required for content: ${iptvContent.iptvContentId}"
         }
-        
-        // Get tokenized URL from debrid_links
+
         val iptvFile = iptvContent.debridLinks.firstOrNull() as? IptvFile
         val tokenizedUrl = iptvFile?.link
         require(tokenizedUrl != null) {
             "IptvFile.link is missing for content: ${iptvContent.iptvContentId}"
         }
-        
-        // Replace token with actual base URL
+
+        if (!tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
+            return tokenizedUrl
+        }
+
+        val baseUrl = transactionTemplate.execute<String?> {
+            iptvUrlTemplateRepository.findByProviderName(providerName)
+                .firstOrNull()
+                ?.baseUrl
+        } ?: throw IllegalStateException(
+            "IPTV URL template not found for provider: $providerName (content: ${iptvContent.iptvContentId})"
+        )
+
+        return tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", baseUrl)
+    }
+
+    /**
+     * Reconstructs a full URL from the tokenized URL stored in debrid_links.
+     * Replaces {IPTV_TEMPLATE_URL} token with the actual base URL from template.
+     * Must be called within an active Hibernate session when iptvContent is attached.
+     *
+     * @throws IllegalStateException if template is missing or IptvFile.link doesn't contain token
+     */
+    fun reconstructFullUrl(iptvContent: DebridIptvContent): String {
+        val template = iptvContent.iptvUrlTemplate
+        require(template != null) {
+            "IPTV URL template is required but missing for content: ${iptvContent.iptvContentId}"
+        }
+
+        val iptvFile = iptvContent.debridLinks.firstOrNull() as? IptvFile
+        val tokenizedUrl = iptvFile?.link
+        require(tokenizedUrl != null) {
+            "IptvFile.link is missing for content: ${iptvContent.iptvContentId}"
+        }
+
         if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
             return tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
         }
-        
-        // Fallback for legacy records that might have full URL stored
+
         return tokenizedUrl
     }
     
