@@ -5,7 +5,7 @@
     # - docker-compose.jellyfin.yml
     # - docker-compose.emby.yml
     # - docker-compose.bazarr.yml
-    # - docker-compose.jellyseerr.yml
+    # - docker-compose.seerr.yml
 
 x-rclone-base: &rclone-base
   image: peterbuga/rclone-mount:latest
@@ -421,6 +421,8 @@ services:
     volumes:
       - ./sonarr-config:/config
       - ${DEBRIDAV_MOUNT_PATH_HOST_FS}_arrs:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+      - ./arr_scripts_logs/scripts:/scripts
+      - ./arr_scripts_logs/logs:/logs
     ports:
       - 8989:8989
     depends_on:
@@ -437,6 +439,8 @@ services:
     volumes:
       - ./radarr-config:/config
       - ${DEBRIDAV_MOUNT_PATH_HOST_FS}_arrs:${DEBRIDAV_MOUNT_PATH_CONTAINERS}:rshared
+      - ./arr_scripts_logs/scripts:/scripts
+      - ./arr_scripts_logs/logs:/logs
     ports:
       - "7878:7878"
     depends_on:
