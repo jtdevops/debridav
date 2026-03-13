@@ -2712,7 +2712,20 @@ class IptvRequestService(
             if (entity.contentType == ContentType.MOVIE) {
                 logger.debug("Final file size for movie ${entity.contentId}: ${estimatedSize / 1_000_000}MB (isDefault: ${isDefaultFileSize(estimatedSize, entity.contentType)})")
             }
-            
+
+            // If the indexer requested file sizes and we still only have the default estimate,
+            // log a WARN so provider issues can be tracked.
+            if (!isTestRequest && fetchFileSize && isDefaultFileSize(estimatedSize, entity.contentType)) {
+                logger.warn(
+                    "IPTV file size could not be determined (default estimate) with fetchFileSize=true: provider='{}', contentId='{}', title='{}', contentType={}, estimatedSizeMb={}",
+                    entity.providerName,
+                    entity.contentId,
+                    entity.title,
+                    entity.contentType,
+                    estimatedSize / 1_000_000
+                )
+            }
+
             IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
@@ -3015,9 +3028,43 @@ class IptvRequestService(
         }
 
         val baseUrl = transactionTemplate.execute<String?> {
-            iptvUrlTemplateRepository.findByProviderName(providerName)
-                .firstOrNull()
-                ?.baseUrl
+            // Prefer a template that matches this content's type (MOVIE vs SERIES)
+            val contentType = try {
+                val refId = iptvContent.iptvContentRefId
+                if (refId != null) {
+                    iptvContentRepository.findById(refId).orElse(null)?.contentType
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                logger.debug("Failed to determine content type when reconstructing IPTV URL: ${e.message}")
+                null
+            }
+
+            val templatesForProvider = iptvUrlTemplateRepository.findByProviderName(providerName)
+
+            // 1) Exact match on contentType if available
+            val byContentType = if (contentType != null) {
+                templatesForProvider.firstOrNull { it.contentType == contentType }
+            } else {
+                null
+            }
+
+            // 2) Heuristic match based on /movie/ or /series/ path segment
+            val byPathHeuristic = if (byContentType == null && contentType != null) {
+                when (contentType) {
+                    ContentType.MOVIE ->
+                        templatesForProvider.firstOrNull { it.baseUrl.contains("/movie/") }
+                    ContentType.SERIES ->
+                        templatesForProvider.firstOrNull { it.baseUrl.contains("/series/") }
+                    else -> null
+                }
+            } else {
+                null
+            }
+
+            // 3) Fallback to first template for provider (previous behaviour)
+            (byContentType ?: byPathHeuristic ?: templatesForProvider.firstOrNull())?.baseUrl
         } ?: throw IllegalStateException(
             "IPTV URL template not found for provider: $providerName (content: ${iptvContent.iptvContentId})"
         )
