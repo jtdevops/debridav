@@ -2105,11 +2105,22 @@ class IptvRequestService(
             results = listOf(results.first())
             logger.debug("Test request: limiting to first result only (${results.size} result)")
         } else if (limit != null && limit > 0 && results.size > limit) {
-            // Apply limit after sorting (results are already sorted by relevance score from searchContent)
-            // This limits the number of results that will be processed for metadata enhancements
+            // Apply a bounded upper limit before metadata processing:
+            // we take up to limit + ceil(limit/2) candidates so that we have
+            // a primary batch and a single backfill batch available, but we
+            // don't process the entire catalog.
             val originalSize = results.size
-            results = results.take(limit)
-            logger.debug("Limiting results to {} (from {} total) before metadata processing", limit, originalSize)
+            val backfillCount = (limit + 1) / 2 // ceil(limit / 2)
+            val maxCandidates = limit + backfillCount
+            val takeCount = if (originalSize > maxCandidates) maxCandidates else originalSize
+            results = results.take(takeCount)
+            logger.debug(
+                "Limiting IPTV search results to {} (from {} total) before metadata processing (limit={}, backfillCount={})",
+                takeCount,
+                originalSize,
+                limit,
+                backfillCount
+            )
         }
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
@@ -2476,8 +2487,27 @@ class IptvRequestService(
             // No episode parameter or not a series, return all results
             results
         }
-        
-        return seriesWithEpisodes.map { entity ->
+
+        // Split candidates into a primary batch and an optional backfill batch.
+        // Primary batch size is the requested limit (if provided), and backfill
+        // batch size is half the limit (rounded up). We only process backfill
+        // candidates if the primary batch doesn't produce enough usable results.
+        val effectiveLimit = limit ?: seriesWithEpisodes.size
+        val primaryCandidates = if (effectiveLimit > 0) {
+            seriesWithEpisodes.take(effectiveLimit)
+        } else {
+            seriesWithEpisodes
+        }
+        val backfillCount = if (limit != null && limit > 0) (limit + 1) / 2 else 0
+        val backfillCandidates = if (backfillCount > 0 && seriesWithEpisodes.size > primaryCandidates.size) {
+            seriesWithEpisodes.drop(primaryCandidates.size).take(backfillCount)
+        } else {
+            emptyList()
+        }
+
+        val searchResults = mutableListOf<IptvSearchResult>()
+
+        fun buildSearchResult(entity: IptvContentEntity): IptvSearchResult? {
             // Generate infohash from providerName and contentId (now returns hex string)
             val infohash = generateIptvHash(entity.providerName, entity.contentId)
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
@@ -2724,9 +2754,11 @@ class IptvRequestService(
                     entity.contentType,
                     estimatedSize / 1_000_000
                 )
+                // Skip this result when the caller explicitly requested a real file size.
+                return null
             }
 
-            IptvSearchResult(
+            return IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
                 title = radarrTitle, // Use Radarr-formatted title without extension
@@ -2739,7 +2771,39 @@ class IptvRequestService(
                 size = estimatedSize,
                 quality = quality ?: "1080p" // Use adjusted quality (may be downgraded to 480p for non-EN languages)
             )
-        }.sortedBy { it.title }
+        }
+
+        // Process primary batch first.
+        for (entity in primaryCandidates) {
+            val result = buildSearchResult(entity) ?: continue
+            searchResults.add(result)
+        }
+
+        // If we still don't have enough results and a backfill batch is available,
+        // process up to one additional half-sized batch.
+        if (limit != null && searchResults.size < limit && backfillCandidates.isNotEmpty()) {
+            for (entity in backfillCandidates) {
+                if (searchResults.size >= limit) {
+                    break
+                }
+                val result = buildSearchResult(entity) ?: continue
+                searchResults.add(result)
+            }
+        }
+
+        // If after primary + backfill we still don't meet the requested limit,
+        // log a WARN so provider or indexer issues can be monitored.
+        if (limit != null && !isTestRequest && searchResults.size < limit) {
+            logger.warn(
+                "IPTV search for '{}' (contentType={}) returned {} result(s) below requested limit {} after primary+backfill batches",
+                title,
+                contentType,
+                searchResults.size,
+                limit
+            )
+        }
+
+        return searchResults.sortedBy { it.title }
     }
     
     private fun determineMimeType(title: String): String {
