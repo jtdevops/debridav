@@ -2096,7 +2096,7 @@ class IptvRequestService(
         }
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null, enhanceMetadata: Boolean = false): List<IptvSearchResult> {
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null, enhanceMetadata: Boolean = false, preferredDisplayTitle: String? = null, preferredDisplayYear: Int? = null): List<IptvSearchResult> {
         logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}, limit={}, enhanceMetadata={}", title, contentType, isTestRequest, fetchFileSize, limit, enhanceMetadata)
         var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
@@ -2561,6 +2561,9 @@ class IptvRequestService(
                 ContentType.MOVIE -> year ?: entityMovieYears["${entity.providerName}_${entity.contentId}"]
                 else -> year
             }
+            // When search was by imdbid, use OMDB title/year for result display so Radarr/Sonarr accept the title
+            val baseTitle = preferredDisplayTitle ?: entity.title
+            val yearForFormat = if (preferredDisplayTitle != null && preferredDisplayYear != null) preferredDisplayYear else yearForTitle
             // Get codec from metadata if available
             var codecForTitle = when (entity.contentType) {
                 ContentType.SERIES -> entityCodecs["${entity.providerName}_${entity.contentId}"]
@@ -2578,7 +2581,7 @@ class IptvRequestService(
                 }
             }
             
-            var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode, codecForTitle)
+            var radarrTitle = formatTitleForRadarr(baseTitle, yearForFormat, quality, languageCode, episode, codecForTitle)
             
             // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
             val releaseGroupParts = mutableListOf("IPTV")
