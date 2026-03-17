@@ -22,7 +22,12 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
     fun getByDirectory(directory: DbDirectory): List<DbEntity>
 
     @Query(
-        "select * from db_item directory where directory.path ~ CAST(CONCAT(:#{#directory.path},'.*{1}') AS lquery)",
+        """
+        select *
+        from db_item d
+        where d.path <@ CAST(:#{#directory.path} AS ltree)
+        and nlevel(d.path) = nlevel(CAST(:#{#directory.path} AS ltree)) + 1
+        """,
         nativeQuery = true
     )
     fun getChildrenByDirectory(directory: DbDirectory): List<DbDirectory>
@@ -126,6 +131,28 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
         cutoffTime: Long
     ): List<RemotelyCachedEntity>
 
+    /**
+     * Finds ALL files in the downloads folder older than the cutoff time, regardless of torrent linkage.
+     * Used when time-based cleanup is enabled: Radarr/Sonarr should process torrents within ~1 minute;
+     * files older than threshold indicate something went wrong, so clean them up even if still linked.
+     */
+    @Query(
+        """
+        SELECT rce.* FROM db_item rce
+        INNER JOIN db_item dir ON rce.directory_id = dir.id
+        WHERE dir.db_item_type = 'DbDirectory'
+        AND dir.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND rce.db_item_type = 'RemotelyCachedEntity'
+        AND rce.last_modified < :cutoffTime
+        ORDER BY rce.last_modified ASC
+        """,
+        nativeQuery = true
+    )
+    fun findFilesInDownloadsOlderThan(
+        downloadPathPrefix: String,
+        cutoffTime: Long
+    ): List<RemotelyCachedEntity>
+
     @Query(
         """
         SELECT rce.* FROM db_item rce
@@ -171,6 +198,12 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
             SELECT 1 FROM db_item child
             WHERE child.directory_id = dir.id
         )
+        AND NOT EXISTS (
+            SELECT 1 FROM db_item subdir
+            WHERE subdir.db_item_type = 'DbDirectory'
+            AND subdir.path <@ dir.path
+            AND subdir.path != dir.path
+        )
         ORDER BY nlevel(dir.path) DESC
         """,
         nativeQuery = true
@@ -178,6 +211,29 @@ interface DebridFileContentsRepository : CrudRepository<DbEntity, Long> {
     fun findEmptyDirectoriesInDownloads(
         downloadPathPrefix: String
     ): List<DbDirectory>
+
+    /**
+     * Finds directories whose parent path does not exist in the table (broken ltree hierarchy).
+     * These should be deleted to restore tree integrity.
+     * Ordered by depth ascending (shallowest first) so deleting a parent cascades to children.
+     */
+    @Query(
+        """
+        SELECT d.* FROM db_item d
+        WHERE d.db_item_type = 'DbDirectory'
+        AND d.path IS NOT NULL
+        AND nlevel(d.path) > 1
+        AND d.path <@ CAST(:downloadPathPrefix AS ltree)
+        AND NOT EXISTS (
+            SELECT 1 FROM db_item p
+            WHERE p.db_item_type = 'DbDirectory'
+            AND p.path = subpath(d.path, 0, nlevel(d.path) - 1)
+        )
+        ORDER BY nlevel(d.path) ASC
+        """,
+        nativeQuery = true
+    )
+    fun findDirectoriesWithMissingParentPath(downloadPathPrefix: String): List<DbDirectory>
 
     @Query(
         """

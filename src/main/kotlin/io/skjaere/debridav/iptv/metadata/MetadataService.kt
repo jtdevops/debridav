@@ -14,6 +14,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.time.Instant
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 @Service
 class MetadataService(
@@ -70,17 +72,24 @@ class MetadataService(
                 val responseValue = jsonObject["Response"]?.jsonPrimitive?.content
                 val title = jsonObject["Title"]?.jsonPrimitive?.content
                 val year = jsonObject["Year"]?.jsonPrimitive?.content
+                val released = jsonObject["Released"]?.jsonPrimitive?.content
                 val error = jsonObject["Error"]?.jsonPrimitive?.content
                 
                 if (responseValue == "True" && title != null) {
-                    logger.debug("Successfully fetched metadata: title='$title', year='$year'")
+                    logger.debug("Successfully fetched metadata: title='$title', year='$year', released='$released'")
                     // Parse year range (e.g., "2006–2013" or "2006-2013")
                     val (startYear, endYear) = parseYearRange(year)
+                    // Parse Released date (e.g. "18 Mar 2026") - Sonarr/TVDb use this for matching
+                    val releasedYear = parseReleasedYear(released)
+                    if (releasedYear != null && releasedYear != startYear) {
+                        logger.debug("OMDB Year ($startYear) differs from Released ($released) -> $releasedYear; using released year for display")
+                    }
                     val metadata = MediaMetadata(
                         title = title,
                         year = startYear, // Use start year for backward compatibility
                         startYear = startYear,
                         endYear = endYear,
+                        releasedYear = releasedYear,
                         imdbId = imdbId
                     )
                     
@@ -125,14 +134,17 @@ class MetadataService(
             
             val title = jsonObject["Title"]?.jsonPrimitive?.content
             val year = jsonObject["Year"]?.jsonPrimitive?.content
+            val released = jsonObject["Released"]?.jsonPrimitive?.content
             
             if (title != null) {
                 val (startYear, endYear) = parseYearRange(year)
+                val releasedYear = parseReleasedYear(released)
                 MediaMetadata(
                     title = title,
                     year = startYear, // Use start year for backward compatibility
                     startYear = startYear,
                     endYear = endYear,
+                    releasedYear = releasedYear,
                     imdbId = imdbId
                 )
             } else {
@@ -180,12 +192,37 @@ class MetadataService(
         logger.debug("Parsed single year: $singleYear from '$yearStr'")
         return Pair(singleYear, null)
     }
+    
+    /**
+     * Parses the year from OMDB's Released field (e.g. "18 Mar 2026", "01 Jan 2025").
+     * Sonarr/TVDb use the actual release date for matching; when Year and Released differ,
+     * prefer Released so the display title matches what Sonarr expects.
+     */
+    private fun parseReleasedYear(releasedStr: String?): Int? {
+        if (releasedStr == null || releasedStr.isBlank() || releasedStr.equals("N/A", ignoreCase = true)) {
+            return null
+        }
+        return try {
+            // OMDB format: "DD Mon YYYY" (e.g. "18 Mar 2026")
+            val formatter = DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.ENGLISH)
+            val date = java.time.LocalDate.parse(releasedStr.trim(), formatter)
+            logger.debug("Parsed Released '$releasedStr' -> year ${date.year}")
+            date.year
+        } catch (e: Exception) {
+            // Fallback: try to extract 4-digit year
+            val yearMatch = Regex("\\b(19|20)\\d{2}\\b").find(releasedStr)
+            yearMatch?.value?.toIntOrNull()?.also {
+                logger.debug("Parsed Released '$releasedStr' -> year $it (fallback)")
+            }
+        }
+    }
 
     data class MediaMetadata(
         val title: String,
         val year: Int?, // Start year (for backward compatibility)
         val startYear: Int? = null,
         val endYear: Int? = null, // End year if it's a range (e.g., TV series)
+        val releasedYear: Int? = null, // Year from Released date (e.g. "18 Mar 2026" -> 2026); prefer for display when differs from startYear
         val imdbId: String
     )
 }

@@ -37,7 +37,9 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionTemplate
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -57,9 +59,11 @@ class IptvRequestService(
     private val responseFileService: IptvResponseFileService,
     private val iptvLoginRateLimitService: IptvLoginRateLimitService,
     private val iptvUrlTemplateRepository: IptvUrlTemplateRepository,
-    private val metadataEnhancer: MetadataEnhancer
+    private val metadataEnhancer: MetadataEnhancer,
+    private val transactionManager: PlatformTransactionManager
 ) {
     private val logger = LoggerFactory.getLogger(IptvRequestService::class.java)
+    private val transactionTemplate = TransactionTemplate(transactionManager)
     private val xtreamCodesClient = XtreamCodesClient(httpClient, responseFileService, iptvConfigurationProperties.userAgent)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     
@@ -1367,9 +1371,10 @@ class IptvRequestService(
         iptvContent: DebridIptvContent,
         remotelyCachedEntity: io.skjaere.debridav.fs.RemotelyCachedEntity
     ): Long? {
-        // Reconstruct full URL from template + suffix (short DB read if needed)
+        // Reconstruct full URL from template + suffix. Must run in transaction because
+        // iptvContent.iptvUrlTemplate is a lazy proxy that requires an active Hibernate session.
         val iptvUrl = try {
-            reconstructFullUrl(iptvContent)
+            reconstructFullUrlInTransaction(iptvContent)
         } catch (e: IllegalStateException) {
             logger.debug("Cannot refetch file size: ${e.message}")
             return null
@@ -2091,7 +2096,7 @@ class IptvRequestService(
         }
     }
     
-    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null, enhanceMetadata: Boolean = false): List<IptvSearchResult> {
+    fun searchIptvContent(title: String, year: Int?, contentType: ContentType?, useArticleVariations: Boolean = true, episode: String? = null, startYear: Int? = null, endYear: Int? = null, isTestRequest: Boolean = false, fetchFileSize: Boolean = true, limit: Int? = null, enhanceMetadata: Boolean = false, preferredDisplayTitle: String? = null, preferredDisplayYear: Int? = null): List<IptvSearchResult> {
         logger.debug("searchIptvContent called: title='{}', contentType={}, isTestRequest={}, fetchFileSize={}, limit={}, enhanceMetadata={}", title, contentType, isTestRequest, fetchFileSize, limit, enhanceMetadata)
         var results = iptvContentService.searchContent(title, year, contentType, useArticleVariations)
         
@@ -2100,11 +2105,22 @@ class IptvRequestService(
             results = listOf(results.first())
             logger.debug("Test request: limiting to first result only (${results.size} result)")
         } else if (limit != null && limit > 0 && results.size > limit) {
-            // Apply limit after sorting (results are already sorted by relevance score from searchContent)
-            // This limits the number of results that will be processed for metadata enhancements
+            // Apply a bounded upper limit before metadata processing:
+            // we take up to limit + ceil(limit/2) candidates so that we have
+            // a primary batch and a single backfill batch available, but we
+            // don't process the entire catalog.
             val originalSize = results.size
-            results = results.take(limit)
-            logger.debug("Limiting results to {} (from {} total) before metadata processing", limit, originalSize)
+            val backfillCount = (limit + 1) / 2 // ceil(limit / 2)
+            val maxCandidates = limit + backfillCount
+            val takeCount = if (originalSize > maxCandidates) maxCandidates else originalSize
+            results = results.take(takeCount)
+            logger.debug(
+                "Limiting IPTV search results to {} (from {} total) before metadata processing (limit={}, backfillCount={})",
+                takeCount,
+                originalSize,
+                limit,
+                backfillCount
+            )
         }
         
         // Parse episode parameter to extract season number if provided (e.g., "S08" -> 8)
@@ -2471,8 +2487,27 @@ class IptvRequestService(
             // No episode parameter or not a series, return all results
             results
         }
-        
-        return seriesWithEpisodes.map { entity ->
+
+        // Split candidates into a primary batch and an optional backfill batch.
+        // Primary batch size is the requested limit (if provided), and backfill
+        // batch size is half the limit (rounded up). We only process backfill
+        // candidates if the primary batch doesn't produce enough usable results.
+        val effectiveLimit = limit ?: seriesWithEpisodes.size
+        val primaryCandidates = if (effectiveLimit > 0) {
+            seriesWithEpisodes.take(effectiveLimit)
+        } else {
+            seriesWithEpisodes
+        }
+        val backfillCount = if (limit != null && limit > 0) (limit + 1) / 2 else 0
+        val backfillCandidates = if (backfillCount > 0 && seriesWithEpisodes.size > primaryCandidates.size) {
+            seriesWithEpisodes.drop(primaryCandidates.size).take(backfillCount)
+        } else {
+            emptyList()
+        }
+
+        val searchResults = mutableListOf<IptvSearchResult>()
+
+        fun buildSearchResult(entity: IptvContentEntity): IptvSearchResult? {
             // Generate infohash from providerName and contentId (now returns hex string)
             val infohash = generateIptvHash(entity.providerName, entity.contentId)
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
@@ -2526,6 +2561,9 @@ class IptvRequestService(
                 ContentType.MOVIE -> year ?: entityMovieYears["${entity.providerName}_${entity.contentId}"]
                 else -> year
             }
+            // When search was by imdbid, use OMDB title/year for result display so Radarr/Sonarr accept the title
+            val baseTitle = preferredDisplayTitle ?: entity.title
+            val yearForFormat = if (preferredDisplayTitle != null && preferredDisplayYear != null) preferredDisplayYear else yearForTitle
             // Get codec from metadata if available
             var codecForTitle = when (entity.contentType) {
                 ContentType.SERIES -> entityCodecs["${entity.providerName}_${entity.contentId}"]
@@ -2543,7 +2581,7 @@ class IptvRequestService(
                 }
             }
             
-            var radarrTitle = formatTitleForRadarr(entity.title, yearForTitle, quality, languageCode, episode, codecForTitle)
+            var radarrTitle = formatTitleForRadarr(baseTitle, yearForFormat, quality, languageCode, episode, codecForTitle)
             
             // STEP 4: Conditionally build release group suffix - only add language code if not already at the end
             val releaseGroupParts = mutableListOf("IPTV")
@@ -2707,8 +2745,23 @@ class IptvRequestService(
             if (entity.contentType == ContentType.MOVIE) {
                 logger.debug("Final file size for movie ${entity.contentId}: ${estimatedSize / 1_000_000}MB (isDefault: ${isDefaultFileSize(estimatedSize, entity.contentType)})")
             }
-            
-            IptvSearchResult(
+
+            // If the indexer requested file sizes and we still only have the default estimate,
+            // log a WARN so provider issues can be tracked.
+            if (!isTestRequest && fetchFileSize && isDefaultFileSize(estimatedSize, entity.contentType)) {
+                logger.warn(
+                    "IPTV file size could not be determined (default estimate) with fetchFileSize=true: provider='{}', contentId='{}', title='{}', contentType={}, estimatedSizeMb={}",
+                    entity.providerName,
+                    entity.contentId,
+                    entity.title,
+                    entity.contentType,
+                    estimatedSize / 1_000_000
+                )
+                // Skip this result when the caller explicitly requested a real file size.
+                return null
+            }
+
+            return IptvSearchResult(
                 contentId = entity.contentId,
                 providerName = entity.providerName,
                 title = radarrTitle, // Use Radarr-formatted title without extension
@@ -2721,7 +2774,39 @@ class IptvRequestService(
                 size = estimatedSize,
                 quality = quality ?: "1080p" // Use adjusted quality (may be downgraded to 480p for non-EN languages)
             )
-        }.sortedBy { it.title }
+        }
+
+        // Process primary batch first.
+        for (entity in primaryCandidates) {
+            val result = buildSearchResult(entity) ?: continue
+            searchResults.add(result)
+        }
+
+        // If we still don't have enough results and a backfill batch is available,
+        // process up to one additional half-sized batch.
+        if (limit != null && searchResults.size < limit && backfillCandidates.isNotEmpty()) {
+            for (entity in backfillCandidates) {
+                if (searchResults.size >= limit) {
+                    break
+                }
+                val result = buildSearchResult(entity) ?: continue
+                searchResults.add(result)
+            }
+        }
+
+        // If after primary + backfill we still don't meet the requested limit,
+        // log a WARN so provider or indexer issues can be monitored.
+        if (limit != null && !isTestRequest && searchResults.size < limit) {
+            logger.warn(
+                "IPTV search for '{}' (contentType={}) returned {} result(s) below requested limit {} after primary+backfill batches",
+                title,
+                contentType,
+                searchResults.size,
+                limit
+            )
+        }
+
+        return searchResults.sortedBy { it.title }
     }
     
     private fun determineMimeType(title: String): String {
@@ -2988,29 +3073,95 @@ class IptvRequestService(
     
     /**
      * Reconstructs a full URL from the tokenized URL stored in debrid_links.
-     * Replaces {IPTV_TEMPLATE_URL} token with the actual base URL from template.
-     * 
+     * Fetches the base URL in a transaction to avoid LazyInitializationException when
+     * iptvContent comes from a detached entity (e.g. during streaming).
+     *
      * @throws IllegalStateException if template is missing or IptvFile.link doesn't contain token
      */
-    fun reconstructFullUrl(iptvContent: DebridIptvContent): String {
-        val template = iptvContent.iptvUrlTemplate
-        require(template != null) { 
-            "IPTV URL template is required but missing for content: ${iptvContent.iptvContentId}" 
+    private fun reconstructFullUrlInTransaction(iptvContent: DebridIptvContent): String {
+        val providerName = iptvContent.iptvProviderName
+        require(providerName != null) {
+            "IPTV provider name is required for content: ${iptvContent.iptvContentId}"
         }
-        
-        // Get tokenized URL from debrid_links
+
         val iptvFile = iptvContent.debridLinks.firstOrNull() as? IptvFile
         val tokenizedUrl = iptvFile?.link
         require(tokenizedUrl != null) {
             "IptvFile.link is missing for content: ${iptvContent.iptvContentId}"
         }
-        
-        // Replace token with actual base URL
+
+        if (!tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
+            return tokenizedUrl
+        }
+
+        val baseUrl = transactionTemplate.execute<String?> {
+            // Prefer a template that matches this content's type (MOVIE vs SERIES)
+            val contentType = try {
+                val refId = iptvContent.iptvContentRefId
+                if (refId != null) {
+                    iptvContentRepository.findById(refId).orElse(null)?.contentType
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                logger.debug("Failed to determine content type when reconstructing IPTV URL: ${e.message}")
+                null
+            }
+
+            val templatesForProvider = iptvUrlTemplateRepository.findByProviderName(providerName)
+
+            // 1) Exact match on contentType if available
+            val byContentType = if (contentType != null) {
+                templatesForProvider.firstOrNull { it.contentType == contentType }
+            } else {
+                null
+            }
+
+            // 2) Heuristic match based on /movie/ or /series/ path segment
+            val byPathHeuristic = if (byContentType == null && contentType != null) {
+                when (contentType) {
+                    ContentType.MOVIE ->
+                        templatesForProvider.firstOrNull { it.baseUrl.contains("/movie/") }
+                    ContentType.SERIES ->
+                        templatesForProvider.firstOrNull { it.baseUrl.contains("/series/") }
+                    else -> null
+                }
+            } else {
+                null
+            }
+
+            // 3) Fallback to first template for provider (previous behaviour)
+            (byContentType ?: byPathHeuristic ?: templatesForProvider.firstOrNull())?.baseUrl
+        } ?: throw IllegalStateException(
+            "IPTV URL template not found for provider: $providerName (content: ${iptvContent.iptvContentId})"
+        )
+
+        return tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", baseUrl)
+    }
+
+    /**
+     * Reconstructs a full URL from the tokenized URL stored in debrid_links.
+     * Replaces {IPTV_TEMPLATE_URL} token with the actual base URL from template.
+     * Must be called within an active Hibernate session when iptvContent is attached.
+     *
+     * @throws IllegalStateException if template is missing or IptvFile.link doesn't contain token
+     */
+    fun reconstructFullUrl(iptvContent: DebridIptvContent): String {
+        val template = iptvContent.iptvUrlTemplate
+        require(template != null) {
+            "IPTV URL template is required but missing for content: ${iptvContent.iptvContentId}"
+        }
+
+        val iptvFile = iptvContent.debridLinks.firstOrNull() as? IptvFile
+        val tokenizedUrl = iptvFile?.link
+        require(tokenizedUrl != null) {
+            "IptvFile.link is missing for content: ${iptvContent.iptvContentId}"
+        }
+
         if (tokenizedUrl.startsWith("{IPTV_TEMPLATE_URL}")) {
             return tokenizedUrl.replace("{IPTV_TEMPLATE_URL}", template.baseUrl)
         }
-        
-        // Fallback for legacy records that might have full URL stored
+
         return tokenizedUrl
     }
     

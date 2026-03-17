@@ -159,7 +159,7 @@ class IptvApiController(
         // Use episode parameter (e.g., "S08" or "S08E01") for magnet title
         // Parse limit parameter: if not specified, empty string, or "0", process all results (default behavior)
         val resultLimit = parseLimitParameter(limit)
-        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool, resultLimit, enhanceMetadataBool)
+        val results = iptvRequestService.searchIptvContent(searchQuery.title, searchQuery.year, contentType, searchQuery.useArticleVariations, episode, searchQuery.startYear, searchQuery.endYear, isTestRequest, fetchFileSizeBool, resultLimit, enhanceMetadataBool, searchQuery.preferredDisplayTitle, searchQuery.preferredDisplayYear)
         
         // For test requests (connectivity tests), only return the first valid result and skip detailed logging
         // This is a connectivity test - we just need to verify IPTV content can be queried.
@@ -220,7 +220,9 @@ class IptvApiController(
         val year: Int?, // Start year (for backward compatibility)
         val startYear: Int? = null,
         val endYear: Int? = null, // End year if it's a range (e.g., TV series)
-        val useArticleVariations: Boolean = false // Whether to use article variations (The, A, An) in search
+        val useArticleVariations: Boolean = false, // Whether to use article variations (The, A, An) in search
+        val preferredDisplayTitle: String? = null, // OMDB title to use for result display when search was by imdbid
+        val preferredDisplayYear: Int? = null // OMDB year to use for result display when search was by imdbid
     )
     
     /**
@@ -273,12 +275,15 @@ class IptvApiController(
                     metadata.endYear?.let { "-$it" } ?: "")
                 // Return title and year separately - we'll search by title only and filter by year
                 // Don't use article variations when metadata is provided (useArticleVariations = false)
+                // Set preferred display title/year so result names use OMDB title (Radarr/Sonarr compatible)
                 return SearchQuery(
                     title = metadata.title,
                     year = metadata.startYear, // Use start year for backward compatibility
                     startYear = metadata.startYear,
                     endYear = metadata.endYear,
-                    useArticleVariations = false
+                    useArticleVariations = false,
+                    preferredDisplayTitle = metadata.title,
+                    preferredDisplayYear = metadata.releasedYear ?: metadata.startYear
                 )
             } else {
                 logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata. Not using qTest as fallback since imdbid was provided.")
@@ -324,7 +329,9 @@ class IptvApiController(
                             year = metadata.startYear,
                             startYear = metadata.startYear,
                             endYear = metadata.endYear,
-                            useArticleVariations = false
+                            useArticleVariations = false,
+                            preferredDisplayTitle = metadata.title,
+                            preferredDisplayYear = metadata.releasedYear ?: metadata.startYear
                         )
                     } else {
                         logger.warn("Failed to resolve qTest IMDb ID '$qTestParam' to metadata, treating as text")

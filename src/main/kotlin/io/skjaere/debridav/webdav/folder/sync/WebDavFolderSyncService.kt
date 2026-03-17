@@ -591,32 +591,15 @@ class WebDavFolderSyncService(
             if (directoriesToDelete.isNotEmpty()) {
                 logger.info("Found ${directoriesToDelete.size} orphaned directories to delete for mapping ${mapping.id}")
                 
-                // Delete directories starting from top level (shallowest first)
-                // Delete parent directories - this will cascade to children via bulk delete
+                // Delete directories starting from top level (shallowest first).
+                // deleteDirectory cascades to files and path-descendants, preserving ltree integrity.
                 directoriesToDelete.forEach { directory ->
                     try {
-                        val dirPath = directory.path ?: return@forEach
                         val dirVfsPath = directory.fileSystemPath() ?: return@forEach
-                        
-                        // Delete all files in this directory tree first
-                        val filesInTree = debridFileRepository.findFilesInDirectoryTree(dirPath)
-                        filesInTree.forEach { file ->
-                            try {
-                                databaseFileService.deleteFile(file)
-                            } catch (e: Exception) {
-                                logger.error("Error deleting file ${file.id} in directory tree ${dirPath}", e)
-                            }
-                        }
-                        
-                        // Delete all child directories using bulk delete (more efficient)
-                        val childDirsDeleted = debridFileRepository.deleteChildDirectoriesByPath(dirPath)
-                        logger.debug("Deleted $childDirsDeleted child directories under ${dirVfsPath}")
-                        
-                        // Finally delete the parent directory itself
-                        debridFileRepository.delete(directory)
+                        databaseFileService.deleteDirectory(directory)
                         logger.debug("Deleted orphaned directory: $dirVfsPath")
                     } catch (e: Exception) {
-                        logger.error("Error deleting directory ${directory.path}", e)
+                        logger.error("Error deleting directory ${directory.fileSystemPath() ?: directory.path}", e)
                     }
                 }
             }
