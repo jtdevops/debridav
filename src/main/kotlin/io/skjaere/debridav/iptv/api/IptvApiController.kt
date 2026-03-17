@@ -283,7 +283,7 @@ class IptvApiController(
                     endYear = metadata.endYear,
                     useArticleVariations = false,
                     preferredDisplayTitle = metadata.title,
-                    preferredDisplayYear = metadata.startYear
+                    preferredDisplayYear = metadata.releasedYear ?: metadata.startYear
                 )
             } else {
                 logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata. Not using qTest as fallback since imdbid was provided.")
@@ -331,7 +331,7 @@ class IptvApiController(
                             endYear = metadata.endYear,
                             useArticleVariations = false,
                             preferredDisplayTitle = metadata.title,
-                            preferredDisplayYear = metadata.startYear
+                            preferredDisplayYear = metadata.releasedYear ?: metadata.startYear
                         )
                     } else {
                         logger.warn("Failed to resolve qTest IMDb ID '$qTestParam' to metadata, treating as text")
