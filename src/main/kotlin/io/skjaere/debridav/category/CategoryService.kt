@@ -21,6 +21,7 @@ class CategoryService(
         return categoryRepository.findByNameIgnoreCase(categoryName) ?: kotlin.run {
             val newCategory = Category()
             newCategory.name = categoryName
+            newCategory.downloadPath = debridavConfigurationProperties.downloadPath
             categoryRepository.save(newCategory)
         }
     }
@@ -47,7 +48,7 @@ class CategoryService(
      * can see via /api/v2/torrents/info?category=<category-name>
      */
     fun getArrCategories(downloadPath: String = debridavConfigurationProperties.downloadPath): List<String> {
-        return categoryRepository.findByDownloadPath(downloadPath)
+        return categoryRepository.findByDownloadPathOrDownloadPathIsNull(downloadPath)
             .mapNotNull { it.name }
     }
 }

@@ -74,6 +74,7 @@ class DownloadsCleanupController(
                 totalSizeBytes = result.totalSizeBytes,
                 totalSizeMB = result.totalSizeMB,
                 deletedDirectoriesCount = result.deletedDirectoriesCount,
+                deletedTorrentsCount = result.deletedTorrentsCount,
                 errors = result.errors,
                 dryRun = result.dryRun
             )
@@ -101,6 +102,7 @@ class DownloadsCleanupController(
         val totalSizeBytes: Long,
         val totalSizeMB: Double,
         val deletedDirectoriesCount: Int,
+        val deletedTorrentsCount: Int = 0,
         val errors: List<String>,
         val dryRun: Boolean
     )
