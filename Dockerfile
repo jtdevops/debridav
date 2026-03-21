@@ -19,15 +19,13 @@ COPY src src
 # The gradle:8.11-jdk21 image already has Gradle 8.11 pre-installed
 RUN gradle bootJar --no-daemon
 
-# Runtime stage
-FROM openjdk:26-ea-21-jdk-slim
+# Runtime: JRE on Alpine is smaller than jammy; same Temurin 21. Uses musl — smoke-test JNI/native
+# features if you add them later. Jammy: FROM eclipse-temurin:21-jre-jammy + apt-get.
+FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app
 
-RUN apt update && apt install -y curl ffmpeg
-# Clean up after 'apt update'
-RUN apt-get clean \
-    && rm -Rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl ffmpeg
 
 RUN mkdir app
 # Copy the built JAR from the build stage
