@@ -96,9 +96,9 @@ class StrmRedirectProxyController(
             // Check if proxy URLs are enabled for this provider (proxy URLs always refresh)
             val shouldUseProxy = debridavConfigurationProperties.shouldUseProxyUrlForStrm(provider)
             
-            // Get the external URL (with refresh check if proxy is enabled)
-            val externalUrl = if (shouldUseProxy && provider != DebridProvider.IPTV) {
-                getExternalUrlWithRefresh(reloadedFile, contents, provider)
+            // Get the external URL (with refresh check if proxy is enabled; IPTV skips debrid refresh in resolver)
+            val externalUrl = if (shouldUseProxy) {
+                getExternalUrlWithRefresh(reloadedFile, provider)
             } else {
                 getExternalUrl(reloadedFile, contents)
             }
@@ -139,6 +139,7 @@ class StrmRedirectProxyController(
     ) = runBlocking {
         try {
             val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+                ?: debridLinkService.getCachedFile(file)
             if (cachedFile == null) {
                 logger.warn("STRM proxy: No CachedFile found for streaming, file ID: ${file.id}")
                 response.sendError(HttpServletResponse.SC_NOT_FOUND)
@@ -321,16 +322,20 @@ class StrmRedirectProxyController(
      */
     private fun getExternalUrlWithRefresh(
         file: RemotelyCachedEntity,
-        contents: io.skjaere.debridav.fs.DebridFileContents,
         provider: DebridProvider
     ): String? = runBlocking {
-        val cachedFile = contents.debridLinks.firstOrNull { it is CachedFile } as? CachedFile
+        val cachedFile = debridLinkService.getCachedFile(file)
         val originalUrl = cachedFile?.link
         if (originalUrl == null) {
             return@runBlocking null
         }
 
         logger.info("STRM proxy: Initial URL from database: $originalUrl (fileId: ${file.id}, provider: $provider)")
+
+        if (provider == DebridProvider.IPTV) {
+            logger.debug("STRM proxy: IPTV — using resolved URL without debrid refresh (fileId: ${file.id})")
+            return@runBlocking originalUrl
+        }
 
         try {
             // Check if link is alive using the cache

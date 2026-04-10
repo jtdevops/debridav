@@ -64,8 +64,7 @@ class StrmFileResource(
         
         if (originalFile is RemotelyCachedEntity) {
             // Check if proxy URLs are enabled (takes priority - proxy URLs implicitly enable external URLs)
-            val shouldUseProxy = provider != null && 
-                provider != DebridProvider.IPTV &&
+            val shouldUseProxy = provider != null &&
                 debridavConfigurationProperties.shouldUseProxyUrlForStrm(provider)
             
             if (shouldUseProxy) {
