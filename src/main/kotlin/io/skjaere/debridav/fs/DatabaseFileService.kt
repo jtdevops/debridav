@@ -67,14 +67,14 @@ class DatabaseFileService(
     @Transactional
     fun createIptvFile(
         path: String, hash: String, debridIptvContent: io.skjaere.debridav.fs.DebridIptvContent
-    ): RemotelyCachedEntity = runBlocking {
+    ): DbEntity = runBlocking {
         createDebridFile(path, hash, debridIptvContent)
     }
 
     @Transactional
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents
-    ): RemotelyCachedEntity = createDebridFile(path, hash, debridFileContents, skipLocalEntityConversion = false)
+    ): DbEntity = createDebridFile(path, hash, debridFileContents, skipLocalEntityConversion = false)
 
     /**
      * Creates a debrid file entry in the database.
@@ -89,7 +89,7 @@ class DatabaseFileService(
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     fun createDebridFile(
         path: String, hash: String, debridFileContents: DebridFileContents, skipLocalEntityConversion: Boolean
-    ): RemotelyCachedEntity = runBlocking {
+    ): DbEntity = runBlocking {
         val name = path.substringAfterLast("/")
         val shouldStoreAsLocal = !skipLocalEntityConversion &&
             debridavConfigurationProperties.shouldAlwaysStoreAsLocalEntity(name)
@@ -132,16 +132,9 @@ class DatabaseFileService(
 
             try {
                 logger.debug("File {} has whitelisted extension, downloading and storing as LocalEntity", name)
-                downloadAndStoreAsLocalEntity(path, debridFileContents)
-                val fileEntity = RemotelyCachedEntity()
-                fileEntity.name = name
-                fileEntity.lastModified = Instant.now().toEpochMilli()
-                fileEntity.size = debridFileContents.size
-                fileEntity.mimeType = debridFileContents.mimeType
-                fileEntity.directory = directory
-                fileEntity.contents = debridFileContents
-                fileEntity.hash = hash
-                return@runBlocking fileEntity
+                // Persisted LocalEntity is the canonical row for (directory, name); do not also
+                // attach a RemotelyCachedEntity with the same name (unique constraint + wrong type).
+                return@runBlocking downloadAndStoreAsLocalEntity(path, debridFileContents)
             } catch (e: Exception) {
                 logger.warn("Failed to download whitelisted file {}, falling back to RemotelyCachedEntity: {}", name, e.message)
             }
@@ -265,6 +258,9 @@ class DatabaseFileService(
             is RemotelyCachedEntity -> deleteRemotelyCachedEntity(file)
             is DbDirectory -> deleteDirectory(file)
             is LocalEntity -> {
+                // Same as RemotelyCachedEntity: torrent/usenet join rows reference db_item.id
+                debridFileRepository.unlinkFileFromTorrents(file)
+                debridFileRepository.unlinkFileFromUsenet(file)
                 deleteLargeObjectForLocalEntity(file)
                 debridFileRepository.delete(file)
             }
@@ -508,6 +504,23 @@ class DatabaseFileService(
      */
     fun getFileById(id: Long): DbEntity? {
         return debridFileRepository.findById(id).orElse(null)
+    }
+
+    /**
+     * Re-attaches a [DbEntity] that was saved in another transaction (e.g. [createDebridFile] uses
+     * NOT_SUPPORTED / REQUIRES_NEW). Without this, assigning the entity to [io.skjaere.debridav.torrent.Torrent.files]
+     * or [io.skjaere.debridav.usenet.UsenetDownload.debridFiles] can fail on detached instances.
+     *
+     * Uses [transactionTemplate] so merge always runs with a real transaction — Spring's shared
+     * [EntityManager] rejects merge without one, and callers may run on threads where the outer
+     * @Transactional scope is not active (e.g. after coroutine / NOT_SUPPORTED boundaries).
+     */
+    fun mergeIntoCurrentPersistenceContext(entity: DbEntity): DbEntity {
+        val id = entity.id ?: return entity
+        return transactionTemplate.execute {
+            @Suppress("UNCHECKED_CAST")
+            entityManager.merge(entity) as DbEntity
+        }!!
     }
 
     @Transactional

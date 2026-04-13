@@ -1,7 +1,7 @@
 package io.skjaere.debridav.torrent
 
 import io.skjaere.debridav.category.Category
-import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.fs.DbEntity
 import jakarta.persistence.CascadeType
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
@@ -24,11 +24,12 @@ open class Torrent {
     open var category: Category? = null
 
     @OneToMany(
-        targetEntity = RemotelyCachedEntity::class,
-        cascade = [CascadeType.PERSIST, CascadeType.MERGE],
+        targetEntity = DbEntity::class,
+        // Do not PERSIST: file rows are often created in separate transactions (see DatabaseFileService.createDebridFile).
+        cascade = [CascadeType.MERGE],
         fetch = FetchType.EAGER,
     )
-    open var files: MutableList<RemotelyCachedEntity> = mutableListOf()
+    open var files: MutableList<DbEntity> = mutableListOf()
     open var created: Instant? = null
 
     @Column(nullable = false, unique = true)

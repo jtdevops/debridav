@@ -6,6 +6,7 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.DebridCachedContentService
 import io.skjaere.debridav.debrid.TorrentMagnet
 import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridFileContents
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.iptv.IptvContentRepository
@@ -22,6 +23,7 @@ import org.springframework.stereotype.Service
 import org.springframework.web.multipart.MultipartFile
 import java.net.URLDecoder
 import java.time.Instant
+import java.util.Locale
 import java.util.*
 
 
@@ -79,7 +81,8 @@ class TorrentService(
         if (existingTorrent != null) {
             // Check if this torrent is IPTV content by checking if files are DebridIptvContent
             val isIptvContent = existingTorrent.files.any { file ->
-                file.contents is io.skjaere.debridav.fs.DebridIptvContent
+                file is RemotelyCachedEntity &&
+                    file.contents is io.skjaere.debridav.fs.DebridIptvContent
             }
             if (isIptvContent) {
                 logger.info("Hash $potentialHash corresponds to existing IPTV torrent, skipping re-add")
@@ -232,7 +235,7 @@ class TorrentService(
             }
             // Some files are missing, add them (shouldn't happen with episode-specific hashes, but handle it)
             logger.debug("Adding ${newFiles.size} missing file(s) to existing torrent (${torrent.files.size} existing files)")
-            torrent.files.addAll(newFiles)
+            torrent.files.addAll(newFiles.map { fileService.mergeIntoCurrentPersistenceContext(it) })
             torrentRepository.save(torrent)
             logger.info("Successfully added ${newFiles.size} file(s) to existing torrent: ${torrent.name} (total: ${torrent.files.size} files)")
             return true
@@ -259,8 +262,8 @@ class TorrentService(
         // Regular torrents use: ${downloadPath}/${torrent.name} (folder path only, relative to mount path)
         // This ensures consistency with regular torrents and correct path construction in API responses
         torrent.savePath = "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
-        torrent.files = filesToInclude.toMutableList()
-        
+        torrent.files = filesToInclude.map { fileService.mergeIntoCurrentPersistenceContext(it) }.toMutableList()
+
         torrentRepository.save(torrent)
         logger.info("Successfully created Torrent entity for IPTV content: ${torrent.name} with ${filesToInclude.size} file(s)")
         
@@ -313,14 +316,42 @@ class TorrentService(
         torrent.status = Status.LIVE
         torrent.savePath =
             "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
-        torrent.files =
-            cachedFiles.map {
-                fileService.createDebridFile(
-                    "${debridavConfigurationProperties.downloadPath}/${torrent.name}/${it.originalPath}",
-                    getHashFromMagnet(magnet)!!.hash,
-                    it
-                )
-            }.toMutableList()
+        val magnetHash = getHashFromMagnet(magnet)!!.hash
+        val downloadRoot = "${debridavConfigurationProperties.downloadPath}/${torrent.name}"
+        torrent.files = cachedFiles.mapNotNull { contents ->
+            val relativePath = contents.originalPath
+            if (relativePath.isNullOrBlank()) {
+                logger.warn("Skipping cached file with blank originalPath for hash {}", magnetHash)
+                return@mapNotNull null
+            }
+            val vfsPath = "$downloadRoot/$relativePath"
+            val baseName = relativePath.substringAfterLast("/")
+            try {
+                fileService.createDebridFile(vfsPath, magnetHash, contents)
+            } catch (e: Exception) {
+                // Subtitles and other non-video extras should not fail the whole add (main media is essential).
+                val isEssentialMedia = VideoFileExtensions.isVideoFile(baseName)
+                if (!isEssentialMedia) {
+                    logger.warn(
+                        "Skipping non-video torrent file '{}' for hash {}: {}",
+                        relativePath,
+                        magnetHash,
+                        e.toString()
+                    )
+                    logger.debug("Skipped file stack trace", e)
+                    null
+                } else {
+                    throw e
+                }
+            }
+        }.map { fileService.mergeIntoCurrentPersistenceContext(it) }.toMutableList()
+
+        if (torrent.files.isEmpty() && cachedFiles.isNotEmpty()) {
+            error(
+                "Could not persist any files for torrent (hash=$magnetHash); " +
+                    "${cachedFiles.size} file(s) from debrid failed or were skipped — check logs"
+            )
+        }
 
         logger.info("Saving ${torrent.files.count()} files")
         return torrentRepository.save(torrent)
@@ -345,9 +376,16 @@ class TorrentService(
         return torrentRepository.getByHashIgnoreCase(hash)
     }
 
+    /**
+     * Removes the torrent record. [deleteFiles] matches qBittorrent's `deleteFiles` form field:
+     * - `true`: delete DB/VFS file rows only for paths still under this torrent's [Torrent.savePath]
+     *   (completed download folder). Files moved elsewhere (e.g. Radarr import to `/movies/`) are only
+     *   unlinked from the torrent so the library copy stays.
+     * - `false` or omitted: unlink all linked files from the torrent but do not delete file entities.
+     */
     @Transactional
-    fun deleteTorrentByHash(hash: String) {
-        // First, get the torrent to clean up associated files
+    fun deleteTorrentByHash(hash: String, deleteFiles: Boolean? = null) {
+        val deleteDownloadData = deleteFiles == true
         val torrent = torrentRepository.getByHashIgnoreCase(hash)
         if (torrent != null) {
             val torrentName = torrent.name ?: "unknown"
@@ -357,23 +395,71 @@ class TorrentService(
                 val vfsPath = file.directory?.fileSystemPath()?.let { "$it/$fileName" } ?: fileName
                 "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
             }
-            
-            logger.info("Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount")
+
+            logger.info(
+                "Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount, deleteFiles=$deleteDownloadData"
+            )
             if (fileDetails.isNotEmpty()) {
-                logger.info("Deleting associated files: ${fileDetails.joinToString("; ")}")
+                logger.info("Linked files: ${fileDetails.joinToString("; ")}")
             }
-            
-            // Clean up associated files
-            torrent.files.forEach { file ->
-                fileService.deleteFile(file)
+
+            if (!deleteDownloadData) {
+                torrent.files.forEach { debridFileRepository.unlinkFileFromTorrents(it) }
+                logger.info(
+                    "Removed torrent registration only (deleteFiles=false): hash=$hash, unlinked $fileCount file(s)"
+                )
+            } else {
+                var deletedCount = 0
+                var unlinkedLibraryCount = 0
+                val savePath = torrent.savePath
+                torrent.files.forEach { file ->
+                    if (isFileStillUnderTorrentSavePath(file, savePath)) {
+                        fileService.deleteFile(file)
+                        deletedCount++
+                    } else {
+                        val vfsPath = vfsPathForLinkedFile(file)
+                        logger.info(
+                            "Preserving file outside torrent save path '{}'; unlinking from torrent only: {}",
+                            savePath,
+                            vfsPath
+                        )
+                        debridFileRepository.unlinkFileFromTorrents(file)
+                        unlinkedLibraryCount++
+                    }
+                }
+                logger.info(
+                    "Deleted torrent download data: hash=$hash, deleted {} file(s) under save path, " +
+                        "unlinked {} file(s) outside save path (library)",
+                    deletedCount,
+                    unlinkedLibraryCount
+                )
             }
-            
-            logger.info("Deleted torrent: hash=$hash, name='$torrentName', removed $fileCount file(s)")
         } else {
             logger.warn("Torrent not found for deletion: hash=$hash")
         }
-        
-        return torrentRepository.deleteByHashIgnoreCase(hash)
+
+        torrentRepository.deleteByHashIgnoreCase(hash)
+    }
+
+    private fun vfsPathForLinkedFile(file: DbEntity): String {
+        val fileName = file.name ?: "unknown"
+        val dir = file.directory?.fileSystemPath()
+        return if (dir != null) "$dir/$fileName" else fileName
+    }
+
+    private fun normalizeVfsPathForComparison(path: String): String {
+        var p = path.trim().replace('\\', '/')
+        if (!p.startsWith("/")) p = "/$p"
+        return p.trimEnd('/').lowercase(Locale.ROOT)
+    }
+
+    private fun isFileStillUnderTorrentSavePath(file: DbEntity, savePath: String?): Boolean {
+        if (savePath.isNullOrBlank()) return false
+        val normalizedSave = normalizeVfsPathForComparison(savePath)
+        val filePath = vfsPathForLinkedFile(file)
+        if (filePath.isBlank()) return false
+        val normalizedFile = normalizeVfsPathForComparison(filePath)
+        return normalizedFile == normalizedSave || normalizedFile.startsWith("$normalizedSave/")
     }
     
     /**

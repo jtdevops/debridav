@@ -6,6 +6,7 @@ import io.skjaere.debridav.category.CategoryService
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.configuration.RuntimeConfigurationService
 import io.skjaere.debridav.debrid.TorrentMagnet
+import io.skjaere.debridav.fs.LocalEntity
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
@@ -108,9 +109,15 @@ class QBittorrentEmulationController(
     fun torrentFiles(@RequestParam hash: TorrentHash): List<TorrentFilesResponse>? {
         return torrentService.getTorrentByHash(hash)?.let {
             it.files.map { torrentFile ->
+                val originalPath = when (torrentFile) {
+                    is RemotelyCachedEntity ->
+                        torrentFile.contents?.originalPath ?: torrentFile.name!!
+                    is LocalEntity -> torrentFile.name!!
+                    else -> torrentFile.name ?: "unknown"
+                }
                 TorrentFilesResponse(
                     0,
-                    torrentFile.contents!!.originalPath!!,
+                    originalPath,
                     torrentFile.size!!.toInt(),
                     100,
                     1,
@@ -271,6 +278,7 @@ class QBittorrentEmulationController(
     )
     fun deleteTorrents(
         @RequestParam hashes: List<String>,
+        @RequestParam(required = false) deleteFiles: Boolean?,
         request: HttpServletRequest
     ): ResponseEntity<String> {
         // Resolve hostname from IP address
@@ -310,19 +318,21 @@ class QBittorrentEmulationController(
                         "$vfsPath (id: ${file.id}, size: ${file.size ?: 0} bytes)"
                     }
                     
-                    logger.info("Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount")
+                    logger.info(
+                        "Deleting torrent: hash=$hash, name='$torrentName', files=$fileCount, deleteFiles=$deleteFiles"
+                    )
                     if (fileDetails.isNotEmpty()) {
-                        logger.info("Deleting associated files: ${fileDetails.joinToString("; ")}")
+                        logger.info("Linked files: ${fileDetails.joinToString("; ")}")
                     }
-                    
-                    torrentService.deleteTorrentByHash(hash)
+
+                    torrentService.deleteTorrentByHash(hash, deleteFiles)
                     deletedHashes.add(hash)
-                    
+
                     // Log completion with details (using values captured before deletion)
-                    logger.info("Deleted torrent: hash=$hash, name='$torrentName', removed $fileCount file(s)")
+                    logger.info("Deleted torrent: hash=$hash, name='$torrentName', processed $fileCount linked file(s)")
                 } else {
                     logger.info("Deleting torrent: hash=$hash (not found in database)")
-                    torrentService.deleteTorrentByHash(hash)
+                    torrentService.deleteTorrentByHash(hash, deleteFiles)
                     deletedHashes.add(hash)
                     logger.info("Deleted torrent: hash=$hash")
                 }

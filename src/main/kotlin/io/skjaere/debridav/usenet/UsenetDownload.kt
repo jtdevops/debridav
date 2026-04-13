@@ -1,7 +1,7 @@
 package io.skjaere.debridav.usenet
 
 import io.skjaere.debridav.category.Category
-import io.skjaere.debridav.fs.RemotelyCachedEntity
+import io.skjaere.debridav.fs.DbEntity
 import jakarta.persistence.CascadeType
 import jakarta.persistence.Entity
 import jakarta.persistence.FetchType
@@ -29,11 +29,11 @@ open class UsenetDownload {
     open var category: Category? = null
 
     @OneToMany(
-        targetEntity = RemotelyCachedEntity::class,
-        cascade = [CascadeType.PERSIST, CascadeType.MERGE],
+        targetEntity = DbEntity::class,
+        cascade = [CascadeType.MERGE],
         fetch = FetchType.EAGER,
     )
-    open var debridFiles: MutableList<RemotelyCachedEntity> = mutableListOf()
+    open var debridFiles: MutableList<DbEntity> = mutableListOf()
 }
 
 enum class UsenetDownloadStatus {
