@@ -177,7 +177,7 @@ class FileSystemImportService(
         } ?: run {
             error("Could not get hash from torrent. File: ${ctx.path} cannot be imported")
         }
-        torrent.files.add(entity as RemotelyCachedEntity)
+        torrent.files.add(entity)
         torrentRepository.save(torrent)
     }
 
@@ -195,7 +195,7 @@ class FileSystemImportService(
                     newUsenetDownload
                 }
 
-        usenetDownload.debridFiles.add(entity as RemotelyCachedEntity)
+        usenetDownload.debridFiles.add(entity)
         usenetRepository.save(usenetDownload)
     }
 

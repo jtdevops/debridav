@@ -5,8 +5,8 @@ import io.skjaere.debridav.configuration.DebridavConfigurationProperties
 import io.skjaere.debridav.debrid.DebridCachedContentService
 import io.skjaere.debridav.debrid.UsenetRelease
 import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.DbEntity
 import io.skjaere.debridav.fs.DebridFileContents
-import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.repository.UsenetRepository
 import io.skjaere.debridav.usenet.UsenetDownload
 import io.skjaere.debridav.usenet.UsenetDownloadStatus
@@ -162,7 +162,7 @@ class SabNzbdService(
         debridFiles: List<DebridFileContents>,
         hash: String,
         releaseName: String
-    ): List<RemotelyCachedEntity> =
+    ): List<DbEntity> =
         debridFiles.map { file ->
             fileService.createDebridFile(
                 "${debridavConfigurationProperties.downloadPath}/${releaseName}/${file.originalPath}",
@@ -194,7 +194,7 @@ class SabNzbdService(
         releaseName: String,
         hash: String,
         category: String,
-        createdFiles: List<RemotelyCachedEntity>
+        createdFiles: List<DbEntity>
     ): UsenetDownload = withContext(Dispatchers.IO) {
         val category = categoryService.getOrCreateCategory(category)
         val usenetDownload = UsenetDownload()
@@ -206,7 +206,9 @@ class SabNzbdService(
             "${debridavConfigurationProperties.mountPath}${debridavConfigurationProperties.downloadPath}/$releaseName"
         usenetDownload.percentCompleted = 1.0
         usenetDownload.size = createdFiles.first().size
-        usenetDownload.debridFiles.addAll(createdFiles)
+        usenetDownload.debridFiles.addAll(
+            createdFiles.map { fileService.mergeIntoCurrentPersistenceContext(it) }
+        )
 
         usenetRepository.save(usenetDownload)
     }
