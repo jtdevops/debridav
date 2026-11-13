@@ -150,7 +150,7 @@ class ChunkCachingIT {
         val fileContents = debridFileContents.deepCopy()
         val hash = DigestUtils.md5Hex("test")
         val remotelyCachedEntity = databaseFileService.createDebridFile("/testfile.mp4", hash, fileContents)
-            .let { debridFileContentsRepository.save(it) }
+            .let { debridFileContentsRepository.save(it) } as RemotelyCachedEntity
         val blob = Blob()
         blob.localContents = BlobProxy.generateProxy("test".toByteArray(Charsets.UTF_8))
         val chunk = FileChunk()

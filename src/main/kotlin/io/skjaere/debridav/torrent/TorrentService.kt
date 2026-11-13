@@ -363,6 +363,14 @@ class TorrentService(
         } ?: emptyList()
     }
 
+    /**
+     * All LIVE torrents with category loaded. Used by qBittorrent emulation
+     * when [torrents/info] has no category filter and by [sync/maindata].
+     */
+    fun getAllLiveTorrents(): List<Torrent> {
+        return torrentRepository.findAllByStatusWithCategory(Status.LIVE)
+    }
+
 
     fun getTorrentByHash(hash: TorrentHash): Torrent? {
         return torrentRepository.getByHashIgnoreCase(hash.hash)

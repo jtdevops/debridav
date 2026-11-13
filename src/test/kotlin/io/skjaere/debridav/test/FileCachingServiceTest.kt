@@ -33,7 +33,9 @@ class FileCachingServiceTest {
         chunkCachingGracePeriod = Duration.ofHours(24),
         defaultCategories = emptyList(),
         localEntityMaxSizeMb = 100,
-        cacheMaxSizeGb = 10.0
+        cacheMaxSizeGb = 10.0,
+        rcloneArrsUserAgentPattern = null,
+        rcloneArrsHostnamePattern = null,
     )
     private val underTest = StreamPlanningService(mockConfig)
 

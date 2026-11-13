@@ -29,6 +29,7 @@ import io.skjaere.debridav.fs.MissingFile
 import io.skjaere.debridav.fs.ProviderError
 import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.test.integrationtest.config.TestContextInitializer
+import jakarta.persistence.EntityManager
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.first
@@ -38,6 +39,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.springframework.transaction.PlatformTransactionManager
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -70,12 +72,16 @@ class DebridLinkServiceTest {
         chunkCachingGracePeriod = Duration.ofMinutes(1),
         defaultCategories = listOf(),
         localEntityMaxSizeMb = 1,
-        cacheMaxSizeGb = 0.001
+        cacheMaxSizeGb = 0.001,
+        rcloneArrsUserAgentPattern = null,
+        rcloneArrsHostnamePattern = null,
     )
     val file = mockk<RemotelyCachedEntity>()
 
     private val fileService = mockk<DatabaseFileService>()
     private val meterRegistry = CompositeMeterRegistry(MockClock())
+    private val transactionManager = mockk<PlatformTransactionManager>(relaxed = true)
+    private val entityManager = mockk<EntityManager>(relaxed = true)
 
     private val underTest = DebridLinkService(
         debridavConfigurationProperties = debridavConfigurationProperties,
@@ -84,6 +90,8 @@ class DebridLinkServiceTest {
         debridCachedContentService = debridCachedContentService,
         clock = clock,
         meterRegistry = meterRegistry,
+        transactionManager = transactionManager,
+        entityManager = entityManager,
     )
 
     @BeforeEach

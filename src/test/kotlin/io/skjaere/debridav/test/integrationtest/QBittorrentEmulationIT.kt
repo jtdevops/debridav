@@ -15,6 +15,7 @@ import io.skjaere.debridav.test.SECOND_MAGNET
 import io.skjaere.debridav.test.integrationtest.config.IntegrationTestContextConfiguration
 import io.skjaere.debridav.test.integrationtest.config.MockServerTest
 import io.skjaere.debridav.test.integrationtest.config.PremiumizeStubbingService
+import io.skjaere.debridav.torrent.QBittorrentEmulationController
 import io.skjaere.debridav.torrent.TorrentRepository
 import io.skjaere.debridav.torrent.TorrentService
 import io.skjaere.debridav.torrent.TorrentsInfoResponse
@@ -440,5 +441,163 @@ class QBittorrentEmulationIT {
             .body(BodyInserters.fromMultipartData(parts.build()))
             .exchange()
             .expectStatus().isEqualTo(400)
+    }
+
+    @Test
+    fun `HolyArrs health endpoints app version and login answer like qBittorrent`() {
+        webTestClient.get()
+            .uri("/api/v2/app/version")
+            .exchange()
+            .expectStatus().isOk
+            .expectBody(String::class.java)
+            .isEqualTo(QBittorrentEmulationController.APP_VERSION)
+
+        webTestClient.get()
+            .uri("/api/v2/app/webapiVersion")
+            .exchange()
+            .expectStatus().isOk
+            .expectBody(String::class.java)
+            .isEqualTo(QBittorrentEmulationController.API_VERSION)
+
+        webTestClient.post()
+            .uri("/api/v2/auth/login")
+            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+            .bodyValue("username=&password=")
+            .exchange()
+            .expectStatus().isOk
+            .expectBody(String::class.java)
+            .isEqualTo("Ok.")
+    }
+
+    @Test
+    fun `categories use qBittorrent savePath field for HolyArrs`() {
+        webTestClient.post()
+            .uri("/api/v2/torrents/createCategory")
+            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+            .bodyValue("category=holyarrs-test-cat")
+            .exchange()
+            .expectStatus().isOk
+
+        // Creating the same category again is a conflict, like real qBittorrent.
+        webTestClient.post()
+            .uri("/api/v2/torrents/createCategory")
+            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+            .bodyValue("category=holyarrs-test-cat")
+            .exchange()
+            .expectStatus().isEqualTo(409)
+
+        val body = webTestClient.get()
+            .uri("/api/v2/torrents/categories")
+            .exchange()
+            .expectStatus().isOk
+            .expectBody(String::class.java)
+            .returnResult().responseBody!!
+
+        val tree = objectMapper.readTree(body)
+        assertThat(tree.has("holyarrs-test-cat"), `is`(true))
+        assertThat(tree.get("holyarrs-test-cat").has("savePath"), `is`(true))
+        assertThat(tree.get("holyarrs-test-cat").has("id"), `is`(false))
+        assertThat(tree.get("holyarrs-test-cat").has("downloadPath"), `is`(false))
+    }
+
+    @Test
+    fun `sync maindata returns full then delta for HolyArrs`() {
+        val parts = MultipartBodyBuilder()
+        parts.part("urls", MAGNET)
+        parts.part("category", "test")
+        parts.part("paused", "false")
+
+        premiumizeStubbingService.mockIsCached()
+        premiumizeStubbingService.mockCachedContents()
+
+        webTestClient
+            .mutate()
+            .responseTimeout(Duration.ofMillis(30000))
+            .build()
+            .post()
+            .uri("/api/v2/torrents/add")
+            .contentType(MediaType.MULTIPART_FORM_DATA)
+            .body(BodyInserters.fromMultipartData(parts.build()))
+            .exchange()
+            .expectStatus().is2xxSuccessful
+
+        val fullBody = webTestClient.get()
+            .uri("/api/v2/sync/maindata?rid=0")
+            .exchange()
+            .expectStatus().isOk
+            .expectBody(String::class.java)
+            .returnResult().responseBody!!
+        val full = objectMapper.readTree(fullBody)
+        assertThat(full.get("full_update").asBoolean(), `is`(true))
+        assertThat(full.get("rid").asLong(), `is`(1L))
+        assertThat(full.get("torrents").size(), `is`(1))
+        assertThat(full.get("server_state").get("connection_status").asText(), `is`("connected"))
+
+        val hash = full.get("torrents").fieldNames().next()
+
+        val deltaBody = webTestClient.get()
+            .uri("/api/v2/sync/maindata?rid=1")
+            .exchange()
+            .expectStatus().isOk
+            .expectBody(String::class.java)
+            .returnResult().responseBody!!
+        val delta = objectMapper.readTree(deltaBody)
+        assertThat(delta.get("full_update").asBoolean(), `is`(false))
+        assertThat(delta.get("rid").asLong(), `is`(2L))
+        assertThat(delta.get("torrents").size(), `is`(0))
+
+        webTestClient.post()
+            .uri("/api/v2/torrents/delete")
+            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+            .bodyValue("hashes=$hash&deleteFiles=false")
+            .exchange()
+            .expectStatus().isOk
+
+        val afterDelete = objectMapper.readTree(
+            webTestClient.get()
+                .uri("/api/v2/sync/maindata?rid=2")
+                .exchange()
+                .expectStatus().isOk
+                .expectBody(String::class.java)
+                .returnResult().responseBody!!
+        )
+        assertThat(afterDelete.get("torrents_removed").toString().contains(hash, ignoreCase = true), `is`(true))
+    }
+
+    @Test
+    fun `torrents info without category returns all live torrents`() {
+        val parts = MultipartBodyBuilder()
+        parts.part("urls", MAGNET)
+        parts.part("category", "test")
+        parts.part("paused", "false")
+
+        premiumizeStubbingService.mockIsCached()
+        premiumizeStubbingService.mockCachedContents()
+
+        webTestClient
+            .mutate()
+            .responseTimeout(Duration.ofMillis(30000))
+            .build()
+            .post()
+            .uri("/api/v2/torrents/add")
+            .contentType(MediaType.MULTIPART_FORM_DATA)
+            .body(BodyInserters.fromMultipartData(parts.build()))
+            .exchange()
+            .expectStatus().is2xxSuccessful
+
+        val type = objectMapper.typeFactory.constructCollectionType(
+            List::class.java,
+            TorrentsInfoResponse::class.java
+        )
+        val all = objectMapper.readValue(
+            webTestClient.get()
+                .uri("/api/v2/torrents/info")
+                .exchange()
+                .expectStatus().isOk
+                .expectBody(String::class.java)
+                .returnResult().responseBody,
+            type
+        ) as List<TorrentsInfoResponse>
+        assertThat(all, hasSize(1))
     }
 }
