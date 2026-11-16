@@ -440,7 +440,7 @@ class QBittorrentEmulationController(
         hashList.forEach { hash ->
             try {
                 // Get torrent details before deletion for enhanced logging
-                // Use getTorrentByHashString to avoid TorrentHash validation (supports any hash length)
+                // Use getTorrentByHashString so legacy short IPTV hashes still delete
                 val torrent = torrentService.getTorrentByHashString(hash)
                 if (torrent != null) {
                     val torrentName = torrent.name ?: "unknown"

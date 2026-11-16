@@ -14,6 +14,7 @@ import io.skjaere.debridav.iptv.IptvContentService
 import io.skjaere.debridav.iptv.IptvRequestService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.iptv.model.ContentType
+import io.skjaere.debridav.iptv.util.IptvHashUtil
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import io.skjaere.debridav.util.VideoFileExtensions
 import jakarta.transaction.Transactional
@@ -114,7 +115,7 @@ class TorrentService(
         val linkWithoutProtocol = iptvLink.removePrefix("iptv://")
         val parts = linkWithoutProtocol.split("/")
         
-        val (hexHash, providerName, contentId) = when (parts.size) {
+        val (_, providerName, contentId) = when (parts.size) {
             3 -> {
                 // New format: iptv://{hash}/{providerName}/{contentId}
                 Triple(parts[0], parts[1], parts[2])
@@ -188,32 +189,16 @@ class TorrentService(
             allCreatedFiles
         }
         
-        // Generate hash based on actual episodes included in the torrent
-        // This ensures each unique combination of episodes gets a unique hash
-        val finalHash = if (season != null && iptvContent.contentType == ContentType.SERIES) {
-            // Extract episode identifiers from file names (e.g., "S07E01", "S07E02", etc.)
-            val episodePattern = Regex("S(\\d{2})E(\\d{2})")
-            val episodeIdentifiers = filesToInclude.mapNotNull { file ->
-                val fileName = file.name ?: ""
-                episodePattern.find(fileName)?.value
-            }.sorted().distinct()
-            
-            if (episodeIdentifiers.isEmpty()) {
-                // Fallback: use season-based hash if we can't extract episodes
-                logger.warn("Could not extract episode identifiers from file names, using season-based hash")
-                "${providerName}_${contentId}_S${String.format("%02d", season)}".hashCode().toString()
-            } else {
-                // Create hash from sorted list of episode identifiers
-                // Format: providerName_contentId_S07E01_S07E02_S07E03...
-                val episodeString = episodeIdentifiers.joinToString("_")
-                val hashString = "${providerName}_${contentId}_$episodeString"
-                logger.debug("Generated hash from episodes: $episodeString -> hash string: $hashString")
-                hashString.hashCode().toString()
-            }
-        } else {
-            // Movie or single episode: use providerName_contentId
-            "${providerName}_${contentId}".hashCode().toString()
-        }
+        // Arr clients track downloads by the magnet's btih (40-char hex). Prefer that
+        // when present; otherwise derive a SHA-1 info hash from the IPTV identity.
+        val finalHash = resolveIptvTorrentHash(
+            magnet = magnet,
+            providerName = providerName,
+            contentId = contentId,
+            season = season,
+            filesToInclude = filesToInclude,
+            contentType = iptvContent.contentType
+        )
         
         // Create or update Torrent entity
         // With episode-specific hashing, each unique combination of episodes gets its own torrent
@@ -377,11 +362,50 @@ class TorrentService(
     }
     
     /**
-     * Gets a torrent by hash string directly (without TorrentHash wrapper).
-     * This is useful for hashes that may not be 40 characters (e.g., numeric hashes from hashCode().toString()).
+     * Gets a torrent by hash string directly (without [TorrentHash] wrapper).
+     * Prefer [getTorrentByHash] for new 40-character hex info hashes; this remains
+     * for delete/list paths that may still see legacy short IPTV hashes in the DB.
      */
     fun getTorrentByHashString(hash: String): Torrent? {
         return torrentRepository.getByHashIgnoreCase(hash)
+    }
+
+    /**
+     * Resolves the qBittorrent-emulation torrent id for IPTV content.
+     * Always returns a 40-character lowercase hex info hash.
+     */
+    private fun resolveIptvTorrentHash(
+        magnet: TorrentMagnet?,
+        providerName: String,
+        contentId: String,
+        season: Int?,
+        filesToInclude: List<RemotelyCachedEntity>,
+        contentType: ContentType?,
+    ): String {
+        magnet?.let { m ->
+            runCatching { getHashFromMagnet(m)?.hash?.lowercase() }.getOrNull()
+                ?.takeIf { IptvHashUtil.isTorrentInfoHash(it) }
+                ?.let { return it }
+        }
+
+        if (season != null && contentType == ContentType.SERIES) {
+            val episodePattern = Regex("S(\\d{2})E(\\d{2})")
+            val episodeIdentifiers = filesToInclude.mapNotNull { file ->
+                episodePattern.find(file.name ?: "")?.value
+            }.sorted().distinct()
+
+            if (episodeIdentifiers.isEmpty()) {
+                logger.warn("Could not extract episode identifiers from file names, using season-based hash")
+                return IptvHashUtil.toTorrentInfoHash(
+                    "${providerName}_${contentId}_S${String.format("%02d", season)}"
+                )
+            }
+            val episodeString = episodeIdentifiers.joinToString("_")
+            logger.debug("Generated hash from episodes: $episodeString")
+            return IptvHashUtil.toTorrentInfoHash("${providerName}_${contentId}_$episodeString")
+        }
+
+        return iptvRequestService.generateIptvHash(providerName, contentId)
     }
 
     /**
