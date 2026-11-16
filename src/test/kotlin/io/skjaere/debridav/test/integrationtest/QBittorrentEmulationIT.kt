@@ -118,6 +118,7 @@ class QBittorrentEmulationIT {
             objectMapper.readValue(torrentsInfoResponse, type)
 
         assertEquals("/data/downloads/test", parsedResponse.first().contentPath)
+        assertEquals("/data/downloads", parsedResponse.first().savePath)
     }
 
     @Test

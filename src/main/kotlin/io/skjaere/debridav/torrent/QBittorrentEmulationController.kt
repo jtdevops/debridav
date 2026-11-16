@@ -196,6 +196,7 @@ class QBittorrentEmulationController(
             debridavConfigurationProperties.debugArrTorrentInfoContentPathSuffix
         )
         val mountPath = debridavConfigurationProperties.mountPath
+        val downloadRoot = defaultSavePath()
         val hashFilter = parseHashList(hashes)
 
         val torrents = when {
@@ -206,7 +207,7 @@ class QBittorrentEmulationController(
 
         return torrents
             .filter { it.status == Status.LIVE }
-            .map { TorrentsInfoResponse.ofTorrent(it, mountPath, debugSuffix) }
+            .map { TorrentsInfoResponse.ofTorrent(it, mountPath, downloadRoot, debugSuffix) }
     }
 
     private fun defaultSavePath(): String =
