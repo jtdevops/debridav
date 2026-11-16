@@ -2581,9 +2581,14 @@ class IptvRequestService(
                 ContentType.MOVIE -> year ?: entityMovieYears["${entity.providerName}_${entity.contentId}"]
                 else -> year
             }
-            // When search was by imdbid, use OMDB title/year for result display so Radarr/Sonarr accept the title
-            val baseTitle = preferredDisplayTitle ?: entity.title
-            val yearForFormat = if (preferredDisplayTitle != null && preferredDisplayYear != null) preferredDisplayYear else yearForTitle
+            // Magnet / Torznab names: OMDB → Arr search title → IPTV catalog (last resort)
+            val baseTitle = io.skjaere.debridav.iptv.util.IptvMagnetTitle.resolveBaseTitle(
+                preferredDisplayTitle = preferredDisplayTitle,
+                searchTitle = title,
+                iptvCatalogTitle = entity.title,
+            )
+            val yearForFormat = preferredDisplayYear
+                ?: yearForTitle
             // Get codec from metadata if available
             var codecForTitle = when (entity.contentType) {
                 ContentType.SERIES -> entityCodecs["${entity.providerName}_${entity.contentId}"]
@@ -2630,8 +2635,14 @@ class IptvRequestService(
                 radarrTitle = "$radarrTitle-${releaseGroupParts.joinToString("-")}"
             }
             
-            // Log magnet title generation (initial -> final)
-            logger.debug("Generating magnet title - initial: '{}', final: '{}'", entity.title, radarrTitle)
+            // Log magnet title generation (OMDB/search base -> final)
+            logger.debug(
+                "Generating magnet title - iptvCatalog='{}', baseTitle='{}', preferredOmdb='{}', final='{}'",
+                entity.title,
+                baseTitle,
+                preferredDisplayTitle,
+                radarrTitle,
+            )
             
             // Note: The magnet title should NOT contain the media extension
             // The extension will be added when creating the actual file, but the magnet title
