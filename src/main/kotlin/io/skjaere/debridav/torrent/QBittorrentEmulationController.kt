@@ -239,18 +239,30 @@ class QBittorrentEmulationController(
     @Suppress("MagicNumber")
     @GetMapping("/api/v2/torrents/files")
     fun torrentFiles(@RequestParam hash: TorrentHash): List<TorrentFilesResponse>? {
-        return torrentService.getTorrentByHash(hash)?.let {
-            it.files.map { torrentFile ->
+        return torrentService.getTorrentByHash(hash)?.let { torrent ->
+            val torrentFolder = torrent.name?.trim('/').orEmpty()
+            torrent.files.map { torrentFile ->
                 val originalPath = when (torrentFile) {
                     is RemotelyCachedEntity ->
                         torrentFile.contents?.originalPath ?: torrentFile.name!!
                     is LocalEntity -> torrentFile.name!!
                     else -> torrentFile.name ?: "unknown"
                 }
+                // qBittorrent file names are relative to save_path (download root).
+                // Stored originalPath is relative to the torrent folder; prepend it when missing
+                // so HolyArrs joins save_path + name → .../downloads/Folder/file.mkv.
+                val nameRelativeToSave = when {
+                    torrentFolder.isEmpty() -> originalPath
+                    originalPath == torrentFolder ||
+                        originalPath.startsWith("$torrentFolder/") ||
+                        originalPath.startsWith("$torrentFolder\\") -> originalPath
+                    else -> "$torrentFolder/$originalPath"
+                }
+                val sizeBytes = (torrentFile.size ?: 0L).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
                 TorrentFilesResponse(
                     0,
-                    originalPath,
-                    torrentFile.size!!.toInt(),
+                    nameRelativeToSave,
+                    sizeBytes,
                     100,
                     1,
                     true,
