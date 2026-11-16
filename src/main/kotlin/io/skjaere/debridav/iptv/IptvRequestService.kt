@@ -510,8 +510,13 @@ class IptvRequestService(
             // Check if IPTV content title starts with any configured language prefix
             // If not, extract language code and append it after .IPTV
             // extractLanguageCodeIfNotInPrefixes already returns uppercase
-            val languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)?.uppercase()
-            
+            var languageCode = extractLanguageCodeIfNotInPrefixes(iptvContent.title)?.uppercase()
+            // Magnet titles already carry the locale in the release group (e.g. -IPTV-streamq-IN).
+            // Re-appending produces ...-IN-IN folders/files on disk.
+            if (languageCode != null && folderNameBase.endsWith("-$languageCode", ignoreCase = true)) {
+                languageCode = null
+            }
+
             // Build folder name: insert language code between .IPTV and media extension if needed
             val folderNameWithExtension = if (languageCode != null && folderNameBase.endsWith(".IPTV", ignoreCase = true)) {
                 // Insert language code between .IPTV and media extension

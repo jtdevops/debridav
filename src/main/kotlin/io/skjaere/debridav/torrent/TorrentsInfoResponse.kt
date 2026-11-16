@@ -92,6 +92,11 @@ data class TorrentsInfoResponse(
             // Matching qBittorrent: save_path is the download directory; content_path is the torrent folder.
             val baseContentPath = "$mountPath${torrent.savePath}"
             val contentPath = if (debugSuffix != null) "$baseContentPath$debugSuffix" else baseContentPath
+            // Keep torrents/info size stubs small. Sonarr/Radarr treat a real multi-GB
+            // size as a normal completed download and repeatedly Stat/import through the
+            // rclone mount (LOCAL_VIDEO_BYPASS_CONTENT_LENGTH_EXTERNAL spam). HolyArrs
+            // uses torrents/files sizes instead, which remain the real byte lengths.
+            val sizeStub = 100
 
             return TorrentsInfoResponse(
                 addedOn = torrent.created!!.toEpochMilli().toInt(),
@@ -104,8 +109,8 @@ data class TorrentsInfoResponse(
                 contentPath = contentPath,
                 dlLimit = 0,
                 dlSpeed = 0,
-                downloaded = 100,
-                downloadedSession = 100,
+                downloaded = sizeStub,
+                downloadedSession = sizeStub,
                 eta = 100,
                 firstLastPiecePriority = false,
                 forceStart = false,
@@ -128,12 +133,12 @@ data class TorrentsInfoResponse(
                 seedingTimeLimit = 0,
                 seenComplete = 0,
                 seqDl = false,
-                size = 100,
+                size = sizeStub,
                 state = "pausedUP",
                 superSeeding = false,
                 tags = "",
                 timeActive = 0,
-                totalSize = 100,
+                totalSize = sizeStub,
                 tracker = "",
                 upLimit = 0,
                 uploaded = 0,
