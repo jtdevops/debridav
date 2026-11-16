@@ -323,9 +323,8 @@ class IptvRequestService(
         val fileName = sanitizeFileName(fileNameWithExtension)
         val filePath = "$categoryPath/$folderName/$fileName"
         
-        // Generate hash from content ID - use original format for database compatibility
-        // The database stores hashCode().toString() format, not hex
-        val hash = "${providerName}_${contentId}".hashCode().toString()
+        // qBittorrent-style 40-char hex info hash (SHA-1 of provider + content id)
+        val hash = generateIptvHash(providerName, contentId)
         
         // Create virtual file
         try {
@@ -619,10 +618,9 @@ class IptvRequestService(
             // Create folder structure: folder name = magnet title (sanitized), file name = full episode title
             val filePath = "$categoryPath/$sanitizedFolderName/$fileName"
             
-            // Generate hash from episode content ID (series episodes use seriesId_episodeId format)
-            // Use original format for database compatibility
+            // qBittorrent-style 40-char hex info hash for this episode file
             val episodeContentId = "${seriesId}_${episode.id}"
-            val hash = "${providerName}_${episodeContentId}".hashCode().toString()
+            val hash = generateIptvHash(providerName, episodeContentId)
             
             // Create virtual file
             try {
@@ -899,23 +897,30 @@ class IptvRequestService(
     }
     
     /**
-     * Generates a consistent hash from provider name and content ID.
-     * This hash is used as the infohash in search results and matches the hash
-     * used when creating Torrent entities from IPTV content.
-     * 
-     * Returns a positive hex string suitable for use in magnet URIs.
-     * 
+     * Generates a BitTorrent-compatible info hash from provider, content id, and optional
+     * season/episode. Returns lowercase SHA-1 hex (exactly 40 characters) for magnet
+     * `xt=urn:btih:` and qBittorrent-emulation torrent ids so Arr clients can follow each
+     * episode separately (S02E01 and S02E05 must not share a hash).
+     *
      * Reverse lookup: The hash can be used to find the IPTV content via:
      * 1. Look up Torrent by hash: torrentRepository.getByHashIgnoreCase(hash)
      * 2. Get files from Torrent: torrent.files
      * 3. Extract IPTV info: (file.contents as DebridIptvContent).iptvProviderName and iptvContentId
      */
-    fun generateIptvHash(providerName: String, contentId: String): String {
-        // Generate hash code and convert to positive hex string
-        val hashInt = "${providerName}_${contentId}".hashCode()
-        // Convert to unsigned long to ensure positive, then to hex
-        val unsignedHash = hashInt.toLong() and 0xFFFFFFFFL
-        return unsignedHash.toString(16).uppercase().padStart(8, '0')
+    fun generateIptvHash(
+        providerName: String,
+        contentId: String,
+        season: Int? = null,
+        episode: Int? = null,
+    ): String {
+        return io.skjaere.debridav.iptv.util.IptvHashUtil.toTorrentInfoHash(
+            io.skjaere.debridav.iptv.util.IptvHashUtil.iptvContentMaterial(
+                providerName,
+                contentId,
+                season,
+                episode,
+            )
+        )
     }
     
     /**
@@ -957,12 +962,12 @@ class IptvRequestService(
      * but our system recognizes it as IPTV via the tracker parameter.
      */
     private fun createIptvMagnetUri(hash: String, title: String, guid: String): String {
-        // URL encode the title for the magnet link
         val encodedTitle = java.net.URLEncoder.encode(title, Charsets.UTF_8.name())
-        // Create a standard magnet URI format that Radarr will accept
-        // Use BTIH format (BitTorrent Info Hash) - must be exactly 40 hex characters
-        // Pad hash to 40 chars (standard BTIH length) with zeros
-        val btihHash = hash.lowercase().padEnd(40, '0').take(40)
+        // BTIH must be exactly 40 hex characters (no zero-padding of short hashes)
+        require(io.skjaere.debridav.iptv.util.IptvHashUtil.isTorrentInfoHash(hash)) {
+            "IPTV magnet btih must be a 40-character hex info hash, was length ${hash.length}"
+        }
+        val btihHash = hash.lowercase()
         return "magnet:?xt=urn:btih:$btihHash&dn=$encodedTitle&tr=${java.net.URLEncoder.encode(guid, Charsets.UTF_8.name())}"
     }
     
@@ -2477,7 +2482,15 @@ class IptvRequestService(
                         }
                     }
                     
-                    hasSeason
+                    // Require the specific episode when Sonarr/Radarr asked for SxxEyy
+                    if (requestedEpisodeNumber != null) {
+                        val hasEpisode = episodes.any {
+                            it.season == requestedSeason && it.episode == requestedEpisodeNumber
+                        }
+                        hasSeason && hasEpisode
+                    } else {
+                        hasSeason
+                    }
                 } else {
                     // Not Xtream Codes provider, include it (can't verify episodes)
                     true
@@ -2508,8 +2521,15 @@ class IptvRequestService(
         val searchResults = mutableListOf<IptvSearchResult>()
 
         fun buildSearchResult(entity: IptvContentEntity): IptvSearchResult? {
-            // Generate infohash from providerName and contentId (now returns hex string)
-            val infohash = generateIptvHash(entity.providerName, entity.contentId)
+            // Episode-specific infohash so Sonarr/Radarr do not collide grabs across episodes
+            val episodeForHash = entityRequestedEpisodeNumbers["${entity.providerName}_${entity.contentId}"]
+                ?: requestedEpisodeNumber
+            val infohash = generateIptvHash(
+                entity.providerName,
+                entity.contentId,
+                requestedSeason,
+                episodeForHash,
+            )
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
             val guid = "iptv://$infohash/${entity.providerName}/${entity.contentId}"
             

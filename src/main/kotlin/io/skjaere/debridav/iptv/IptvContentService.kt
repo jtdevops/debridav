@@ -5,6 +5,7 @@ import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationService
 import io.skjaere.debridav.iptv.configuration.IptvConfigurationProperties
 import io.skjaere.debridav.iptv.model.ContentType
+import io.skjaere.debridav.iptv.util.IptvLocaleRanking
 import io.skjaere.debridav.repository.DebridFileContentsRepository
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
@@ -124,9 +125,9 @@ class IptvContentService(
     }
     
     /**
-     * Sorts search results by relevance score (higher is better) first, then by provider priority.
-     * Relevance scoring prioritizes exact matches and closer matches.
-     * Optionally limits results based on configuration.
+     * Sorts by relevance (blank locale suffix boosted most), then blank `-IPTV-{provider}`
+     * before locale-suffixed `-IPTV-{provider}-DE`, then provider priority.
+     * Stripped prefixes (e.g. EN from env config) produce the blank suffix and rank highest.
      */
     private fun sortByRelevanceAndProviderPriority(
         results: List<IptvContentEntity>,
@@ -137,25 +138,48 @@ class IptvContentService(
         if (results.isEmpty()) {
             return results
         }
+
+        val strippedPrefixes = iptvConfigurationProperties.expandedLanguagePrefixes
+        val baseStrippedPrefixes = iptvConfigurationProperties.baseLanguagePrefixes
         
         val scoredResults = results.map { entity ->
-            val score = calculateRelevanceScore(entity, searchTitle, searchYear)
-            logger.trace("Relevance score for '${entity.title}': $score (search: '$searchTitle', year: $searchYear)")
-            Pair(entity, score)
+            val baseScore = calculateRelevanceScore(entity, searchTitle, searchYear)
+            val score = IptvLocaleRanking.relevanceWithLocaleBonus(
+                baseScore,
+                entity.title,
+                strippedPrefixes,
+                baseStrippedPrefixes,
+            )
+            val localeKey = IptvLocaleRanking.localeSuffixSortKey(
+                entity.title,
+                strippedPrefixes,
+                baseStrippedPrefixes,
+            )
+            logger.trace(
+                "Relevance score for '${entity.title}': base=$baseScore, scored=$score, " +
+                    "blankLocale=${localeKey == 0} (search: '$searchTitle', year: $searchYear)"
+            )
+            Triple(entity, score, localeKey)
         }
         
-        val sorted = scoredResults.sortedWith(compareByDescending<Pair<IptvContentEntity, Int>> { it.second }
-            .thenBy { entity ->
-                // Secondary sort by provider priority (lower number = higher priority)
-                providerPriorityMap[entity.first.providerName] ?: Int.MAX_VALUE
-            })
+        val sorted = scoredResults.sortedWith(
+            compareByDescending<Triple<IptvContentEntity, Int, Int>> { it.second }
+                .thenBy { it.third } // 0 = blank `-IPTV-streamq`, 1 = `-IPTV-streamq-DE`
+                .thenBy { providerPriorityMap[it.first.providerName] ?: Int.MAX_VALUE }
+        )
         
         val maxResults = iptvConfigurationProperties.maxSearchResults
         val limitedResults = if (maxResults > 0 && sorted.size > maxResults) {
-            logger.debug("Limiting results from ${sorted.size} to $maxResults (top scores: ${sorted.take(maxResults).joinToString { "${it.first.title}=${it.second}" }})")
+            logger.debug(
+                "Limiting results from ${sorted.size} to $maxResults " +
+                    "(top scores: ${sorted.take(maxResults).joinToString { "${it.first.title}=${it.second}" }})"
+            )
             sorted.take(maxResults)
         } else {
-            logger.debug("Sorted ${sorted.size} results by relevance score (top 3 scores: ${sorted.take(3).joinToString { "${it.first.title}=${it.second}" }})")
+            logger.debug(
+                "Sorted ${sorted.size} results by relevance and locale suffix " +
+                    "(top 3: ${sorted.take(3).joinToString { "${it.first.title}=${it.second}" }})"
+            )
             sorted
         }
         
