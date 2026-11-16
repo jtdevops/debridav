@@ -36,4 +36,17 @@ class IptvHashUtilTest {
         assertFalse(IptvHashUtil.isTorrentInfoHash("3E8F2A1B"))
         assertTrue(IptvHashUtil.isTorrentInfoHash("a".repeat(40)))
     }
+
+    @Test
+    fun `episode-specific material differs per episode of the same series`() {
+        val e01 = IptvHashUtil.iptvContentMaterial("streamq", "28443", 2, 1)
+        val e05 = IptvHashUtil.iptvContentMaterial("streamq", "28443", 2, 5)
+        val seriesOnly = IptvHashUtil.iptvContentMaterial("streamq", "28443")
+
+        assertEquals("streamq_28443_S02E01", e01)
+        assertEquals("streamq_28443_S02E05", e05)
+        assertEquals("streamq_28443", seriesOnly)
+        assertFalse(IptvHashUtil.toTorrentInfoHash(e01) == IptvHashUtil.toTorrentInfoHash(e05))
+        assertFalse(IptvHashUtil.toTorrentInfoHash(e01) == IptvHashUtil.toTorrentInfoHash(seriesOnly))
+    }
 }

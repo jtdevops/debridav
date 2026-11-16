@@ -196,6 +196,7 @@ class TorrentService(
             providerName = providerName,
             contentId = contentId,
             season = season,
+            episode = episode,
             filesToInclude = filesToInclude,
             contentType = iptvContent.contentType
         )
@@ -379,9 +380,11 @@ class TorrentService(
         providerName: String,
         contentId: String,
         season: Int?,
+        episode: Int? = null,
         filesToInclude: List<RemotelyCachedEntity>,
         contentType: ContentType?,
     ): String {
+        // Prefer magnet btih so Arr's tracked id matches the search result exactly
         magnet?.let { m ->
             runCatching { getHashFromMagnet(m)?.hash?.lowercase() }.getOrNull()
                 ?.takeIf { IptvHashUtil.isTorrentInfoHash(it) }
@@ -389,17 +392,28 @@ class TorrentService(
         }
 
         if (season != null && contentType == ContentType.SERIES) {
+            // Prefer season/episode from magnet title (same material as IPTV search magnets)
+            if (episode != null) {
+                return iptvRequestService.generateIptvHash(providerName, contentId, season, episode)
+            }
+
             val episodePattern = Regex("S(\\d{2})E(\\d{2})")
             val episodeIdentifiers = filesToInclude.mapNotNull { file ->
                 episodePattern.find(file.name ?: "")?.value
             }.sorted().distinct()
 
+            if (episodeIdentifiers.size == 1) {
+                val match = Regex("S(\\d{2})E(\\d{2})").find(episodeIdentifiers.first())
+                val epSeason = match?.groupValues?.get(1)?.toIntOrNull() ?: season
+                val epNum = match?.groupValues?.get(2)?.toIntOrNull()
+                logger.debug("Generated single-episode IPTV hash for S${String.format("%02d", epSeason)}E${String.format("%02d", epNum ?: 0)}")
+                return iptvRequestService.generateIptvHash(providerName, contentId, epSeason, epNum)
+            }
             if (episodeIdentifiers.isEmpty()) {
                 logger.warn("Could not extract episode identifiers from file names, using season-based hash")
-                return IptvHashUtil.toTorrentInfoHash(
-                    "${providerName}_${contentId}_S${String.format("%02d", season)}"
-                )
+                return iptvRequestService.generateIptvHash(providerName, contentId, season, null)
             }
+            // Season pack / multi-episode: hash the sorted episode id list
             val episodeString = episodeIdentifiers.joinToString("_")
             logger.debug("Generated hash from episodes: $episodeString")
             return IptvHashUtil.toTorrentInfoHash("${providerName}_${contentId}_$episodeString")

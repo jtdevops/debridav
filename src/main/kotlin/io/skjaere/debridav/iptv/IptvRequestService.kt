@@ -897,17 +897,30 @@ class IptvRequestService(
     }
     
     /**
-     * Generates a BitTorrent-compatible info hash from provider name and content ID.
-     * Returns lowercase SHA-1 hex (exactly 40 characters) for magnet `xt=urn:btih:` and
-     * qBittorrent-emulation torrent ids so Arr clients can follow the download.
+     * Generates a BitTorrent-compatible info hash from provider, content id, and optional
+     * season/episode. Returns lowercase SHA-1 hex (exactly 40 characters) for magnet
+     * `xt=urn:btih:` and qBittorrent-emulation torrent ids so Arr clients can follow each
+     * episode separately (S02E01 and S02E05 must not share a hash).
      *
      * Reverse lookup: The hash can be used to find the IPTV content via:
      * 1. Look up Torrent by hash: torrentRepository.getByHashIgnoreCase(hash)
      * 2. Get files from Torrent: torrent.files
      * 3. Extract IPTV info: (file.contents as DebridIptvContent).iptvProviderName and iptvContentId
      */
-    fun generateIptvHash(providerName: String, contentId: String): String {
-        return io.skjaere.debridav.iptv.util.IptvHashUtil.toTorrentInfoHash("${providerName}_${contentId}")
+    fun generateIptvHash(
+        providerName: String,
+        contentId: String,
+        season: Int? = null,
+        episode: Int? = null,
+    ): String {
+        return io.skjaere.debridav.iptv.util.IptvHashUtil.toTorrentInfoHash(
+            io.skjaere.debridav.iptv.util.IptvHashUtil.iptvContentMaterial(
+                providerName,
+                contentId,
+                season,
+                episode,
+            )
+        )
     }
     
     /**
@@ -2469,7 +2482,15 @@ class IptvRequestService(
                         }
                     }
                     
-                    hasSeason
+                    // Require the specific episode when Sonarr/Radarr asked for SxxEyy
+                    if (requestedEpisodeNumber != null) {
+                        val hasEpisode = episodes.any {
+                            it.season == requestedSeason && it.episode == requestedEpisodeNumber
+                        }
+                        hasSeason && hasEpisode
+                    } else {
+                        hasSeason
+                    }
                 } else {
                     // Not Xtream Codes provider, include it (can't verify episodes)
                     true
@@ -2500,8 +2521,15 @@ class IptvRequestService(
         val searchResults = mutableListOf<IptvSearchResult>()
 
         fun buildSearchResult(entity: IptvContentEntity): IptvSearchResult? {
-            // Generate infohash from providerName and contentId (now returns hex string)
-            val infohash = generateIptvHash(entity.providerName, entity.contentId)
+            // Episode-specific infohash so Sonarr/Radarr do not collide grabs across episodes
+            val episodeForHash = entityRequestedEpisodeNumbers["${entity.providerName}_${entity.contentId}"]
+                ?: requestedEpisodeNumber
+            val infohash = generateIptvHash(
+                entity.providerName,
+                entity.contentId,
+                requestedSeason,
+                episodeForHash,
+            )
             // Include hash in URL for easy extraction: iptv://{hash}/{providerName}/{contentId}
             val guid = "iptv://$infohash/${entity.providerName}/${entity.contentId}"
             

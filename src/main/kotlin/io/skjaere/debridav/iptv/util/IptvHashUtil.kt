@@ -38,6 +38,24 @@ object IptvHashUtil {
         return hash
     }
 
+    /**
+     * Stable material for IPTV torrent/magnet ids.
+     * Include season/episode so Arr clients do not collide S02E01 and S02E05 of the same series.
+     */
+    fun iptvContentMaterial(
+        providerName: String,
+        contentId: String,
+        season: Int? = null,
+        episode: Int? = null,
+    ): String = when {
+        season != null && episode != null ->
+            "${providerName}_${contentId}_S${String.format("%02d", season)}E${String.format("%02d", episode)}"
+        season != null ->
+            "${providerName}_${contentId}_S${String.format("%02d", season)}"
+        else ->
+            "${providerName}_${contentId}"
+    }
+
     /** True when [hash] is a 40-character hexadecimal info hash. */
     fun isTorrentInfoHash(hash: String): Boolean = HEX_HASH.matches(hash)
 }
