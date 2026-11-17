@@ -301,7 +301,10 @@ class IptvApiController(
             } else {
                 logger.debug("Using 'q' parameter: '$qParam'")
             }
-            return extractTitleAndYear(qParam, useArticleVariations = true)
+            return enrichWithOmdbDisplayNames(
+                extractTitleAndYear(qParam, useArticleVariations = true),
+                contentType,
+            )
         }
         
         // Priority 3: Use 'qTest' parameter (testing data) - ONLY if q and imdbid are NOT provided
@@ -345,7 +348,10 @@ class IptvApiController(
                 } else {
                     logger.debug("Using 'qTest' parameter as text (testing): '$qTestParam'")
                 }
-                return extractTitleAndYear(qTestParam, useArticleVariations = true)
+                return enrichWithOmdbDisplayNames(
+                    extractTitleAndYear(qTestParam, useArticleVariations = true),
+                    contentType,
+                )
             }
         } else {
             // q or imdbid were provided, so skip qTest even if it exists
@@ -358,10 +364,58 @@ class IptvApiController(
         val queryParam = query?.takeIf { it.isNotBlank() }
         if (queryParam != null) {
             logger.debug("Using legacy 'query' parameter: '$queryParam'")
-            return extractTitleAndYear(queryParam, useArticleVariations = true)
+            return enrichWithOmdbDisplayNames(
+                extractTitleAndYear(queryParam, useArticleVariations = true),
+                contentType,
+            )
         }
         
         return null
+    }
+
+    /**
+     * Resolves OMDB metadata for text searches so magnet/Torznab names use the OMDB title
+     * (movies and series) instead of IPTV catalog names that often include country tags like "(US)".
+     * Searches still use the Arr query string; only the display/magnet title is overridden.
+     */
+    private fun enrichWithOmdbDisplayNames(
+        query: SearchQuery,
+        contentType: ContentType?,
+    ): SearchQuery {
+        if (!query.preferredDisplayTitle.isNullOrBlank()) {
+            return query
+        }
+        val omdbType = when (contentType) {
+            ContentType.MOVIE -> "movie"
+            ContentType.SERIES -> "series"
+            else -> null
+        }
+        val metadata = runBlocking {
+            metadataService.getMetadataByTitle(
+                title = query.title,
+                year = query.year ?: query.startYear,
+                omdbType = omdbType,
+            )
+        }
+        if (metadata == null) {
+            logger.debug(
+                "No OMDB metadata for title='{}' year={} type={}; magnet titles may fall back to search query / IPTV name",
+                query.title,
+                query.year ?: query.startYear,
+                omdbType ?: "any",
+            )
+            return query
+        }
+        logger.info(
+            "Using OMDB title for magnet display: '{}' (year={}) for search '{}'",
+            metadata.title,
+            metadata.releasedYear ?: metadata.startYear,
+            query.title,
+        )
+        return query.copy(
+            preferredDisplayTitle = metadata.title,
+            preferredDisplayYear = metadata.releasedYear ?: metadata.startYear,
+        )
     }
     
     /**

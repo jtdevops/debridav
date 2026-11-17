@@ -80,15 +80,26 @@ data class TorrentsInfoResponse(
     val upSpeed: Int
 ) {
     companion object {
-        fun ofTorrent(torrent: Torrent, downloadDir: String, debugSuffix: String? = null): TorrentsInfoResponse {
-            // For IPTV torrents, contentPath should be the folder path only (same as regular torrents)
-            // Check if this is an IPTV torrent by checking if files contain DebridIptvContent
-            // Regular torrents use DebridCachedTorrentContent, so they won't match this check
-            // Both IPTV and regular torrents return folder path only in contentPath
-            // savePath is relative to mount path (e.g., /downloads/TorrentName), so combine with downloadDir
-            val baseContentPath = "$downloadDir${torrent.savePath}"
+        fun ofTorrent(
+            torrent: Torrent,
+            mountPath: String,
+            downloadRoot: String,
+            debugSuffix: String? = null
+        ): TorrentsInfoResponse {
+            // torrent.savePath is relative to mount path (e.g. /downloads/TorrentName).
+            // content_path = mountPath + torrent.savePath → /data/downloads/TorrentName
+            // save_path = download root (mountPath + downloadPath) → /data/downloads
+            // Matching qBittorrent: save_path is the download directory; content_path is the torrent folder.
+            val baseContentPath = "$mountPath${torrent.savePath}"
             val contentPath = if (debugSuffix != null) "$baseContentPath$debugSuffix" else baseContentPath
-            
+            // Temporary: report real byte totals so HolyArrs can be retested with
+            // torrents/info size matching torrents/files. Sonarr/Radarr may Stat the
+            // mount more aggressively with multi-GB sizes; revert or gate if needed.
+            val totalBytes = torrent.files
+                .sumOf { it.size ?: 0L }
+                .coerceIn(0L, Int.MAX_VALUE.toLong())
+                .toInt()
+
             return TorrentsInfoResponse(
                 addedOn = torrent.created!!.toEpochMilli().toInt(),
                 amountLeft = 0,
@@ -100,8 +111,8 @@ data class TorrentsInfoResponse(
                 contentPath = contentPath,
                 dlLimit = 0,
                 dlSpeed = 0,
-                downloaded = 100,
-                downloadedSession = 100,
+                downloaded = totalBytes,
+                downloadedSession = totalBytes,
                 eta = 100,
                 firstLastPiecePriority = false,
                 forceStart = false,
@@ -119,19 +130,17 @@ data class TorrentsInfoResponse(
                 progress = 1.0.toFloat(),
                 ratio = 1.0.toFloat(),
                 ratioLimit = 1.0.toFloat(),
-                // savePath should be the base download directory (mountPath + downloadPath)
-                // This matches qBittorrent's behavior where savePath is the root download directory
-                savePath = downloadDir,
+                savePath = downloadRoot,
                 seedingTime = 0,
                 seedingTimeLimit = 0,
                 seenComplete = 0,
                 seqDl = false,
-                size = 100,
+                size = totalBytes,
                 state = "pausedUP",
                 superSeeding = false,
                 tags = "",
                 timeActive = 0,
-                totalSize = 100,
+                totalSize = totalBytes,
                 tracker = "",
                 upLimit = 0,
                 uploaded = 0,

@@ -45,8 +45,7 @@ class MetadataService(
             // Parse cached response JSON to extract metadata
             return parseMetadataFromJson(cachedEntity.responseJson, imdbId)
         }
-        
-        // Cache miss - fetch from API
+
         if (metadataConfigurationProperties.omdbApiKey.isBlank()) {
             logger.debug("OMDB API key not configured, skipping metadata lookup for IMDB ID: $imdbId")
             return null
@@ -54,69 +53,131 @@ class MetadataService(
 
         val apiKey = metadataConfigurationProperties.omdbApiKey
         val baseUrl = metadataConfigurationProperties.omdbBaseUrl
+        return fetchAndCacheOmdb("$baseUrl/?apikey=$apiKey&i=$imdbId", imdbIdHint = imdbId)
+    }
 
+    /**
+     * Fetches OMDB metadata by title (and optional year/type).
+     * Used so magnet/Torznab display names use the OMDB title for both movies and series
+     * even when the Arr client searched with `q=` instead of `imdbid`.
+     *
+     * @param title Clean title without year (e.g. "Landman")
+     * @param year Optional start year to disambiguate
+     * @param omdbType OMDB type filter: "movie", "series", or null for either
+     */
+    suspend fun getMetadataByTitle(
+        title: String,
+        year: Int? = null,
+        omdbType: String? = null,
+    ): MediaMetadata? {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) {
+            return null
+        }
+
+        // Prefer a year-scoped cache hit when the caller provided a year
+        val cachedEntity = if (year != null) {
+            iptvImdbMetadataRepository.findFirstByTitleIgnoreCaseAndStartYear(cleanTitle, year)
+                ?: iptvImdbMetadataRepository.findFirstByTitleIgnoreCase(cleanTitle)
+        } else {
+            iptvImdbMetadataRepository.findFirstByTitleIgnoreCase(cleanTitle)
+        }
+        if (cachedEntity != null) {
+            logger.debug(
+                "Found cached IMDB metadata for title='{}' year={} -> imdbId={}",
+                cleanTitle,
+                year,
+                cachedEntity.imdbId,
+            )
+            iptvImdbMetadataRepository.updateLastAccessed(cachedEntity.imdbId, Instant.now())
+            return parseMetadataFromJson(cachedEntity.responseJson, cachedEntity.imdbId)
+        }
+
+        if (metadataConfigurationProperties.omdbApiKey.isBlank()) {
+            logger.debug("OMDB API key not configured, skipping title lookup for '{}'", cleanTitle)
+            return null
+        }
+
+        val apiKey = metadataConfigurationProperties.omdbApiKey
+        val baseUrl = metadataConfigurationProperties.omdbBaseUrl
+        val encodedTitle = java.net.URLEncoder.encode(cleanTitle, Charsets.UTF_8)
+        val url = buildString {
+            append("$baseUrl/?apikey=$apiKey&t=$encodedTitle")
+            if (year != null) append("&y=$year")
+            if (!omdbType.isNullOrBlank()) append("&type=$omdbType")
+        }
+        return fetchAndCacheOmdb(url, imdbIdHint = null)
+    }
+
+    /**
+     * Calls OMDB, parses title/year/released, and caches by IMDb id when present.
+     */
+    private suspend fun fetchAndCacheOmdb(url: String, imdbIdHint: String?): MediaMetadata? {
         return try {
-            val url = "$baseUrl/?apikey=$apiKey&i=$imdbId"
-            logger.debug("Fetching metadata from OMDB API for IMDB ID: $imdbId")
-            
+            logger.debug("Fetching metadata from OMDB: {}", url.replace(Regex("apikey=[^&]+"), "apikey=***"))
+
             val response: HttpResponse = httpClient.get(url)
-            
-            if (response.status == HttpStatusCode.OK) {
-                // Get the raw response body as string to store in cache
-                val responseBody = response.body<String>()
-                
-                // Parse JSON manually since OMDB uses capital field names
-                val jsonElement: JsonElement = json.parseToJsonElement(responseBody)
-                val jsonObject = jsonElement.jsonObject
-                
-                val responseValue = jsonObject["Response"]?.jsonPrimitive?.content
-                val title = jsonObject["Title"]?.jsonPrimitive?.content
-                val year = jsonObject["Year"]?.jsonPrimitive?.content
-                val released = jsonObject["Released"]?.jsonPrimitive?.content
-                val error = jsonObject["Error"]?.jsonPrimitive?.content
-                
-                if (responseValue == "True" && title != null) {
-                    logger.debug("Successfully fetched metadata: title='$title', year='$year', released='$released'")
-                    // Parse year range (e.g., "2006–2013" or "2006-2013")
-                    val (startYear, endYear) = parseYearRange(year)
-                    // Parse Released date (e.g. "18 Mar 2026") - Sonarr/TVDb use this for matching
-                    val releasedYear = parseReleasedYear(released)
-                    if (releasedYear != null && releasedYear != startYear) {
-                        logger.debug("OMDB Year ($startYear) differs from Released ($released) -> $releasedYear; using released year for display")
-                    }
-                    val metadata = MediaMetadata(
-                        title = title,
-                        year = startYear, // Use start year for backward compatibility
-                        startYear = startYear,
-                        endYear = endYear,
-                        releasedYear = releasedYear,
-                        imdbId = imdbId
-                    )
-                    
-                    // Cache the result with full API response
-                    val entity = IptvImdbMetadataEntity().apply {
+            if (response.status != HttpStatusCode.OK) {
+                logger.warn("OMDB API returned status {} for url hint imdbId={}", response.status, imdbIdHint)
+                return null
+            }
+
+            val responseBody = response.body<String>()
+            val jsonObject = json.parseToJsonElement(responseBody).jsonObject
+            val responseValue = jsonObject["Response"]?.jsonPrimitive?.content
+            val title = jsonObject["Title"]?.jsonPrimitive?.content
+            val year = jsonObject["Year"]?.jsonPrimitive?.content
+            val released = jsonObject["Released"]?.jsonPrimitive?.content
+            val imdbId = jsonObject["imdbID"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                ?: imdbIdHint
+            val error = jsonObject["Error"]?.jsonPrimitive?.content
+
+            if (responseValue != "True" || title == null || imdbId.isNullOrBlank()) {
+                logger.warn("OMDB API returned False/incomplete response (imdbId hint={}): {}", imdbIdHint, error)
+                return null
+            }
+
+            logger.debug("Successfully fetched OMDB metadata: title='{}', year='{}', released='{}', imdbId={}", title, year, released, imdbId)
+            val (startYear, endYear) = parseYearRange(year)
+            val releasedYear = parseReleasedYear(released)
+            if (releasedYear != null && releasedYear != startYear) {
+                logger.debug("OMDB Year ($startYear) differs from Released ($released) -> $releasedYear; using released year for display")
+            }
+
+            val metadata = MediaMetadata(
+                title = title,
+                year = startYear,
+                startYear = startYear,
+                endYear = endYear,
+                releasedYear = releasedYear,
+                imdbId = imdbId,
+            )
+
+            val existing = iptvImdbMetadataRepository.findByImdbId(imdbId)
+            if (existing != null) {
+                existing.title = title
+                existing.startYear = startYear
+                existing.endYear = endYear
+                existing.responseJson = responseBody
+                existing.lastAccessed = Instant.now()
+                iptvImdbMetadataRepository.save(existing)
+            } else {
+                iptvImdbMetadataRepository.save(
+                    IptvImdbMetadataEntity().apply {
                         this.imdbId = imdbId
                         this.title = title
                         this.startYear = startYear
                         this.endYear = endYear
-                        this.responseJson = responseBody // Store full API response
+                        this.responseJson = responseBody
                         this.lastAccessed = Instant.now()
                         this.createdAt = Instant.now()
                     }
-                    iptvImdbMetadataRepository.save(entity)
-                    logger.debug("Cached IMDB metadata for IMDB ID: $imdbId")
-                    
-                    metadata
-                } else {
-                    logger.warn("OMDB API returned False response for IMDB ID: $imdbId, error: $error")
-                    null
-                }
-            } else {
-                logger.warn("OMDB API returned status ${response.status} for IMDB ID: $imdbId")
-                null
+                )
             }
+            logger.debug("Cached IMDB metadata for IMDB ID: $imdbId")
+            metadata
         } catch (e: Exception) {
-            logger.warn("Failed to fetch metadata from OMDB API for IMDB ID: $imdbId", e)
+            logger.warn("Failed to fetch metadata from OMDB API (imdbId hint={})", imdbIdHint, e)
             null
         }
     }
