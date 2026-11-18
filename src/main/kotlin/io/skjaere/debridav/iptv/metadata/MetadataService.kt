@@ -141,7 +141,9 @@ class MetadataService(
             val (startYear, endYear) = parseYearRange(year)
             val releasedYear = parseReleasedYear(released)
             if (releasedYear != null && releasedYear != startYear) {
-                logger.debug("OMDB Year ($startYear) differs from Released ($released) -> $releasedYear; using released year for display")
+                logger.debug(
+                    "OMDB Year ($startYear) differs from Released ($released) -> $releasedYear; display/search use Year (startYear), not Released"
+                )
             }
 
             val metadata = MediaMetadata(
@@ -256,8 +258,7 @@ class MetadataService(
     
     /**
      * Parses the year from OMDB's Released field (e.g. "18 Mar 2026", "01 Jan 2025").
-     * Sonarr/TVDb use the actual release date for matching; when Year and Released differ,
-     * prefer Released so the display title matches what Sonarr expects.
+     * Kept as a fallback when OMDB Year is missing; display/search prefer Year (startYear).
      */
     private fun parseReleasedYear(releasedStr: String?): Int? {
         if (releasedStr == null || releasedStr.isBlank() || releasedStr.equals("N/A", ignoreCase = true)) {
@@ -283,7 +284,7 @@ class MetadataService(
         val year: Int?, // Start year (for backward compatibility)
         val startYear: Int? = null,
         val endYear: Int? = null, // End year if it's a range (e.g., TV series)
-        val releasedYear: Int? = null, // Year from Released date (e.g. "18 Mar 2026" -> 2026); prefer for display when differs from startYear
+        val releasedYear: Int? = null, // Year from Released date; fallback only when Year/startYear is absent
         val imdbId: String
     )
 }
