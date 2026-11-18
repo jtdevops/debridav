@@ -275,7 +275,8 @@ class IptvApiController(
                     metadata.endYear?.let { "-$it" } ?: "")
                 // Return title and year separately - we'll search by title only and filter by year
                 // Don't use article variations when metadata is provided (useArticleVariations = false)
-                // Set preferred display title/year so result names use OMDB title (Radarr/Sonarr compatible)
+                // Set preferred display title/year so result names use OMDB Title + Year
+                // (not Released — that can differ, e.g. series Year "2024–" vs Released "24 Sep 2025")
                 return SearchQuery(
                     title = metadata.title,
                     year = metadata.startYear, // Use start year for backward compatibility
@@ -283,7 +284,7 @@ class IptvApiController(
                     endYear = metadata.endYear,
                     useArticleVariations = false,
                     preferredDisplayTitle = metadata.title,
-                    preferredDisplayYear = metadata.releasedYear ?: metadata.startYear
+                    preferredDisplayYear = metadata.startYear ?: metadata.releasedYear
                 )
             } else {
                 logger.warn("Failed to resolve IMDB ID '$imdbId' to metadata. Not using qTest as fallback since imdbid was provided.")
@@ -334,7 +335,7 @@ class IptvApiController(
                             endYear = metadata.endYear,
                             useArticleVariations = false,
                             preferredDisplayTitle = metadata.title,
-                            preferredDisplayYear = metadata.releasedYear ?: metadata.startYear
+                            preferredDisplayYear = metadata.startYear ?: metadata.releasedYear
                         )
                     } else {
                         logger.warn("Failed to resolve qTest IMDb ID '$qTestParam' to metadata, treating as text")
@@ -409,12 +410,13 @@ class IptvApiController(
         logger.info(
             "Using OMDB title for magnet display: '{}' (year={}) for search '{}'",
             metadata.title,
-            metadata.releasedYear ?: metadata.startYear,
+            metadata.startYear ?: metadata.releasedYear,
             query.title,
         )
         return query.copy(
             preferredDisplayTitle = metadata.title,
-            preferredDisplayYear = metadata.releasedYear ?: metadata.startYear,
+            // Prefer OMDB Year (start year), not Released — Arrs match on series/movie year
+            preferredDisplayYear = metadata.startYear ?: metadata.releasedYear,
         )
     }
     
