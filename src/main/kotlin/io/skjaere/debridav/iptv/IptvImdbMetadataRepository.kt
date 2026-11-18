@@ -12,6 +12,11 @@ import java.time.Instant
 interface IptvImdbMetadataRepository : JpaRepository<IptvImdbMetadataEntity, Long> {
     fun findByImdbId(imdbId: String): IptvImdbMetadataEntity?
 
+    /** Cache hit for OMDB title searches (magnet display names). */
+    fun findFirstByTitleIgnoreCaseAndStartYear(title: String, startYear: Int?): IptvImdbMetadataEntity?
+
+    fun findFirstByTitleIgnoreCase(title: String): IptvImdbMetadataEntity?
+
     @Modifying
     @Transactional
     @Query("UPDATE IptvImdbMetadataEntity e SET e.lastAccessed = :now WHERE e.imdbId = :imdbId")
