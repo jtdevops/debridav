@@ -3,6 +3,7 @@ package io.skjaere.debridav.resource
 import io.milton.http.Auth
 import io.milton.http.Request
 import io.milton.resource.CollectionResource
+import io.milton.resource.CopyableResource
 import io.milton.resource.DeletableResource
 import io.milton.resource.MakeCollectionableResource
 import io.milton.resource.MoveableResource
@@ -35,7 +36,7 @@ class DirectoryResource(
     private val webDavFolderMappingRepository: WebDavFolderMappingRepository?,
     private val webDavSyncedFileRepository: io.skjaere.debridav.webdav.folder.WebDavSyncedFileRepository?
 ) : AbstractResource(fileService, directory), MakeCollectionableResource, MoveableResource, PutableResource,
-    DeletableResource {
+    DeletableResource, CopyableResource {
     
     private val logger = LoggerFactory.getLogger(DirectoryResource::class.java)
 
@@ -71,6 +72,11 @@ class DirectoryResource(
 
     override fun delete() {
         fileService.deleteFile(directory)
+    }
+
+    override fun copyTo(rDest: CollectionResource, name: String) {
+        fileService.copyResource(directory, destinationPathOf(rDest), name)
+        invalidateDestinationChildrenCache(rDest)
     }
 
     /*override fun moveTo(rDest: CollectionResource, name: String) {
