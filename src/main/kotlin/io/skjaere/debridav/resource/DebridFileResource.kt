@@ -3,6 +3,8 @@ package io.skjaere.debridav.resource
 import io.milton.http.Auth
 import io.milton.http.Range
 import io.milton.http.Request
+import io.milton.resource.CollectionResource
+import io.milton.resource.CopyableResource
 import io.milton.resource.DeletableResource
 import io.milton.resource.GetableResource
 import io.skjaere.debridav.configuration.DebridavConfigurationProperties
@@ -48,9 +50,14 @@ class DebridFileResource(
     private val debridService: DebridLinkService,
     private val debridavConfigurationProperties: DebridavConfigurationProperties,
     private val arrRequestDetector: ArrRequestDetector
-) : AbstractResource(fileService, file as DbEntity), GetableResource, DeletableResource {
+) : AbstractResource(fileService, file as DbEntity), GetableResource, DeletableResource, CopyableResource {
     private val debridFileContents: DebridFileContents = (dbItem as RemotelyCachedEntity).contents!!
     private val logger = LoggerFactory.getLogger(DebridClient::class.java)
+
+    override fun copyTo(rDest: CollectionResource, name: String) {
+        fileService.copyResource(dbItem, destinationPathOf(rDest), name)
+        invalidateDestinationChildrenCache(rDest)
+    }
 
     override fun getUniqueId(): String {
         return dbItem.id!!.toString()

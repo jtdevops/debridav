@@ -5,10 +5,19 @@ import com.github.sardine.SardineFactory
 import com.github.sardine.impl.SardineException
 import io.skjaere.debridav.DebriDavApplication
 import io.skjaere.debridav.MiltonConfiguration
+import io.skjaere.debridav.debrid.DebridProvider
+import io.skjaere.debridav.fs.CachedFile
+import io.skjaere.debridav.fs.DatabaseFileService
+import io.skjaere.debridav.fs.LocalEntity
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 import io.skjaere.debridav.repository.DebridFileContentsRepository
+import io.skjaere.debridav.test.debridFileContents
+import io.skjaere.debridav.test.deepCopy
 import io.skjaere.debridav.test.integrationtest.config.IntegrationTestContextConfiguration
 import io.skjaere.debridav.test.integrationtest.config.MockServerTest
+import java.time.Instant
 import kotlin.test.assertFailsWith
+import org.apache.commons.codec.digest.DigestUtils
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.allOf
 import org.hamcrest.Matchers.hasItem
@@ -16,6 +25,9 @@ import org.hamcrest.Matchers.hasProperty
 import org.hamcrest.Matchers.hasSize
 import org.hamcrest.Matchers.`is`
 import org.hamcrest.Matchers.not
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -33,6 +45,9 @@ class WebDavOperationsIT {
 
     @Autowired
     lateinit var debridFileContentsRepository: DebridFileContentsRepository
+
+    @Autowired
+    lateinit var databaseFileService: DatabaseFileService
 
     @LocalServerPort
     var randomServerPort: Int = 0
@@ -579,6 +594,87 @@ class WebDavOperationsIT {
                 contents.inputStream()
             )
         }
+    }
+
+    @Test
+    fun thatCopyingRemotelyCachedFileWithinVfsClonesExternalLinksWithoutMaterializingLocalBlob() {
+        // given — a remotely cached file pointing at an external provider URL
+        val fileContents = debridFileContents.deepCopy()
+        fileContents.id = null
+        val remoteLink = "http://localhost:9/never-fetched-on-copy"
+        fileContents.debridLinks = mutableListOf(
+            CachedFile(
+                path = "movie.mkv",
+                size = 100L,
+                mimeType = "video/mp4",
+                link = remoteLink,
+                params = mapOf(),
+                lastChecked = Instant.now().toEpochMilli(),
+                provider = DebridProvider.PREMIUMIZE
+            )
+        )
+        val hash = DigestUtils.md5Hex("copy-test-hash")
+        databaseFileService.createDebridFile("/downloads/movie.mkv", hash, fileContents)
+        sardine.createDirectory("http://localhost:${randomServerPort}/library")
+
+        // when — WebDAV COPY within the VFS (what rclone / same-remote paste uses)
+        sardine.copy(
+            "http://localhost:${randomServerPort}/downloads/movie.mkv",
+            "http://localhost:${randomServerPort}/library/movie.mkv"
+        )
+
+        // then — destination is still RemotelyCachedEntity with the same external link, not a LocalEntity blob
+        val source = databaseFileService.getFileAtPath("/downloads/movie.mkv")
+        val dest = databaseFileService.getFileAtPath("/library/movie.mkv")
+        assertInstanceOf(RemotelyCachedEntity::class.java, source)
+        assertInstanceOf(RemotelyCachedEntity::class.java, dest)
+        source as RemotelyCachedEntity
+        dest as RemotelyCachedEntity
+        assertNotEquals(source.id, dest.id)
+        assertNotEquals(source.contents!!.id, dest.contents!!.id)
+        assertEquals(hash, dest.hash)
+        val destLink = dest.contents!!.debridLinks.filterIsInstance<CachedFile>().first()
+        assertEquals(remoteLink, destLink.link)
+        assertEquals(100L, dest.size)
+
+        // finally
+        deleteFile("downloads/movie.mkv")
+        deleteFile("library")
+        assertReset()
+    }
+
+    @Test
+    fun thatCopyingLocalFileWithinVfsCreatesIndependentLocalEntity() {
+        // given
+        sardine.put(
+            "http://localhost:${randomServerPort}/testfile.txt",
+            "test contents".byteInputStream()
+        )
+        sardine.createDirectory("http://localhost:${randomServerPort}/copyDest")
+
+        // when
+        sardine.copy(
+            "http://localhost:${randomServerPort}/testfile.txt",
+            "http://localhost:${randomServerPort}/copyDest/testfile.txt"
+        )
+
+        // then
+        val source = databaseFileService.getFileAtPath("/testfile.txt")
+        val dest = databaseFileService.getFileAtPath("/copyDest/testfile.txt")
+        assertInstanceOf(LocalEntity::class.java, source)
+        assertInstanceOf(LocalEntity::class.java, dest)
+        assertNotEquals(source!!.id, dest!!.id)
+        assertEquals(
+            "test contents",
+            sardine.get("http://localhost:${randomServerPort}/copyDest/testfile.txt")
+                .readAllBytes()
+                .decodeToString()
+        )
+
+        // finally
+        deleteFile("testfile.txt")
+        deleteFile("copyDest")
+        assertReset()
     }
 
     private fun assertReset() {

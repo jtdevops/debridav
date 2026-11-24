@@ -3,6 +3,8 @@ package io.skjaere.debridav.resource
 import io.milton.http.Auth
 import io.milton.http.Range
 import io.milton.http.Request
+import io.milton.resource.CollectionResource
+import io.milton.resource.CopyableResource
 import io.milton.resource.DeletableResource
 import io.milton.resource.GetableResource
 import io.milton.resource.ReplaceableResource
@@ -19,7 +21,12 @@ class FileResource(
     val file: LocalEntity,
     fileService: DatabaseFileService,
     private val localContentsService: LocalContentsService,
-) : AbstractResource(fileService, file), GetableResource, DeletableResource, ReplaceableResource {
+) : AbstractResource(fileService, file), GetableResource, DeletableResource, ReplaceableResource, CopyableResource {
+
+    override fun copyTo(rDest: CollectionResource, name: String) {
+        fileService.copyResource(dbItem, destinationPathOf(rDest), name)
+        invalidateDestinationChildrenCache(rDest)
+    }
 
     override fun getUniqueId(): String {
         return dbItem.id.toString()

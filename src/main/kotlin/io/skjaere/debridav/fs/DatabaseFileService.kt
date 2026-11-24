@@ -252,6 +252,165 @@ class DatabaseFileService(
         debridFileRepository.save(dbFile)
     }
 
+    /**
+     * Server-side copy within the VFS (WebDAV COPY).
+     *
+     * For [RemotelyCachedEntity], creates a new VFS entry whose [DebridFileContents] is a deep clone
+     * of the source (same debrid/IPTV URLs and metadata) — no download from the external provider.
+     * For [LocalEntity], duplicates the stored blob. For directories, recursively copies children.
+     *
+     * Paste/copy to a path outside this WebDAV server is unchanged: the client GETs content from us
+     * and writes it elsewhere.
+     */
+    @Transactional
+    fun copyResource(dbItem: DbEntity, destination: String, name: String): DbEntity {
+        return when (dbItem) {
+            is RemotelyCachedEntity -> copyRemotelyCachedEntity(dbItem, destination, name)
+            is LocalEntity -> copyLocalEntity(dbItem, destination, name)
+            is DbDirectory -> copyDirectory(dbItem, destination, name)
+            else -> error("Cannot copy entity of type ${dbItem.javaClass.simpleName}")
+        }
+    }
+
+    private fun copyRemotelyCachedEntity(
+        source: RemotelyCachedEntity,
+        destination: String,
+        name: String
+    ): RemotelyCachedEntity {
+        val reloaded = entityManager.merge(source) as RemotelyCachedEntity
+        val contents = reloaded.contents
+            ?: error("RemotelyCachedEntity ${reloaded.id} has no contents")
+        // Force-initialize lazy JSON / associations while still in this transaction
+        contents.debridLinks.size
+        if (contents is DebridIptvContent) {
+            contents.iptvUrlTemplate?.baseUrl
+        }
+        val destinationDirectory = getOrCreateDirectory(destination)
+
+        debridFileRepository.findByDirectoryAndName(destinationDirectory, name)?.let { existing ->
+            deleteFile(existing)
+        }
+
+        val fileEntity = RemotelyCachedEntity()
+        fileEntity.name = name
+        fileEntity.lastModified = Instant.now().toEpochMilli()
+        fileEntity.size = reloaded.size ?: contents.size
+        fileEntity.mimeType = reloaded.mimeType ?: contents.mimeType
+        fileEntity.directory = destinationDirectory
+        fileEntity.contents = cloneDebridFileContents(contents)
+        fileEntity.hash = reloaded.hash
+
+        logger.info(
+            "Server-side VFS copy of remotely cached file '{}' -> '{}/{}' (cloned external links, no download)",
+            reloaded.name,
+            destination,
+            name
+        )
+        return debridFileRepository.save(fileEntity)
+    }
+
+    private fun copyLocalEntity(source: LocalEntity, destination: String, name: String): LocalEntity {
+        val merged = entityManager.merge(source) as LocalEntity
+        val size = merged.size
+            ?: error("LocalEntity ${merged.id} has no size")
+        val blobStream = merged.blob?.localContents?.binaryStream
+            ?: error("LocalEntity ${merged.id} has no blob contents")
+
+        debridFileRepository.findByDirectoryAndName(getOrCreateDirectory(destination), name)?.let { existing ->
+            deleteFile(existing)
+        }
+
+        logger.info("Server-side VFS copy of local file '{}' -> '{}/{}'", merged.name, destination, name)
+        return createLocalFile("$destination/$name", blobStream, size)
+    }
+
+    private fun copyDirectory(source: DbDirectory, destination: String, name: String): DbDirectory {
+        val targetPath = if (destination == "/") "/$name" else "$destination/$name"
+        getFileAtPath(targetPath)?.let { existing ->
+            deleteFile(existing)
+        }
+        val newDirectory = createDirectory(targetPath)
+        val children = runBlocking { getChildren(source) }
+        children.forEach { child ->
+            val childName = child.name ?: return@forEach
+            copyResource(child, newDirectory.fileSystemPath()!!, childName)
+        }
+        logger.info("Server-side VFS copy of directory '{}' -> '{}'", source.fileSystemPath(), targetPath)
+        return newDirectory
+    }
+
+    /**
+     * Deep-clones content metadata and debrid/IPTV link JSON so the new VFS entry points at the
+     * same external resources without sharing a cascade-deleted [DebridFileContents] row.
+     */
+    private fun cloneDebridFileContents(source: DebridFileContents): DebridFileContents {
+        val clone: DebridFileContents = when (source) {
+            is DebridCachedTorrentContent -> DebridCachedTorrentContent(source.magnet ?: "")
+            is DebridCachedUsenetReleaseContent -> DebridCachedUsenetReleaseContent(source.releaseName ?: "")
+            is DebridIptvContent -> DebridIptvContent().also { iptv ->
+                iptv.iptvUrlTemplate = source.iptvUrlTemplate
+                iptv.iptvProviderName = source.iptvProviderName
+                iptv.iptvContentId = source.iptvContentId
+                iptv.iptvContentRefId = source.iptvContentRefId
+            }
+            is DebridUsenetContents -> DebridUsenetContents().also { usenet ->
+                usenet.usenetDownloadId = source.usenetDownloadId
+                usenet.nzbFileLocation = source.nzbFileLocation
+                usenet.hash = source.hash
+            }
+            else -> error("Unexpected DebridFileContents type: ${source::class}")
+        }
+        clone.originalPath = source.originalPath
+        clone.size = source.size
+        clone.modified = source.modified
+        clone.mimeType = source.mimeType
+        clone.debridLinks = source.debridLinks.map { cloneDebridFile(it) }.toMutableList()
+        return clone
+    }
+
+    private fun cloneDebridFile(source: DebridFile): DebridFile {
+        return when (source) {
+            is CachedFile -> CachedFile(
+                source.path ?: "",
+                source.size ?: 0L,
+                source.mimeType ?: "",
+                source.link ?: "",
+                source.params?.entries?.associate { it.key to it.value },
+                source.lastChecked ?: Instant.now().toEpochMilli(),
+                source.provider ?: error("CachedFile missing provider")
+            )
+            is IptvFile -> IptvFile(
+                source.path ?: "",
+                source.size ?: 0L,
+                source.mimeType ?: "",
+                source.link ?: "",
+                source.params?.entries?.associate { it.key to it.value },
+                source.lastChecked ?: Instant.now().toEpochMilli()
+            )
+            is MissingFile -> MissingFile(
+                source.provider ?: error("MissingFile missing provider"),
+                source.lastChecked ?: Instant.now().toEpochMilli()
+            )
+            is ProviderError -> ProviderError(
+                source.provider ?: error("ProviderError missing provider"),
+                source.lastChecked ?: Instant.now().toEpochMilli()
+            )
+            is ClientError -> ClientError(
+                source.provider ?: error("ClientError missing provider"),
+                source.lastChecked ?: Instant.now().toEpochMilli()
+            )
+            is NetworkError -> NetworkError(
+                source.provider ?: error("NetworkError missing provider"),
+                source.lastChecked ?: Instant.now().toEpochMilli()
+            )
+            is UnknownDebridLinkError -> UnknownDebridLinkError(
+                source.provider ?: error("UnknownDebridLinkError missing provider"),
+                source.lastChecked ?: Instant.now().toEpochMilli()
+            )
+            else -> error("Unexpected DebridFile type: ${source::class}")
+        }
+    }
+
     @Transactional
     fun deleteFile(file: DbEntity) {
         when (file) {
