@@ -1,17 +1,19 @@
 package io.skjaere.debridav.torrent
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import io.skjaere.debridav.fs.DbEntity
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 
 data class TorrentsInfoResponse(
     @JsonProperty("added_on")
     val addedOn: Int,
     @JsonProperty("amount_left")
-    val amountLeft: Int,
+    val amountLeft: Long,
     @JsonProperty("auto_tmm")
     val autoTmm: Boolean,
     val availability: Float,
     val category: String,
-    val completed: Int,
+    val completed: Long,
     @JsonProperty("completion_id")
     val completionOn: Int,
     @JsonProperty("content_path")
@@ -20,9 +22,9 @@ data class TorrentsInfoResponse(
     val dlLimit: Int,
     @JsonProperty("dlspeed")
     val dlSpeed: Int,
-    val downloaded: Int,
+    val downloaded: Long,
     @JsonProperty("downloaded_session")
-    val downloadedSession: Int,
+    val downloadedSession: Long,
     val eta: Int,
     @JsonProperty("f_l_piece_prio")
     val firstLastPiecePriority: Boolean,
@@ -61,7 +63,7 @@ data class TorrentsInfoResponse(
     val seenComplete: Int,
     @JsonProperty("seq_dl")
     val seqDl: Boolean,
-    val size: Int,
+    val size: Long,
     val state: String,
     @JsonProperty("super_seeding")
     val superSeeding: Boolean,
@@ -69,13 +71,13 @@ data class TorrentsInfoResponse(
     @JsonProperty("time_active")
     val timeActive: Int,
     @JsonProperty("total_size")
-    val totalSize: Int,
+    val totalSize: Long,
     val tracker: String,
     @JsonProperty("upl_limit")
     val upLimit: Int,
-    val uploaded: Int,
+    val uploaded: Long,
     @JsonProperty("uploaded_session")
-    val uploadedSession: Int,
+    val uploadedSession: Long,
     @JsonProperty("upspeed")
     val upSpeed: Int
 ) {
@@ -92,21 +94,17 @@ data class TorrentsInfoResponse(
             // Matching qBittorrent: save_path is the download directory; content_path is the torrent folder.
             val baseContentPath = "$mountPath${torrent.savePath}"
             val contentPath = if (debugSuffix != null) "$baseContentPath$debugSuffix" else baseContentPath
-            // Temporary: report real byte totals so HolyArrs can be retested with
-            // torrents/info size matching torrents/files. Sonarr/Radarr may Stat the
-            // mount more aggressively with multi-GB sizes; revert or gate if needed.
-            val totalBytes = torrent.files
-                .sumOf { it.size ?: 0L }
-                .coerceIn(0L, Int.MAX_VALUE.toLong())
-                .toInt()
+            // Real byte totals (Long) so torrents/info matches torrents/files and
+            // multi-GB releases are not capped at Int.MAX_VALUE (~2.1 GiB).
+            val totalBytes = torrent.files.sumOf { fileSizeBytes(it) }
 
             return TorrentsInfoResponse(
                 addedOn = torrent.created!!.toEpochMilli().toInt(),
-                amountLeft = 0,
+                amountLeft = 0L,
                 autoTmm = false,
                 availability = 1.0.toFloat(),
                 category = torrent.category!!.name!!,
-                completed = 1,
+                completed = totalBytes,
                 completionOn = torrent.created!!.toEpochMilli().toInt(),
                 contentPath = contentPath,
                 dlLimit = 0,
@@ -143,10 +141,19 @@ data class TorrentsInfoResponse(
                 totalSize = totalBytes,
                 tracker = "",
                 upLimit = 0,
-                uploaded = 0,
-                uploadedSession = 0,
+                uploaded = 0L,
+                uploadedSession = 0L,
                 upSpeed = 0
             )
+        }
+
+        private fun fileSizeBytes(file: DbEntity): Long {
+            file.size?.takeIf { it > 0L }?.let { return it }
+            return when (file) {
+                is RemotelyCachedEntity ->
+                    file.contents?.size?.takeIf { it > 0L } ?: 0L
+                else -> 0L
+            }
         }
     }
 }

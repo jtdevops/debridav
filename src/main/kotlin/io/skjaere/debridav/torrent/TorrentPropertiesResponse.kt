@@ -1,6 +1,7 @@
 package io.skjaere.debridav.torrent
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import io.skjaere.debridav.fs.RemotelyCachedEntity
 
 data class TorrentPropertiesResponse(
     @JsonProperty("save_path")
@@ -11,15 +12,15 @@ data class TorrentPropertiesResponse(
     val pieceSize: Int,
     val comment: String,
     @JsonProperty("total_wasted")
-    val totalWasted: Int,
+    val totalWasted: Long,
     @JsonProperty("total_uploaded")
-    val totalUploaded: Int,
+    val totalUploaded: Long,
     @JsonProperty("total_uploaded_session")
-    val totalUploadedSession: Int,
+    val totalUploadedSession: Long,
     @JsonProperty("total_downloaded")
-    val totalDownloaded: Int,
+    val totalDownloaded: Long,
     @JsonProperty("total_downloaded_session")
-    val totalDownloadedSession: Int,
+    val totalDownloadedSession: Long,
     @JsonProperty("up_limit")
     val upLimit: Int,
     @JsonProperty("dl_limit")
@@ -59,7 +60,7 @@ data class TorrentPropertiesResponse(
     @JsonProperty("seeds_total")
     val seedsTotal: Int,
     @JsonProperty("total_size")
-    val totalSize: Int,
+    val totalSize: Long,
     @JsonProperty("up_speed_avg")
     val upSpeedAvg: Int,
     @JsonProperty("up_speed")
@@ -67,16 +68,21 @@ data class TorrentPropertiesResponse(
 ) {
     companion object {
         fun ofTorrent(torrent: Torrent): TorrentPropertiesResponse {
+            val totalBytes = torrent.files.sumOf { file ->
+                file.size?.takeIf { it > 0L }
+                    ?: (file as? RemotelyCachedEntity)?.contents?.size?.takeIf { it > 0L }
+                    ?: 0L
+            }
             return TorrentPropertiesResponse(
                 savePath = torrent.savePath!!,
                 creationDate = torrent.created!!.toEpochMilli().toInt(),
                 pieceSize = 1,
                 comment = "",
-                totalWasted = 1,
-                totalUploaded = 1,
-                totalUploadedSession = 1,
-                totalDownloaded = 1,
-                totalDownloadedSession = 1,
+                totalWasted = 0L,
+                totalUploaded = 0L,
+                totalUploadedSession = 0L,
+                totalDownloaded = totalBytes,
+                totalDownloadedSession = totalBytes,
                 upLimit = 0,
                 dlLimit = 0,
                 timeElapsed = 1,
@@ -98,7 +104,7 @@ data class TorrentPropertiesResponse(
                 reannounce = 1,
                 seeds = 1,
                 seedsTotal = 1,
-                totalSize = 1,
+                totalSize = totalBytes,
                 upSpeed = 1,
                 upSpeedAvg = 1
             )

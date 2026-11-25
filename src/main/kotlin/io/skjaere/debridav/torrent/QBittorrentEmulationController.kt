@@ -258,12 +258,18 @@ class QBittorrentEmulationController(
                         originalPath.startsWith("$torrentFolder\\") -> originalPath
                     else -> "$torrentFolder/$originalPath"
                 }
-                val sizeBytes = (torrentFile.size ?: 0L).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+                val sizeBytes = when {
+                    (torrentFile.size ?: 0L) > 0L -> torrentFile.size!!
+                    torrentFile is RemotelyCachedEntity ->
+                        torrentFile.contents?.size?.takeIf { it > 0L } ?: 0L
+                    else -> 0L
+                }
                 TorrentFilesResponse(
                     0,
                     nameRelativeToSave,
                     sizeBytes,
-                    100,
+                    // qBittorrent file progress is a 0..1 fraction (1.0 = 100%), not 0..100
+                    1.0f,
                     1,
                     true,
                     pieceRange = listOf(1, 100),
@@ -499,8 +505,8 @@ class QBittorrentEmulationController(
     data class TorrentFilesResponse(
         val index: Int,
         val name: String,
-        val size: Int,
-        val progress: Int,
+        val size: Long,
+        val progress: Float,
         val priority: Int,
         @JsonProperty("is_seed")
         val isSeed: Boolean,
